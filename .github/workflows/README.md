@@ -1,110 +1,96 @@
-# GitHub Actions — CI/CD (кратко)
+# GitHub Actions
 
-Документ описывает новую логику CI для проекта **Sing-Box Launcher**: три режима запуска, унифицированная генерация версий и поведение релизов.
+This fork builds **one product**: `JiejieBox` for Apple Silicon.
 
----
+```text
+source → quick checks → build once → JiejieBox.app (arm64) → acceptance → one ZIP
+```
 
-## 🔧 Политика CI — что и когда
+## Workflows
 
-- push в `main` / PR в `main` → **только тесты**
-- push тега `v*` → **build + release (stable)**. Тег нужно пушить **отдельно** от ветки (см. ниже).
-- ручной запуск `workflow_dispatch` → управляемо через `run_mode`:
-  - `tests` — только тесты
-  - `build` — сборка артефактов (без релиза)
-  - `prerelease` — сборка + создание prerelease (аннотированный тег + релиз)
+| File | Triggers | Purpose |
+|---|---|---|
+| `macos.yml` | push to `main`, PRs, `v*` tags, manual | The product workflow: checks, build, artifact, release |
+| `claude.yml` | `issues: [labeled]` only | Issue command bot (`if: label == 'claude'`). Never runs on push, PR or tag |
 
-Параметры: `run_mode` (обязательный выбор), `skip_tests` (boolean), `target` (строка, необязательно).
+There is deliberately no separate lint, contract, or platform workflow. The
+Windows/Linux/macOS matrix, the Universal and Catalina builds, the DMG step and
+a dedicated `Meta` runner were all removed — none of them helped build this
+client. The source still supports other platforms; only CI scope changed.
 
-**target** — какие сборки запускать (через пробел: `macOS`, `Win64`, `Win7`). Пусто = все три. `Win64` включает и установщик. Пример: `macOS Win64` — только macOS и Win64, без Win7.
+## `macos.yml`
 
----
+```text
+Check  (macos-latest)   ─┐
+                         ├─ run in parallel
+Build  (macos-latest)   ─┘
+                         │
+                         └─→ Release (ubuntu-latest), tags and prereleases only
+```
 
-## 🧩 Как генерируются версии
+`Check` and `Build` run in parallel, so wall-clock time is the slower of the
+two rather than their sum. `Build` finishes with a downloadable artifact, so a
+push to `main` produces a real client instead of only a test result.
 
-- На тегах `vX.Y.Z`:
-  - version = `vX.Y.Z`
-  - prerelease = `false`
-  - tag = `vX.Y.Z`
-- Ручной `prerelease`:
-  - version = `git describe --tags --always --exclude='*-prerelease'` + `-prerelease` (например `v0.8.0-16-gc185054-prerelease`)
-  - prerelease = `true`
-  - создаётся аннотированный тег с этим именем и пушится (фильтр в локальных сборках: `--exclude='*-prerelease'`)
-- Ручной `build` (без релиза):
-  - version = `dev.<branch-sanitized>.<sha7>` (без `v.`)
-  - prerelease = `false`
-  - тег не создаётся
+### What each job does
 
----
+**Check** — `build/test_darwin.sh`, `go vet`, the l10n and paths guards, and a
+`go mod tidy` cleanliness check. With `deep_checks=true` it additionally runs
+`golangci-lint`, contract-doc regeneration, registry tests and the race
+detector. Deep checks are off the normal path on purpose: they cost minutes,
+and an ordinary commit mostly needs a working ZIP.
 
-## 🚀 Job‑ы и артефакты
+**Build** — computes the version, runs `./build/package_macos.sh arm64` once,
+runs `build/check_macos_artifact.sh` as a release-blocking acceptance test, and
+uploads **one** artifact `jiejiebox-macos-arm64` containing
+`JiejieBox-<version>-macos-arm64.zip` and `checksums.txt`.
 
-- Test job: запускается по push в main, PR, или вручную (run_mode=tests).
-- Build job'ы (при теге `v*` или run_mode=build|prerelease):
-  - **build-darwin** — macOS (универсальный .app + Catalina Intel-only); запускается, если `target` пусто или содержит `macOS`.
-  - **build-windows** — Win64 (.exe); если `target` пусто или содержит `Win64`.
-  - **build-win7** — Win7 x86; если `target` пусто или содержит `Win7`.
-  - **build-windows-installer** — установщик Inno Setup `*-win64-setup.exe` (SPEC 140); после `build-windows`, то же условие (`Win64`). Набор готовит `build/installer/stage_win64_full.sh` (тот же, что у `win64-full.zip`, без `portable.txt`), `VersionInfoVersion` = `X.Y.Z.N` из `git describe --tags --long --match "v[0-9]*" --exclude "*-prerelease"` (не разобралось — job падает), ISCC (Inno Setup 6.4+, шаг проверяет версию) из образа `windows-latest`, запасной путь — `choco install innosetup`. Отдельный шаг компилирует вариант `/DDaemonService` на пустых заглушках.
-  На `macos-latest` два артефакта: универсальный и `*-macos-catalina.zip`.
-- Release job: запускается после успешного выполнения хотя бы одного build для тегов (stable) или при ручном `run_mode=prerelease`; подтягивает только артефакты тех сборок, что реально запускались. Установщик поднимается в корень релиза и попадает в `checksums.txt`; в `build` он только артефакт на 30 дней.
+**Release** — never compiles anything. It downloads the ZIP the build job
+produced, verifies it is a valid archive containing the executable, and
+attaches it unchanged. It runs on Ubuntu because the macOS-specific acceptance
+(codesign, lipo, otool) already happened in `Build`.
 
-Артефакты: `artifacts-darwin`, `artifacts-windows`, `artifacts-windows-installer`, `artifacts-macos-catalina`, `artifacts-windows-win7-32`.
+### Triggers
 
----
+| Event | Result |
+|---|---|
+| push to `main` | Check + Build → artifact |
+| pull request | Check + Build → artifact |
+| `v*` tag | Check + Build → artifact + GitHub Release |
+| manual, `deep_checks=true` | adds lint, contract docs, registry tests, race |
+| manual, `prerelease=true` | Check + Build → pre-release |
 
-## 🛡 Страж легаси-сборки Win7
+`paths-ignore` skips documentation-only pushes to the branch, but **never**
+applies to tags: a release tag must always build.
 
-Шаг **Win7 (go1.20) constructs guard** (`go run ./tools/win7guard`) стоит в двух джобах: в `test` (Ubuntu, то есть на каждом PR и при `run_mode=tests`) и в `build-win7` перед установкой MSYS2. Он красит джобу, если в коде, попадающем в Win7-сборку, появились конструкции Go 1.21+: импорт `slices`/`maps`, builtin `min`/`max`/`clear`, `range` по целому, `Request.PathValue`.
+## Conventions
 
-Набор файлов считается по build-тегам для `windows/386` с релизными тегами не выше `go1.20`, поэтому файлы за `//go:build darwin` и `//go:build go1.22` не проверяются — их в Win7-сборке нет. Разрешённые обходные пути: локальный хелпер (`ui/clash_api_tab_helpers.go`) или близнец за build-тегом (`core/debugapi/pathparam_legacy.go`). Запускается и локально из корня: `go run ./tools/win7guard`.
+- **The version needs no git history.** On a tag it is the tag name, otherwise
+  `dev-<short-sha>`. `CFBundleVersion` is the numeric `GITHUB_RUN_NUMBER`,
+  which is what macOS requires (digits and dots) and is monotonic. This is why
+  every checkout can use `fetch-depth: 1`.
+- **Go cache** is restored by `actions/setup-go`. Neither the workflow nor the
+  test script overrides `GOCACHE` in CI — doing so would throw away the
+  restored cache and rebuild everything from scratch.
+- **One `go build`** of the GUI per run.
+- `build/test_darwin.sh` skips its "compile test binaries for inspection"
+  phase under `GITHUB_ACTIONS=true`. Those `.test` files were rebuilt after a
+  full `go test` run (about 60 s per run), were never uploaded, and nobody
+  inspected them. Locally the phase still runs.
+- **One artifact.** No test binaries, no DMG, no `BUILD_INFO`, no universal or
+  Intel output.
+- `upload-artifact` uses `compression-level: 0` because the input is already a
+  ZIP.
+- **Concurrency**: a new push to the same ref cancels the previous run, so a
+  burst of commits does not occupy macOS runners in parallel.
 
----
+## Local equivalents
 
-## 🧪 Примеры команд (cli)
-
-### Стабильный релиз (тег)
-
-Чтобы запустилась сборка и создание Release, тег должен уйти отдельным push. **Нельзя** пушить ветку и теги одной командой (`git push origin main --tags`) — в этом случае GitHub может создать только событие по ветке, и пойдут лишь тесты.
-
-Правильная последовательность:
-
-1. `git push origin main`
-2. `git push origin vX.Y.Z`   (например `v0.8.4`)
-
-### Пререлиз и build
-
-- Пререлиз с тестами:
-  gh workflow run ci.yml --ref develop -f run_mode=prerelease -f skip_tests=false
-- Пререлиз без тестов:
-  gh workflow run ci.yml --ref develop -f run_mode=prerelease -f skip_tests=true
-- Ручной build:
-  gh workflow run ci.yml --ref develop -f run_mode=build -f skip_tests=true
-- Ручной build только Win7:
-  gh workflow run ci.yml --ref develop -f run_mode=build -f skip_tests=true -f target=Win7
-- Ручной build только macOS и Win64 (без Win7):
-  gh workflow run ci.yml --ref develop -f run_mode=build -f skip_tests=true -f "target=macOS Win64"
-- Тесты вручную:
-  gh workflow run ci.yml --ref develop -f run_mode=tests
-
-### 🔍 Запуск `golangci-lint`
-
-- Вручную (через `workflow_dispatch`):
-  gh workflow run golangci-lint.yml --ref develop
-- Автоматически при PR: workflow настроен на срабатывание при событиях `opened`, `reopened`, `synchronize` на pull request — ничего дополнительно делать не нужно.
-
-> Примечание: workflow выполняется по matrix (`ubuntu-24.04`, `macos-latest`, `windows-latest`) и использует Go 1.25; для локальной проверки можно запустить `golangci-lint` локально (`golangci-lint run`) после `go mod tidy`.
-
-### 🤖 Dependabot
-
-- Настройка: `.github/dependabot.yml` — обновления для `gomod` (еженедельно), лимит открытых PR — 10, метки `dependencies`, ревьювер `Leadaxe`.
-- Для ручного контроля: используйте веб-интерфейс GitHub → Security / Dependabot или создавайте PR с обновлением `go.mod` вручную.
-
----
-
-## ⚠️ Важные замечания
-
-- **Теги для stable-релиза:** не использовать `git push origin main --tags`. Пушить сначала `main`, затем отдельно тег (`git push origin vX.Y.Z`), иначе CI запустится только по ветке и build/release не выполнятся.
-- Для пуша тегов и создания релизов `GITHUB_TOKEN` должен иметь `contents: write` (в workflow уже выставлено).
-- Мы создаём аннотированные теги для prerelease для удобства отладки (`git tag -a`).
-- Проверка существования тега сейчас локальная; можно дополнительно `git fetch --tags` или `git ls-remote` для проверки remote.
-- `build` — это не `release`. Если хотите автоматизировать публикацию при `build`, измените правила в `meta/release`.
-
+```bash
+export GITHUB_ACTIONS=true
+bash build/test_darwin.sh                  # tests (skips the .test compilation)
+./build/package_macos.sh arm64             # dist/JiejieBox-*-macos-arm64.zip
+./build/package_macos.sh arm64 --install   # also install to /Applications
+./build/package_macos.sh --dmg             # opt-in: also build a .dmg (CI never does)
+./build/check_macos_artifact.sh dist/JiejieBox-*-macos-arm64.zip arm64
+```

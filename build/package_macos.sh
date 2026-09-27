@@ -13,7 +13,7 @@
 # нельзя — см. комментарий к constants.DataDirAppName.
 #
 # Использование:
-#   build/package_macos.sh [arm64|universal|catalina] [--install]
+#   build/package_macos.sh [arm64] [--install] [--dmg]
 #
 #   --install  дополнительно установить в /Applications (обновляет только
 #              исполняемый файл, если приложение уже стоит).
@@ -31,32 +31,43 @@ cleanup_tmp() {
     for d in $TMP_PATHS; do
         [ -n "$d" ] && rm -rf "$d"
     done
-    rm -f "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64" 2>/dev/null || true
+    rm -f "${BINARY_NAME}_arm64" 2>/dev/null || true
 }
 trap cleanup_tmp EXIT INT TERM
 
-BUILD_TYPE="arm64"
+# Продукт один: JiejieBox для Apple Silicon (SPEC 149). universal/catalina
+# удалены — Intel-срез не нужен ни CI, ни пользователю этой машины, а держать
+# его означало собирать вдвое больше на каждый прогон.
 DO_INSTALL=false
+MAKE_DMG=false
 for arg in "$@"; do
     case "$arg" in
-        arm64|universal|catalina) BUILD_TYPE="$arg" ;;
+        arm64) ;; # единственный профиль; принимаем для совместимости вызовов
         --install) DO_INSTALL=true ;;
+        --dmg) MAKE_DMG=true ;;
         -h|--help)
-            echo "Usage: $0 [arm64|universal|catalina] [--install]"
+            echo "Usage: $0 [arm64] [--install] [--dmg]"
+            echo ""
+            echo "  arm64       Apple Silicon build (the only supported profile)"
+            echo "  --install   also install to /Applications"
+            echo "  --dmg       additionally build a .dmg (off by default: CI never"
+            echo "              uses it, and probing hdiutil costs time for nothing)"
             exit 0
+            ;;
+        universal|catalina)
+            echo "ERROR: '$arg' builds are no longer supported; this fork ships arm64 only." >&2
+            echo "       Use: $0 arm64" >&2
+            exit 1
             ;;
         *) echo "ERROR: unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
+BUILD_TYPE="arm64"
 
 APP_NAME="JiejieBox"
 APP_BUNDLE_ID="com.piggycat.jiejiebox"
 BINARY_NAME="JiejieBox"
 MIN_MACOS_VERSION="11.0"
-# catalina — Intel-only сборка с минимальной macOS 10.15 (как в апстриме).
-if [ "$BUILD_TYPE" = "catalina" ]; then
-    MIN_MACOS_VERSION="10.15"
-fi
 DIST_DIR="dist"
 
 echo ""
@@ -86,33 +97,53 @@ if [ ! -f "$UTCORETYPES_H" ]; then
     exit 1
 fi
 
-# Версия приложения: собственная, чтобы её было видно в Finder и в UI,
-# и чтобы она не совпадала с версией апстрима (иначе не отличить сборки).
-VERSION="${APP_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}"
+# Версия приложения (SPEC 149).
+#
+# Раньше здесь стояли `git describe` и `git rev-list --count HEAD`, которым
+# нужна ВСЯ история — из-за этого CI клонировал репозиторий с fetch-depth: 0
+# на каждом прогоне. Теперь версию передаёт вызывающий:
+#
+#   APP_VERSION       — человекочитаемая строка (CI: dev-<shortsha> или тег)
+#   APP_BUILD_NUMBER  — числовая, монотонная (CI: GITHUB_RUN_NUMBER)
+#   TEMPLATE_REF      — коммит для RequiredTemplateRef
+#
+# Локальный запуск без переменных по-прежнему работает: короткий sha берётся
+# из git (для него хватает одного коммита), а номер сборки — из времени.
+if [ -n "${APP_VERSION:-}" ]; then
+    VERSION="$APP_VERSION"
+else
+    SHORT_SHA="$(git rev-parse --short=7 HEAD 2>/dev/null || echo "local")"
+    VERSION="dev-${SHORT_SHA}"
+fi
 VERSION="${VERSION}-jiejiebox"
 
-# Санитайзинг версии для имени файла: git describe может вернуть имя тега
-# со слэшем (`archive/macos-...`), и тогда «архив» превращается в каталог
-# dist/archive/ с zip внутри — CI ждёт файл и не находит его. Слэши, пробелы
-# и всё, что не буква/цифра/точка/дефис/подчёркивание, заменяем на дефис.
+# Санитайзинг версии для имени файла: имя тега может содержать слэш
+# (`archive/macos-...`), и тогда «архив» превращается в каталог dist/archive/
+# с zip внутри — CI ждёт файл и не находит его. Слэши, пробелы и всё, что не
+# буква/цифра/точка/дефис/подчёркивание, заменяем на дефис.
 FILE_VERSION="$(printf '%s' "$VERSION" | sed -E 's|[/ ]+|-|g; s/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
 if [ -z "$FILE_VERSION" ]; then
     FILE_VERSION="dev"
 fi
-TEMPLATE_REF=$(git rev-parse HEAD)
+TEMPLATE_REF="${TEMPLATE_REF:-$(git rev-parse HEAD 2>/dev/null || echo "")}"
 
 # CFBundleVersion по требованиям macOS — числовая строка (цифры и точки),
-# монотонная между сборками. git describe даёт вид
-# `v2.3.2-18-g05aeed5f-dirty-jiejiebox`, где буквы и дефисы недопустимы,
-# поэтому для CFBundleVersion берём отдельное числовое значение: база
-# X.Y.Z (если её видно) и счётчик коммитов. CFBundleShortVersionString
-# остаётся человекочитаемым и может содержать суффиксы.
-BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+# монотонная между сборками. CFBundleShortVersionString остаётся
+# человекочитаемым и может содержать буквы и дефисы.
+if [ -n "${APP_BUILD_NUMBER:-}" ]; then
+    BUILD_NUMBER="$APP_BUILD_NUMBER"
+else
+    # Локально: секунды эпохи — монотонно и не требует истории git.
+    BUILD_NUMBER="$(date +%s)"
+fi
+case "$BUILD_NUMBER" in
+    ''|*[!0-9]*) echo "ERROR: APP_BUILD_NUMBER must be numeric, got '$BUILD_NUMBER'" >&2; exit 1 ;;
+esac
+# База X.Y.Z из версии, если она там есть (тег v1.2.3 → 1.2.3).
 BASE_SEMVER="$(printf '%s' "$VERSION" | sed -nE 's/^v?([0-9]+(\.[0-9]+)*).*/\1/p')"
 if [ -z "$BASE_SEMVER" ]; then
     BASE_SEMVER="0.0.0"
 fi
-# Нормализуем до трёх компонентов, чтобы значение было стабильного вида.
 BASE_SEMVER="$(printf '%s' "$BASE_SEMVER" | awk -F. '{printf "%d.%d.%d", $1, ($2==""?0:$2), ($3==""?0:$3)}')"
 CF_BUNDLE_VERSION="${BASE_SEMVER}.${BUILD_NUMBER}"
 echo "Version:      $VERSION"
@@ -137,23 +168,13 @@ LDFLAGS="$LDFLAGS -X singbox-launcher/internal/constants.RequiredTemplateRef=$TE
 LDFLAGS="$LDFLAGS -linkmode=external -extldflags=-mmacosx-version-min=$MIN_MACOS_VERSION"
 
 rm -rf "$APP_NAME.app"
-# Do NOT wipe dist/ wholesale: CI runs the universal and catalina builds in the
-# same workspace, and the second run would delete the first run's bundle.
-# Remove only this run's own outputs.
+# Do NOT wipe dist/ wholesale: only this run's own outputs are removed, so a
+# caller that builds twice keeps both results.
 mkdir -p "$DIST_DIR"
 
 echo ""
 echo "=== Building ${BUILD_TYPE} ==="
-if [ "$BUILD_TYPE" = "universal" ]; then
-    GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "${BINARY_NAME}_arm64"
-    GOARCH=amd64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "${BINARY_NAME}_amd64"
-    lipo -create -output "$BINARY_NAME" "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
-    rm -f "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
-elif [ "$BUILD_TYPE" = "catalina" ]; then
-    GOARCH=amd64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "$BINARY_NAME"
-else
-    GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "$BINARY_NAME"
-fi
+GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 file "$BINARY_NAME"
 
 echo ""
@@ -195,16 +216,8 @@ fi
     echo "    <string>$CF_BUNDLE_VERSION</string>"
     echo '    <key>LSMinimumSystemVersion</key>'
     echo "    <string>$MIN_MACOS_VERSION</string>"
-    if [ "$BUILD_TYPE" = "universal" ]; then
-        echo '    <key>LSArchitecturePriority</key>'
-        echo '    <array><string>arm64</string><string>x86_64</string></array>'
-    elif [ "$BUILD_TYPE" = "catalina" ]; then
-        echo '    <key>LSArchitecturePriority</key>'
-        echo '    <array><string>x86_64</string></array>'
-    else
-        echo '    <key>LSArchitecturePriority</key>'
-        echo '    <array><string>arm64</string></array>'
-    fi
+    echo '    <key>LSArchitecturePriority</key>'
+    echo '    <array><string>arm64</string></array>'
     echo '    <key>NSHighResolutionCapable</key>'
     echo '    <true/>'
     echo '    <key>LSUIElement</key>'
@@ -233,32 +246,34 @@ ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$DIST_DIR/$ZIP_NAME"
 
 # dmg с ярлыком Applications — обычная drag&drop установка.
 #
-# hdiutil/diskutil требуют прав на создание образов; в ограниченных средах
-# сборки обе операции запрещены ("операция не разрешена"). Это не ошибка
-# упаковки приложения: zip уже собран и полностью годится для установки,
-# поэтому dmg здесь — необязательное дополнение, и его отсутствие не
-# считается провалом сборки.
-PROBE_DIR="$(mktemp -d)"
-register_tmp "$PROBE_DIR"
-if hdiutil create -size 1m -fs HFS+ -volname Probe "$PROBE_DIR/probe.dmg" >/dev/null 2>&1; then
-    STAGE="$(mktemp -d)"
-    DMG_TMP="$(mktemp -d)"
-    register_tmp "$STAGE"
-    register_tmp "$DMG_TMP"
-    cp -R "$APP_NAME.app" "$STAGE/"
-    ln -s /Applications "$STAGE/Applications"
-    if hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG_TMP/$DMG_NAME" >/dev/null 2>&1; then
-        mv "$DMG_TMP/$DMG_NAME" "$DIST_DIR/$DMG_NAME"
-        echo "Created: $DMG_NAME"
+# DMG — только по явному --dmg (SPEC 149).
+#
+# Раньше образ собирался всегда, а CI следом делал `rm -f dist/*.dmg`:
+# он заведомо не нужен, но время на пробу hdiutil и сжатие уже тратилось.
+# Теперь по умолчанию только ZIP — то, что уезжает пользователю.
+if [ "$MAKE_DMG" = true ]; then
+    PROBE_DIR="$(mktemp -d)"
+    register_tmp "$PROBE_DIR"
+    if hdiutil create -size 1m -fs HFS+ -volname Probe "$PROBE_DIR/probe.dmg" >/dev/null 2>&1; then
+        STAGE="$(mktemp -d)"
+        DMG_TMP="$(mktemp -d)"
+        register_tmp "$STAGE"
+        register_tmp "$DMG_TMP"
+        cp -R "$APP_NAME.app" "$STAGE/"
+        ln -s /Applications "$STAGE/Applications"
+        if hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG_TMP/$DMG_NAME" >/dev/null 2>&1; then
+            mv "$DMG_TMP/$DMG_NAME" "$DIST_DIR/$DMG_NAME"
+            echo "Created: $DMG_NAME"
+        else
+            echo "NOTE: hdiutil could not build the .dmg in this environment; the .zip is the deliverable."
+            DMG_NAME=""
+        fi
+        rm -rf "$STAGE" "$DMG_TMP"
     else
-        echo "NOTE: hdiutil could not build the .dmg in this environment; the .zip is the deliverable."
+        echo "NOTE: disk-image creation is not permitted in this environment."
         DMG_NAME=""
     fi
-    rm -rf "$STAGE" "$DMG_TMP"
 else
-    echo "NOTE: disk-image creation is not permitted in this environment."
-    echo "      The .zip is the installable deliverable; run this script on a normal"
-    echo "      macOS session to also produce the .dmg."
     DMG_NAME=""
 fi
 

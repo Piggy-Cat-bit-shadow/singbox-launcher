@@ -4,12 +4,35 @@
 
 set -e
 
-# Check for nopause/silent parameter
+# Флаги (SPEC 149).
+#
+#   nopause | silent        — не ждать Enter (историческое имя; CI зовёт его)
+#   --no-compile-artifacts  — не пересобирать тестовые бинарники для ручного
+#                             осмотра (в CI они не нужны: не уезжают ни в
+#                             artifact, ни в release, ни в acceptance)
+#   --quiet                 — без -v
+#
+# В GitHub Actions --no-compile-artifacts и --quiet включаются сами: сборка
+# «на посмотреть» стоила ~61 с на прогон (06:00:57 → 06:01:58 в run
+# 36298741246) и её результат никто не открывал.
 NO_PAUSE=0
-if [ "$1" = "nopause" ] || [ "$1" = "silent" ]; then
+COMPILE_ARTIFACTS=1
+VERBOSE=1
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     NO_PAUSE=1
-    shift
+    COMPILE_ARTIFACTS=0
+    VERBOSE=0
 fi
+while [ $# -gt 0 ]; do
+    case "$1" in
+        nopause|silent) NO_PAUSE=1; shift ;;
+        --no-compile-artifacts) COMPILE_ARTIFACTS=0; shift ;;
+        --compile-artifacts) COMPILE_ARTIFACTS=1; shift ;;
+        --quiet) VERBOSE=0; shift ;;
+        --verbose) VERBOSE=1; shift ;;
+        *) break ;;
+    esac
+done
 
 cd "$(dirname "$0")/.."
 
@@ -59,9 +82,17 @@ echo "=== Setting environment ==="
 export CGO_ENABLED=1
 export GOOS=darwin
 
-# Set temporary directory for Go in project folder
+# GOTMPDIR держим в проекте: он только про временные файлы сборки и ни на что
+# не влияет.
 export GOTMPDIR="$(pwd)/$TEST_OUTPUT_DIR/tmp"
-export GOCACHE="$(pwd)/$TEST_OUTPUT_DIR/cache"
+
+# GOCACHE в CI НЕ трогаем (SPEC 149). actions/setup-go восстанавливает
+# ~/Library/Caches/go-build; подмена его на temp/darwin/cache выбрасывала этот
+# кэш и заставляла пересобирать всё с нуля на каждом прогоне. Локально
+# по-прежнему изолируем кэш в проекте, чтобы не мусорить в личном.
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    export GOCACHE="$(pwd)/$TEST_OUTPUT_DIR/cache"
+fi
 
 # Check for C compiler for CGO
 if [ "$CGO_ENABLED" = "1" ]; then
@@ -85,12 +116,16 @@ fi
 
 # Parse test parameters
 TEST_PACKAGE="./..."
-TEST_FLAGS="-v"
+if [ "$VERBOSE" -eq 1 ]; then
+    TEST_FLAGS="-v"
+else
+    TEST_FLAGS=""
+fi
 TEST_RUN=""
 
 # Check for 'short' mode
 if [ "$1" = "short" ]; then
-    TEST_FLAGS="-v -short"
+    if [ "$VERBOSE" -eq 1 ]; then TEST_FLAGS="-v -short"; else TEST_FLAGS="-short"; fi
     shift
     if [ -n "$1" ]; then
         TEST_PACKAGE="$1"
@@ -108,7 +143,7 @@ if [ "$1" = "run" ]; then
         fi
         exit 1
     fi
-    TEST_FLAGS="-v -run $2"
+    if [ "$VERBOSE" -eq 1 ]; then TEST_FLAGS="-v -run $2"; else TEST_FLAGS="-run $2"; fi
     shift 2
     if [ -n "$1" ]; then
         TEST_PACKAGE="$1"
@@ -173,7 +208,14 @@ echo "Test finished at: $(date)"
 echo "Full test log: $TEST_LOG"
 echo "========================================"
 
-# After tests compile binaries for inspection
+# Пересборка тестовых бинарников «на посмотреть» — ТОЛЬКО локально (SPEC 149).
+#
+# В CI этот блок стоил ~61 с на каждый прогон: `go test` уже собрал и прогнал
+# всё, а `go test -c` для каждого пакета собирал то же самое ВТОРОЙ раз.
+# Полученные temp/darwin/*.test не уезжают ни в artifact, ни в release, ни в
+# acceptance, и их никто не открывает. Включается флагом
+# --compile-artifacts, если разработчик правда хочет их получить.
+if [ "$COMPILE_ARTIFACTS" -eq 1 ]; then
 echo ""
 echo "=== Compiling test binaries for inspection ==="
 go list $TEST_PACKAGE 2>/dev/null | grep -v '/ui/' | grep -v 'fyne.io' | while read -r pkg; do
@@ -191,6 +233,12 @@ go list $TEST_PACKAGE 2>/dev/null | grep -v '/ui/' | grep -v 'fyne.io' | while r
     fi
 done
 echo ""
+echo "Test binaries saved to: $TEST_OUTPUT_DIR"
+echo "You can inspect them manually before next run."
+else
+echo ""
+echo "=== Skipping test-binary compilation (not needed here) ==="
+fi
 
 echo ""
 echo "========================================"

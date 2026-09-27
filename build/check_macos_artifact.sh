@@ -11,7 +11,7 @@
 # молча; чтобы её добавить, надо осознанно расширить список ниже.
 #
 # Использование:
-#   build/check_macos_artifact.sh <path-to.zip> [universal|catalina]
+#   build/check_macos_artifact.sh <path-to.zip> [arm64]
 #
 # Код возврата: 0 — приёмка пройдена, 1 — нет.
 
@@ -21,7 +21,7 @@ ZIP="${1:-}"
 EXPECTED_ARCH="${2:-}"
 
 if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-    echo "usage: $0 <path-to.zip> [arm64|universal|catalina]" >&2
+    echo "usage: $0 <path-to.zip> [arm64]" >&2
     exit 1
 fi
 

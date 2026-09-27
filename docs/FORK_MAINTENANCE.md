@@ -90,8 +90,10 @@ export GITHUB_ACTIONS=true        # skips 'go mod tidy'
 ./build/package_macos.sh arm64 --install   # also install to /Applications
 ```
 
-The script still supports `universal` and `catalina` for manual debugging, but
-CI never calls them and no Intel artifact is published.
+The script accepts only `arm64`; `universal` and `catalina` now fail with an
+explicit error rather than silently producing an Intel build this fork does not
+ship. `--dmg` is opt-in: CI builds ZIP only, because it used to spend time
+creating a DMG and then delete it unread.
 
 Verify a package before trusting it:
 

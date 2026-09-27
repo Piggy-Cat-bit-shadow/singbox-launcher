@@ -1,0 +1,319 @@
+name: macOS
+
+# Единственный продуктовый workflow этого форка (SPEC 149).
+#
+# Задача: из исходников получить ровно один клиент — JiejieBox для Apple
+# Silicon — и отдать его одним ZIP. Всё, что не помогает собрать, проверить
+# или опубликовать этот клиент, убрано отсюда: отдельные workflow Contract и
+# golangci-lint удалены (их содержимое переехало в deep_checks), Meta больше
+# не занимает macOS-раннер ради пары строк, universal/catalina/amd64 и DMG
+# не собираются.
+#
+# Сценарии:
+#
+#   push в main            → fast-check + сборка arm64 + artifact
+#   pull_request           → fast-check + сборка arm64 + artifact
+#   workflow_dispatch      → то же; deep_checks=true добавляет дорогие проверки
+#   tag v*                 → проверки + сборка + GitHub Release
+#   dispatch prerelease=true → сборка + pre-release
+#
+# Глубокие проверки (deep_checks) намеренно НЕ на каждом push: линтер и
+# регенерация контракта стоят минуты, а обычному коммиту нужен готовый ZIP.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    # Документация не влияет на бинарник, но тег обязан собираться всегда —
+    # paths-ignore действует только на push в ветку.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
+      - ".gitignore"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deep_checks:
+        description: "Run expensive validation (lint, contract docs, verbose tests)"
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: "Publish a GitHub prerelease"
+        type: boolean
+        required: false
+        default: false
+
+# Один прогон на ветку: при серии быстрых push старый macOS-раннер
+# отменяется, а не дорабатывает вхолостую.
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+# По умолчанию только чтение; job release повышает себе права сам.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # fast-check — быстрая проверка исходников. Идёт ПАРАЛЛЕЛЬНО со сборкой,
+  # поэтому общее время определяется более долгим из двух, а не суммой.
+  # ---------------------------------------------------------------------------
+  fast-check:
+    name: Check
+    runs-on: macos-latest
+    steps:
+      # fetch-depth: 1 достаточно: версия и RequiredTemplateRef приходят из
+      # переменных окружения (см. вычисление ниже), а не из истории git.
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Ядро отдаёт CGO-часть (Fyne), поэтому компилятор нужен явно.
+      - name: Verify C compiler
+        shell: bash
+        run: clang --version
+
+      # Один прогон тестов. test_darwin.sh в CI сам отключает пересборку
+      # тестовых бинарников «на посмотреть» (это стоило ~60 с и никому не
+      # нужно) и НЕ подменяет GOCACHE, чтобы setup-go мог восстановить кэш.
+      - name: Run tests
+        env:
+          CGO_ENABLED: 1
+        shell: bash
+        run: bash build/test_darwin.sh
+
+      - name: go vet
+        shell: bash
+        run: go vet ./core/... ./api/... ./internal/... ./ui/...
+
+      - name: L10n and paths checks
+        shell: bash
+        run: |
+          go run ./tools/l10n/l10n_check --strict
+          go run ./tools/l10n/hardcoded_check --strict
+          go run ./tools/paths_guard --strict
+
+      - name: Check go mod tidy is clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod tidy
+          if ! git diff --exit-code --quiet go.mod go.sum; then
+            echo "::error::go.mod / go.sum are not tidy — run 'go mod tidy' and commit"
+            git diff --stat go.mod go.sum
+            exit 1
+          fi
+          echo "go.mod and go.sum are tidy"
+
+      # -----------------------------------------------------------------------
+      # Дорогие проверки — только по явному запросу.
+      # -----------------------------------------------------------------------
+
+      - name: golangci-lint (deep)
+        if: inputs.deep_checks
+        uses: golangci/golangci-lint-action@v8
+        with:
+          # Pinned: 'latest' silently turns new linter releases into red CI on
+          # untouched code.
+          version: v2.12.2
+        env:
+          CGO_ENABLED: "1"
+
+      - name: Contract docs are in sync (deep)
+        if: inputs.deep_checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          go generate ./contract/...
+          if ! git diff --exit-code contract/docs/generated; then
+            echo "::error::contract/docs/generated is stale — run 'go generate ./contract/...' and commit"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain contract/docs/generated)" ]; then
+            echo "::error::the generator created or removed a page that is not committed:"
+            git status --porcelain contract/docs/generated
+            exit 1
+          fi
+
+      - name: Registry tests (deep)
+        if: inputs.deep_checks
+        shell: bash
+        run: go test ./core/config/ -run 'Registry' -count=1
+
+      - name: Race detector (deep)
+        if: inputs.deep_checks
+        env:
+          CGO_ENABLED: 1
+        shell: bash
+        run: go test -race ./core/... ./api/... ./internal/platform/... ./core/services/... -count=1
+
+  # ---------------------------------------------------------------------------
+  # build-macos — собирает ЕДИНСТВЕННЫЙ клиент и отдаёт один ZIP.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: Build
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Версия больше не требует полной истории: на теге берём имя тега, иначе
+      # dev-<короткий sha>; CFBundleVersion — номер прогона (числовой и
+      # монотонный, как требует macOS).
+      - name: Compute version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ inputs.prerelease }}" == "true" ]]; then
+            echo "version=prerelease-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build JiejieBox (arm64)
+        shell: bash
+        env:
+          CGO_ENABLED: 1
+          APP_VERSION: ${{ steps.v.outputs.version }}
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+          TEMPLATE_REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ./build/package_macos.sh arm64
+          mkdir -p release
+          cp dist/JiejieBox-*-macos-arm64.zip \
+             "release/JiejieBox-${{ steps.v.outputs.version }}-macos-arm64.zip"
+          ls -lh release/
+
+      # Приёмка ДО публикации: подпись, разрядность, allowlist содержимого
+      # бандла, отсутствие конфигов/секретов/путей сборочной машины.
+      - name: Artifact acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/check_macos_artifact.sh \
+            "release/JiejieBox-${{ steps.v.outputs.version }}-macos-arm64.zip" arm64
+
+      - name: Write checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          shasum -a 256 ./*.zip > checksums.txt
+          cat checksums.txt
+
+      # compression-level: 0 — файл уже ZIP, повторное сжатие только жгло бы
+      # CPU. Параметр проверен по action.yml upload-artifact@v6.
+      - name: Upload JiejieBox
+        uses: actions/upload-artifact@v6
+        with:
+          name: jiejiebox-macos-arm64
+          path: |
+            release/JiejieBox-${{ steps.v.outputs.version }}-macos-arm64.zip
+            release/checksums.txt
+          if-no-files-found: error
+          compression-level: 0
+          # Тег живёт в Release, поэтому artifact для него не нужно хранить
+          # долго; dev-сборки — неделя.
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 7 }}
+
+  # ---------------------------------------------------------------------------
+  # release — только публикация. Ничего не пересобирает: скачивает готовый
+  # ZIP, проверяет и прикладывает как есть. Ubuntu-раннер: macOS-специфичная
+  # приёмка уже прошла в build-macos, здесь только файлы и SHA256.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Release
+    needs: [fast-check, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.prerelease)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download the built ZIP
+        uses: actions/download-artifact@v6
+        with:
+          name: jiejiebox-macos-arm64
+          path: release
+
+      - name: Verify the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          count=$(ls -1 JiejieBox-*-macos-arm64.zip 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$count" -ne 1 ]; then
+            echo "::error::expected exactly one arm64 ZIP, found $count"
+            ls -la
+            exit 1
+          fi
+          zip=$(ls -1 JiejieBox-*-macos-arm64.zip)
+          unzip -t "$zip" >/dev/null || { echo "::error::$zip is not a valid archive"; exit 1; }
+          unzip -l "$zip" | grep -q 'JiejieBox.app/Contents/MacOS/JiejieBox' \
+            || { echo "::error::$zip does not contain the JiejieBox executable"; exit 1; }
+          shasum -a 256 "$zip" | tee checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'prerelease' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          fail_on_unmatched_files: true
+          files: |
+            release/JiejieBox-*-macos-arm64.zip
+            release/checksums.txt
+          body: |
+            ## JiejieBox ${{ github.ref_name }}
+
+            Apple Silicon (arm64) build. **This fork ships Apple Silicon (arm64)
+            only. Intel Macs are not supported by fork artifacts.**
+
+            ### Install
+
+            1. Download `JiejieBox-*-macos-arm64.zip`
+            2. Extract it and move `JiejieBox.app` to `/Applications`
+            3. Double-click `JiejieBox.app`
+
+            The build is ad-hoc signed and not notarized. If macOS blocks it, use
+            **System Settings -> Privacy & Security -> Open Anyway**; do not
+            disable Gatekeeper. JiejieBox installs beside the original Singbox
+            Launcher (its own bundle id) and reuses the same data directory, so
+            your config and custom core are kept.
+
+            ### Checksums
+
+            See `checksums.txt`.
