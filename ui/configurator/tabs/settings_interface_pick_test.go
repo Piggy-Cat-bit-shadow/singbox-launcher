@@ -287,13 +287,28 @@ func TestInterfacePickSingleFlightPerMachine(t *testing.T) {
 	resetInterfaceCacheForTest(t)
 	var calls int32
 	release := make(chan struct{})
+	finished := make(chan struct{})
 	SetRemoteInterfaceProvider(func(string) ([]RemoteRawIface, bool) {
 		atomic.AddInt32(&calls, 1)
 		<-release
+		close(finished)
 		return []RemoteRawIface{{Name: "wan", Up: true, Addrs: []string{"10.0.0.1/24"}}}, true
 	})
+	// Провайдер отпускается ровно один раз, и тест ДОЖИДАЕТСЯ его возврата.
+	//
+	// Раньше в defer стоял только close(release), а ждать завершения горутины
+	// было некому: заблокированная на <-release горутина переживала тест, а
+	// запись «запрос в полёте» оставалась в пакетном кэше. Следующий тест
+	// пакета (TestInterfacePickWakesSubscriberOnFailure) получал pending там,
+	// где ожидал уже снятый, и падал примерно в одном прогоне из тридцати.
+	// Это дефект изоляции тестов, а не single-flight.
 	defer func() {
-		close(release)
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		<-finished
 		SetRemoteInterfaceProvider(nil)
 	}()
 
@@ -304,13 +319,17 @@ func TestInterfacePickSingleFlightPerMachine(t *testing.T) {
 		interfacePickOptions(m, "")
 	}
 	// Даём заведённой горутине дойти до провайдера.
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && atomic.LoadInt32(&calls) == 0 {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("запросов к машине = %d, ожидался ровно один", got)
 	}
+	// Отпускаем провайдера прямо здесь и дожидаемся ответа: кэш обязан выйти
+	// из состояния «в полёте» ещё до того, как тест закончится.
+	close(release)
+	<-finished
 }
 
 // SPEC 113-E (M6): провал запроса — такой же ответ на вопрос «что показывать»,
