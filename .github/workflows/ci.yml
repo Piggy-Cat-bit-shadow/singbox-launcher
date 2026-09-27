@@ -11,8 +11,12 @@ name: CI/CD (macOS only)
 # Jobs:
 #   Meta        version/channel computation
 #   Test macOS  go mod download + build/test_darwin.sh
-#   Build macOS Universal .app + Catalina (Intel-only) .app, uploaded as artifacts
-#   Release     macOS packages only, when a tag is pushed or run_mode=prerelease
+#   Build macOS arm64 .app, uploaded as the jiejiebox-macos-arm64 artifact
+#   Release     the arm64 ZIP only, when a tag is pushed or run_mode=prerelease
+#
+# This fork ships Apple Silicon (arm64) only. Intel Macs are not supported by
+# fork artifacts; universal and catalina builds were removed because they
+# doubled CI time and download size for a machine that cannot use them.
 #
 # Scenarios:
 #
@@ -224,62 +228,39 @@ jobs:
       # This fork ships as JiejieBox (own name + bundle id) so it can sit
       # beside the upstream app. build/package_macos.sh applies that identity;
       # the upstream build_darwin.sh would produce upstream-branded bundles.
-      - name: Build JiejieBox .app bundle (Universal)
+      # Apple Silicon only. This fork runs on one arm64 Mac, so Intel
+      # (universal / catalina) artifacts are not produced at all: they doubled
+      # build time and doubled the download for nobody. The packaging script
+      # keeps its universal/catalina modes for manual debugging.
+      - name: Build JiejieBox .app bundle (arm64)
         shell: bash
         env:
           CGO_ENABLED: 1
           GOOS: darwin
           APP_VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          ./build/package_macos.sh universal
-          # The ditto-produced ZIP is the deliverable: it carries the bundle
-          # seal. A raw .app does NOT survive the Actions artifact round-trip —
-          # _CodeSignature is dropped and the bundle arrives unsigned — so the
-          # archive is what we ship and what the release job attaches.
+          ./build/package_macos.sh arm64
           mkdir -p release
-          cp dist/JiejieBox-*-macos-universal.zip release/JiejieBox-${VERSION}-macos-universal.zip
-          # Keep the unpacked bundle only for the hygiene check below.
+          cp dist/JiejieBox-*-macos-arm64.zip "release/JiejieBox-${VERSION}-macos-arm64.zip"
           rm -f dist/*.dmg dist/BUILD_INFO.txt
 
-      - name: Build macOS .app bundle (Catalina target, Intel-only)
-        shell: bash
-        env:
-          CGO_ENABLED: 1
-          GOOS: darwin
-          APP_VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          ./build/package_macos.sh catalina
-          mkdir -p release
-          cp dist/JiejieBox-*-macos-catalina.zip release/JiejieBox-${VERSION}-macos-catalina.zip
-          rm -f dist/*.dmg dist/BUILD_INFO.txt
-
-      # Release-blocking acceptance test on the archives we are about to
+      # Release-blocking acceptance test on the archive we are about to
       # publish: allowlist of bundle contents, executable bit, signature,
-      # architectures, numeric CFBundleVersion and no dev/config leftovers.
-      - name: Verify macOS artifacts (acceptance)
+      # arm64-only architecture, numeric CFBundleVersion, no dev/config
+      # leftovers and no x86_64 slice.
+      - name: Verify macOS artifact (acceptance)
         shell: bash
         run: |
           set -euo pipefail
-          for z in release/JiejieBox-*-macos-universal.zip; do
-            ./build/check_macos_artifact.sh "$z" universal
-          done
-          for z in release/JiejieBox-*-macos-catalina.zip; do
-            ./build/check_macos_artifact.sh "$z" catalina
+          for z in release/JiejieBox-*-macos-arm64.zip; do
+            ./build/check_macos_artifact.sh "$z" arm64
           done
 
-      - name: Upload Catalina package
+      - name: Upload arm64 package
         uses: actions/upload-artifact@v6
         with:
-          name: jiejiebox-macos-catalina
-          path: release/JiejieBox-*-macos-catalina.zip
-          if-no-files-found: error
-          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
-
-      - name: Upload Universal package
-        uses: actions/upload-artifact@v6
-        with:
-          name: jiejiebox-macos-universal
-          path: release/JiejieBox-*-macos-universal.zip
+          name: jiejiebox-macos-arm64
+          path: release/JiejieBox-*-macos-arm64.zip
           if-no-files-found: error
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
 
@@ -333,41 +314,34 @@ jobs:
       # The release job does NOT rebuild or repackage anything. It verifies
       # the ZIPs the build job produced and attaches them unchanged, so the
       # signed bundle and its permissions reach the user exactly as built.
-      - name: Verify release packages
+      # The release job does NOT rebuild or repackage anything. It verifies
+      # the arm64 ZIP the build job produced and attaches it unchanged, so the
+      # signed bundle and its permissions reach the user exactly as built.
+      - name: Verify release package
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ needs.meta.outputs.version }}"
           mkdir -p release
-          found=$(find release-artifacts -name 'JiejieBox-*-macos-*.zip' -type f | wc -l | tr -d ' ')
-          if [ "$found" -eq 0 ]; then
-            echo "::error::no macOS ZIP artifact found"
+          found=$(find release-artifacts -name 'JiejieBox-*-macos-arm64.zip' -type f | wc -l | tr -d ' ')
+          if [ "$found" -ne 1 ]; then
+            echo "::error::expected exactly one arm64 ZIP artifact, found $found"
+            find release-artifacts -type f || true
             exit 1
           fi
-          # Normalise names so users always see the same scheme.
-          i=0
-          while IFS= read -r f; do
-            base="$(basename "$f")"
-            case "$base" in
-              *-universal.zip) cp "$f" "release/JiejieBox-${VERSION}-macos-universal.zip" ;;
-              *-catalina.zip)  cp "$f" "release/JiejieBox-${VERSION}-macos-catalina.zip" ;;
-              *) echo "::warning::unexpected artifact name: $base" ;;
-            esac
-            i=$((i + 1))
-          done < <(find release-artifacts -name 'JiejieBox-*-macos-*.zip' -type f)
+          src="$(find release-artifacts -name 'JiejieBox-*-macos-arm64.zip' -type f)"
+          cp "$src" "release/JiejieBox-${VERSION}-macos-arm64.zip"
 
-          echo "=== Verifying archives ==="
+          echo "=== Verifying archive ==="
           ls -lh release/
-          for z in release/*.zip; do
-            echo "--- $z"
-            unzip -t "$z" >/dev/null || { echo "::error::$z is not a valid archive"; exit 1; }
-            if ! unzip -l "$z" | grep -q 'JiejieBox.app/Contents/MacOS/JiejieBox'; then
-              echo "::error::$z does not contain the JijieBox executable"
-              exit 1
-            fi
-          done
+          z="release/JiejieBox-${VERSION}-macos-arm64.zip"
+          unzip -t "$z" >/dev/null || { echo "::error::$z is not a valid archive"; exit 1; }
+          if ! unzip -l "$z" | grep -q 'JiejieBox.app/Contents/MacOS/JiejieBox'; then
+            echo "::error::$z does not contain the JiejieBox executable"
+            exit 1
+          fi
 
-          echo "=== Checksums ==="
+          echo "=== Checksum ==="
           ( cd release && shasum -a 256 ./*.zip > checksums.txt && cat checksums.txt )
 
       - name: Read release notes
@@ -443,23 +417,19 @@ jobs:
 
             ### Downloads
 
-            #### macOS (Universal) - Supports both Apple Silicon and Intel
+            #### macOS (Apple Silicon / arm64)
 
             **Installation**
 
-            1. Download: `JiejieBox-${{ needs.meta.outputs.version }}-macos-universal.zip`
+            1. Download: `JiejieBox-${{ needs.meta.outputs.version }}-macos-arm64.zip`
             2. Extract the ZIP file
             3. Move `JiejieBox.app` to `/Applications`
             4. Double-click `JiejieBox.app` to run
                - The build is ad-hoc signed and not notarized. If macOS blocks it, use **System Settings -> Privacy & Security -> Open Anyway**; do not disable Gatekeeper.
                - JiejieBox installs beside the original Singbox Launcher (its own bundle id) and reuses the same data directory, so existing config and the custom core are kept.
 
-            #### macOS (Catalina, Intel-only)
-
-            1. Download: `JiejieBox-${{ needs.meta.outputs.version }}-macos-catalina.zip`
-            2. Same installation steps as above; targets macOS 10.15+ on Intel Macs
-
-            > This fork builds macOS only. Windows and Linux packages are not produced here.
+            > **This fork ships Apple Silicon (arm64) only.** Intel Macs are not supported by fork artifacts.
+            > Windows and Linux packages are not produced here either.
 
             ### Checksums
 
@@ -467,8 +437,7 @@ jobs:
 
             ${{ steps.release_notes.outputs.notes }}
           files: |
-            release/JiejieBox-${{ needs.meta.outputs.version }}-macos-universal.zip
-            release/JiejieBox-${{ needs.meta.outputs.version }}-macos-catalina.zip
+            release/JiejieBox-${{ needs.meta.outputs.version }}-macos-arm64.zip
             release/checksums.txt
           # Publish immediately. RELEASE_PROCESS §1.6 / §2.4 promise the release is
           # ready out of the box (no manual un-draft step). Historical default was

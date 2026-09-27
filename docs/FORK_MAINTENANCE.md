@@ -72,32 +72,49 @@ by `ditto` and runs `build/check_macos_artifact.sh` on it — a bare `.app` does
 not survive the Actions artifact round-trip (the bundle seal is dropped), which
 is why the archive is the unit of delivery.
 
+## This fork ships Apple Silicon (arm64) only
+
+> **This fork ships Apple Silicon (arm64) only. Intel Macs are not supported by
+> fork artifacts.**
+
+CI builds, verifies and publishes one artifact: `jiejiebox-macos-arm64`
+(`JiejieBox-<version>-macos-arm64.zip`). Universal and Catalina builds were
+removed — they doubled build time and download size for a Mac that cannot use
+them. The cross-platform *source* support is untouched; only CI scope changed.
+
 ## Building locally
 
 ```bash
-export GITHUB_ACTIONS=true          # skips 'go mod tidy'
-./build/package_macos.sh universal  # dist/JiejieBox-*-macos-universal.zip
-./build/package_macos.sh arm64      # Apple Silicon only
-./build/package_macos.sh catalina   # Intel-only, macOS 10.15+
-./build/package_macos.sh universal --install   # also install to /Applications
+export GITHUB_ACTIONS=true        # skips 'go mod tidy'
+./build/package_macos.sh arm64    # dist/JiejieBox-*-macos-arm64.zip  (the shipped build)
+./build/package_macos.sh arm64 --install   # also install to /Applications
 ```
+
+The script still supports `universal` and `catalina` for manual debugging, but
+CI never calls them and no Intel artifact is published.
 
 Verify a package before trusting it:
 
 ```bash
-./build/check_macos_artifact.sh dist/JiejieBox-*-macos-universal.zip universal
+./build/check_macos_artifact.sh dist/JiejieBox-*-macos-arm64.zip arm64
 ```
 
-The sizes to watch (release build, current baseline):
+In `arm64` mode the checker asserts the binary is **exactly** `arm64` and fails
+if an `x86_64` slice is present — a fat build sneaking back in is a failure,
+not a bonus.
+
+The sizes to watch (arm64 release build, current baseline):
 
 ```text
-arm64 binary      ~37 MiB      arm64 ZIP      ~16 MiB
-x86_64 binary     ~39 MiB      catalina ZIP   ~18 MiB
-universal binary  ~76 MiB      universal ZIP  ~33 MiB
+executable   ~37 MiB   (38,932,432 bytes)
+app bundle   ~38 MiB   (39,985,152 bytes)
+ZIP          ~16 MiB   (17,621,717 bytes)
 ```
 
 A jump of more than ~10% means something new was linked in; check with
-`go tool nm` and `go list -deps` before accepting it.
+`go tool nm` and `go list -deps` before accepting it. Earlier Universal builds
+were ~76 MiB binary / ~33 MiB ZIP, so dropping the Intel slice roughly halved
+both.
 
 ## Archive tags instead of dozens of branches
 

@@ -21,7 +21,7 @@ ZIP="${1:-}"
 EXPECTED_ARCH="${2:-}"
 
 if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-    echo "usage: $0 <path-to.zip> [universal|catalina]" >&2
+    echo "usage: $0 <path-to.zip> [arm64|universal|catalina]" >&2
     exit 1
 fi
 
@@ -108,6 +108,20 @@ if [ -f "$EXEC" ]; then
     ARCHS="$(lipo -archs "$EXEC" 2>/dev/null || echo "")"
     info "architectures: $ARCHS"
     case "$EXPECTED_ARCH" in
+        arm64)
+            # Этот fork выпускает только Apple Silicon. Сборка «на всякий
+            # случай» с x86_64-слоем вдвое тяжелее и на этой машине
+            # бесполезна, поэтому наличие чужого слоя — ошибка, а не запас.
+            case "$ARCHS" in
+                *x86_64*) fail "x86_64 slice must NOT be present in an arm64-only build" ;;
+                *) pass "no x86_64 slice" ;;
+            esac
+            if [ "$ARCHS" = "arm64" ]; then
+                pass "architecture is exactly arm64"
+            else
+                fail "architecture must be exactly 'arm64', got '$ARCHS'"
+            fi
+            ;;
         universal)
             case "$ARCHS" in
                 *arm64*) pass "contains arm64" ;;

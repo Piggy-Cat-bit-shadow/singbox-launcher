@@ -2,6 +2,9 @@
 
 Готовый к установке клиент: **JiejieBox**, Apple Silicon (arm64), macOS 11+.
 
+> **This fork ships Apple Silicon (arm64) only. Intel Macs are not supported by
+> fork artifacts.**
+
 Это устанавливаемое приложение, а не исходники и не патч. Оно ставится **рядом** с
 оригинальным Singbox Launcher и не заменяет его.
 
@@ -10,17 +13,16 @@
 ## 1. Файл для установки
 
 ```
-dist/JiejieBox-v2.3.2-17-g4e82b8ff-jiejiebox-macos-arm64.zip
+dist/JiejieBox-v2.3.2-jiejiebox-macos-arm64.zip
 ```
 
 | | |
 |---|---|
-| Размер | 17 МБ |
-| SHA256 | `ca8b8c0648375815183f0cd047ecb60a015f128545cfd54aa2d4afc6d9322ec8` |
-| Архитектура | Mach-O 64-bit executable **arm64** (Apple Silicon) |
+| Размер | 17621717 байт (17 МБ) |
+| SHA256 | `d38910d6d01713ae0b2ed8def9bbf07ed7060b6ed59bd5ed0fdc498eba2f8e84` |
+| Архитектура | **arm64 (Apple Silicon) — только она; Intel не поддерживается** |
 | Bundle ID | `com.piggycat.jiejiebox` |
-| Версия | `v2.3.2-17-g4e82b8ff-jiejiebox` |
-| Коммит сборки | `4e82b8ff94e97a2c1952ba4066a6bd6514751812` |
+| Версия | `v2.3.2-jiejiebox` (CFBundleVersion 2.3.2.2418) |
 | Подпись | **ad-hoc, НЕ нотаризовано** |
 
 Проверить файл перед установкой:
@@ -41,7 +43,7 @@ shasum -a 256 dist/JiejieBox-*-macos-arm64.zip
 `Программы` (`/Applications`). Либо из терминала:
 
 ```bash
-unzip -q "dist/JiejieBox-v2.3.2-16-gcc283ca0-jiejiebox-macos-arm64.zip" -d /tmp/jb
+unzip -q dist/JiejieBox-*-macos-arm64.zip -d /tmp/jb
 cp -R /tmp/jb/JiejieBox.app /Applications/
 rm -rf /tmp/jb
 open /Applications/JiejieBox.app
