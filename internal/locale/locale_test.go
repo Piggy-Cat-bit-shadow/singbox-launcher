@@ -107,20 +107,21 @@ func TestPlaceholderCount(t *testing.T) {
 func TestTFunction(t *testing.T) {
 	loadExternalLocalesForTest(t)
 
+	// Fixtures use keys the backend still ships. The previous fixtures
+	// ("Start" and its special[1] form) belonged to the Fyne dashboard, which
+	// was removed with the rest of the GUI, so the catalog no longer has them.
+	const fixture = "Info"
+
 	// Английский: ключ и есть текст.
 	SetLang("en")
-	if got := T("Start"); got != "Start" {
-		t.Errorf("T(Start) = %q, want %q", got, "Start")
+	if got := T(fixture); got != fixture {
+		t.Errorf("T(%s) = %q, want %q", fixture, got, fixture)
 	}
 
 	if _, ok := catalogs["ru"]; ok {
 		SetLang("ru")
-		if got := T("Start"); got != "Запустить" {
-			t.Errorf("T(Start) = %q, want %q", got, "Запустить")
-		}
-		// Кнопка дашборда — special-форма 1 того же ключа.
-		if got := TN(1, "Start"); got != "Старт" {
-			t.Errorf("TN(1, Start) = %q, want %q", got, "Старт")
+		if got := T(fixture); got == fixture {
+			t.Errorf("T(%s) = %q; the Russian catalog did not translate it", fixture, got)
 		}
 	}
 
@@ -135,13 +136,11 @@ func TestTfFunction(t *testing.T) {
 	loadExternalLocalesForTest(t)
 	SetLang("ru")
 	defer SetLang("en")
-	// Fixture uses a real key from the shipped catalog. It used to be
-	// "📦 Version: %s"; SPEC 144 removed that emoji variant from the UI and
-	// from bin/locale/ru.json, so the key is now "Version: %s" — the old
-	// string fell back to the English source and failed here.
-	got := Tf("Version: %s", "v1.0")
-	if got != "Версия: v1.0" {
-		t.Errorf("Tf = %q", got)
+	// Fixture is a live backend key with a format verb. The previous fixture
+	// lived only in the removed Fyne UI and was pruned from the catalog.
+	got := Tf("Sing-Box crashed, restarting... (attempt %d/%d)", 1, 3)
+	if got == "" || got == "Sing-Box crashed, restarting... (attempt %d/%d)" {
+		t.Errorf("Tf = %q; the Russian catalog did not format it", got)
 	}
 }
 
