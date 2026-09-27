@@ -67,6 +67,7 @@ BUILD_TYPE="arm64"
 APP_NAME="JiejieBox"
 APP_BUNDLE_ID="com.piggycat.jiejiebox"
 BINARY_NAME="JiejieBox"
+BACKEND_NAME="jiejiebox-backend"
 MIN_MACOS_VERSION="11.0"
 DIST_DIR="dist"
 
@@ -167,23 +168,60 @@ LDFLAGS="$LDFLAGS -X singbox-launcher/internal/constants.RequiredTemplateRef=$TE
 # штампует minos по SDK, из-за чего бинарь требует macOS новее заявленного.
 LDFLAGS="$LDFLAGS -linkmode=external -extldflags=-mmacosx-version-min=$MIN_MACOS_VERSION"
 
+# Preserve the already-built SwiftUI frontend: it is produced by
+# build_macos_app.sh (a separate, slower step) and wiping the bundle here would
+# delete it. Only the Go helper is rebuilt by this script.
+FRONTEND_BACKUP=""
+if [ -x "$APP_NAME.app/Contents/MacOS/$BINARY_NAME" ]; then
+    FRONTEND_BACKUP="$(mktemp -d)/$BINARY_NAME"
+    cp "$APP_NAME.app/Contents/MacOS/$BINARY_NAME" "$FRONTEND_BACKUP"
+fi
+
 rm -rf "$APP_NAME.app"
 # Do NOT wipe dist/ wholesale: only this run's own outputs are removed, so a
 # caller that builds twice keeps both results.
 mkdir -p "$DIST_DIR"
 
 echo ""
-echo "=== Building ${BUILD_TYPE} ==="
-GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "$BINARY_NAME"
-file "$BINARY_NAME"
+echo "=== Building Go backend helper (${BUILD_TYPE}) ==="
+# The menu-bar frontend is a Swift executable; Go ships as a bundled helper
+# that speaks the JSON IPC protocol over stdio. MacOS/ holds the frontend,
+# Helpers/ holds this backend.
+mkdir -p "$APP_NAME.app/Contents/MacOS" "$APP_NAME.app/Contents/Helpers" "$APP_NAME.app/Contents/Resources"
+GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" \
+    -o "$APP_NAME.app/Contents/Helpers/$BACKEND_NAME" ./backend/cmd/jiejiebox-backend
+chmod +x "$APP_NAME.app/Contents/Helpers/$BACKEND_NAME"
+file "$APP_NAME.app/Contents/Helpers/$BACKEND_NAME"
+
+# Assert the helper carries no GUI toolkit: a single stray import would pull
+# fyne.io back in and inflate the artifact by tens of megabytes.
+if go list -deps ./backend/cmd/jiejiebox-backend | grep -q 'fyne.io/'; then
+    echo "ERROR: the backend links a GUI toolkit; refusing to package" >&2
+    exit 1
+fi
+echo "backend dependency graph is GUI-free"
 
 echo ""
 echo "=== Creating ${APP_NAME}.app ==="
 APP_MACOS="$APP_NAME.app/Contents/MacOS"
 APP_RESOURCES="$APP_NAME.app/Contents/Resources"
-mkdir -p "$APP_MACOS" "$APP_RESOURCES"
-mv "$BINARY_NAME" "$APP_MACOS/$BINARY_NAME"
-chmod +x "$APP_MACOS/$BINARY_NAME"
+
+# The SwiftUI frontend is built from macos/ via SwiftPM (see
+# build/build_macos_app.sh) and placed here as MacOS/JiejieBox. Until that
+# wave lands, refuse to emit a bundle whose only executable is the backend:
+# an .app with no frontend would launch nothing and look like a regression.
+if [ -n "$FRONTEND_BACKUP" ] && [ -f "$FRONTEND_BACKUP" ]; then
+    mkdir -p "$APP_MACOS"
+    cp "$FRONTEND_BACKUP" "$APP_MACOS/$BINARY_NAME"
+    chmod +x "$APP_MACOS/$BINARY_NAME"
+fi
+
+if [ ! -x "$APP_MACOS/$BINARY_NAME" ]; then
+    echo "ERROR: $APP_MACOS/$BINARY_NAME is missing." >&2
+    echo "The SwiftUI menu-bar frontend has not been built yet." >&2
+    echo "Run: ./build/build_macos_app.sh  (then re-run this script)" >&2
+    exit 1
+fi
 
 HAS_ICON=false
 if [ -f "assets/app.icns" ]; then
@@ -220,8 +258,9 @@ fi
     echo '    <array><string>arm64</string></array>'
     echo '    <key>NSHighResolutionCapable</key>'
     echo '    <true/>'
+    # Menu-bar-only app: no Dock icon, no main window.
     echo '    <key>LSUIElement</key>'
-    echo '    <false/>'
+    echo '    <true/>'
     echo '</dict>'
     echo '</plist>'
 } > "$APP_NAME.app/Contents/Info.plist"

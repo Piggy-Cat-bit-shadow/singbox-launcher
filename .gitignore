@@ -150,3 +150,6 @@ dist/
 BUILD_INFO.txt
 .gocache/
 .probe/
+
+# SwiftPM build output for the macOS frontend.
+macos/.build/

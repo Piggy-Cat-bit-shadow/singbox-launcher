@@ -57,6 +57,12 @@ pass "bundle $APP_NAME.app is present"
 
 # --- структура bundle ---
 EXEC="$APP/Contents/MacOS/$APP_NAME"
+HELPER="$APP/Contents/Helpers/jiejiebox-backend"
+[ -f "$HELPER" ] && pass "backend helper Contents/Helpers/jiejiebox-backend exists" || fail "backend helper is missing"
+if [ -f "$HELPER" ]; then
+    helper_arch=$(lipo -archs "$HELPER" 2>/dev/null || echo unknown)
+    [ "$helper_arch" = "arm64" ] && pass "backend helper is arm64" || fail "backend helper arch is $helper_arch"
+fi
 [ -f "$EXEC" ] && pass "executable Contents/MacOS/$APP_NAME exists" || fail "executable Contents/MacOS/$APP_NAME is missing"
 if [ -f "$EXEC" ]; then
     [ -x "$EXEC" ] && pass "executable bit is set after ZIP round-trip" || fail "executable bit is NOT set after ZIP round-trip"
@@ -146,9 +152,15 @@ fi
 
 # --- ALLOWLIST содержимого bundle ---
 # Разрешено ровно это; всё прочее — ошибка.
+#
+# Contents/Helpers/jiejiebox-backend — headless Go backend (JSON IPC over
+# stdio). It is the app's business layer: the SwiftUI frontend in MacOS/ has no
+# core logic of its own. Written in Go, not Swift, so it stays testable without
+# a GUI and shares the existing config/state/subscription domain.
 ALLOWED_EXACT="Contents/Info.plist
 Contents/PkgInfo
 Contents/MacOS/$APP_NAME
+Contents/Helpers/jiejiebox-backend
 Contents/Resources/app.icns"
 ALLOWED_PREFIXES="Contents/_CodeSignature/"
 

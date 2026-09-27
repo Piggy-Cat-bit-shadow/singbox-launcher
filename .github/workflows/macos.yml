@@ -95,7 +95,7 @@ jobs:
 
       - name: go vet
         shell: bash
-        run: go vet ./core/... ./api/... ./internal/... ./ui/...
+        run: go vet ./core/... ./api/... ./internal/... ./backend/...
 
       - name: L10n and paths checks
         shell: bash
@@ -103,6 +103,25 @@ jobs:
           go run ./tools/l10n/l10n_check --strict
           go run ./tools/l10n/hardcoded_check --strict
           go run ./tools/paths_guard --strict
+
+      # Permanent guard: the backend must stay a headless process. A single
+      # stray import would drag fyne.io back into the dependency graph, which
+      # is exactly what the menu-bar rewrite removed.
+      - name: Backend has no GUI toolkit dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          deps=$(go list -deps ./backend/cmd/jiejiebox-backend)
+          if grep -q 'fyne.io/' <<<"$deps"; then
+            echo "::error::fyne.io is back in the backend dependency graph"
+            grep 'fyne.io/' <<<"$deps"
+            exit 1
+          fi
+          if grep -qE '^\s*(fyne\.io/fyne|fyne\.io/systray|github\.com/dweymouth/fyne-tooltip)' go.mod; then
+            echo "::error::a GUI toolkit is listed in go.mod"
+            exit 1
+          fi
+          echo "backend dependency graph is GUI-free"
 
       - name: Check go mod tidy is clean
         shell: bash
@@ -205,6 +224,9 @@ jobs:
           TEMPLATE_REF: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Two halves: the SwiftUI menu-bar frontend (SwiftPM) and the Go
+          # backend helper. package_macos.sh assembles the bundle from both.
+          ./build/build_macos_app.sh
           ./build/package_macos.sh arm64
           mkdir -p release
           cp dist/JiejieBox-*-macos-arm64.zip \
