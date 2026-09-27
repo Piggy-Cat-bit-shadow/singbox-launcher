@@ -434,7 +434,7 @@ func (ac *AppController) gracefulExit() {
 	// процесс останется жить без окна и без иконки. Раньше сторож
 	// взводился только после teardown и эту фазу не покрывал.
 	if ac.hasUI() {
-		forceExitAfter(shutdownTeardownDeadline, "teardown (core stop / log close)")
+		ac.forceExitAfter(shutdownTeardownDeadline, "teardown (core stop / log close)")
 	}
 
 	// Cancel context to signal all goroutines to stop
@@ -452,6 +452,13 @@ func (ac *AppController) gracefulExit() {
 	// оставить его работать (выход из лаунчера ≠ выключение VPN).
 	waitForStop := true
 	if b := ac.Backend(); b != nil {
+		if p, ok := b.(persistentCoreBackend); ok && p.PersistsAfterAppExit() {
+			debuglog.InfoLog("GracefulExit: launcher is quitting; daemon core will remain running")
+		} else if _, ok := b.(persistentCoreBackend); ok {
+			debuglog.InfoLog("GracefulExit: stopping daemon core by user preference")
+		} else {
+			debuglog.InfoLog("GracefulExit: stopping classic core")
+		}
 		waitForStop = b.OnAppExit()
 	} else {
 		StopSingBoxProcess()
@@ -499,9 +506,22 @@ func (ac *AppController) gracefulExit() {
 		// Armed before Quit so a driver that refuses to unwind can't strand
 		// the process. By this point sing-box is stopped and the log files
 		// are closed, so os.Exit loses nothing.
-		forceExitAfter(shutdownUnwindDeadline, "Fyne event loop unwind after Quit")
+		ac.forceExitAfter(shutdownUnwindDeadline, "Fyne event loop unwind after Quit")
 		ac.UIService.QuitApplication()
 	}
+}
+
+// persistentCoreArmed reports whether the running core is owned by the system
+// daemon and is configured to outlive the GUI. It only decides log wording:
+// a forced exit is a real orphan in classic mode, but in daemon mode the core
+// is expected to keep running (SPEC 150).
+func (ac *AppController) persistentCoreArmed() bool {
+	b := ac.Backend()
+	if b == nil {
+		return false
+	}
+	p, ok := b.(persistentCoreBackend)
+	return ok && p.PersistsAfterAppExit()
 }
 
 // forceExitAfter arms a last-resort os.Exit for one phase of shutdown.
@@ -511,14 +531,37 @@ func (ac *AppController) gracefulExit() {
 // deterministically in UIService.QuitApplication (systray.Quit); the
 // watchdogs guarantee the process itself dies even if teardown or the
 // driver's shutdown path stalls. Armed twice from gracefulExit: once before
-// core stop (long budget — a forced exit there may orphan a privileged
-// sing-box, hence the explicit warning) and once before Quit (short budget,
-// nothing left to lose: sing-box stopped, logs closed).
-func forceExitAfter(d time.Duration, phase string) {
+// core stop (long budget) and once before Quit (short budget, nothing left
+// to lose: sing-box stopped, logs closed).
+func (ac *AppController) forceExitAfter(d time.Duration, phase string) {
 	time.AfterFunc(d, func() {
-		debuglog.WarnLog("Shutdown watchdog: %s did not finish within %s, forcing process exit (a running core may be left behind)", phase, d)
+		ac.forceExitHook(phase, d)
 		os.Exit(0)
 	})
+}
+
+// forceExitHookImpl writes the watchdog line. Wording depends on what the
+// forced exit actually strands: in classic mode the core is a child of this
+// process and is orphaned by the exit (a real problem — warning), while in
+// daemon mode the core is owned by the system service and is *supposed* to
+// outlive the GUI, so nothing is wrong (plain INFO, no scary "core left
+// behind").
+func (ac *AppController) forceExitHookImpl(phase string, d time.Duration) {
+	if ac.persistentCoreArmed() {
+		debuglog.InfoLog("Shutdown watchdog: %s did not finish within %s; forcing launcher exit — the daemon keeps the VPN core running (this is the configured behaviour)", phase, d)
+		return
+	}
+	debuglog.WarnLog("Shutdown watchdog: %s did not finish within %s, forcing process exit (a running classic core may be left behind)", phase, d)
+}
+
+// forceExitHook is the seam through which forceExitAfter writes its line:
+// tests replace it to observe the wording decision without calling os.Exit.
+var forceExitHook = func(ac *AppController, phase string, d time.Duration) {
+	ac.forceExitHookImpl(phase, d)
+}
+
+func (ac *AppController) forceExitHook(phase string, d time.Duration) {
+	forceExitHook(ac, phase, d)
 }
 
 // RunHidden launches an external command in a hidden window.
@@ -718,6 +761,45 @@ func StartSingBoxProcess(skipRunningCheck ...bool) {
 		return
 	}
 	ac.ProcessService.Start(skipRunningCheck...)
+}
+
+// EnsureVPNRunning запускает VPN только если он ещё не поднят (SPEC 150).
+//
+// Нужен автозапуску (`-start`), который срабатывает через секунду после
+// старта лаунчера. В daemon-режиме ядро вполне может уже работать — его
+// подняла служба в прошлой сессии или им управляет кто-то ещё. Тогда
+// обычный Start означал бы лишний POST /admin/apply: пересборку config.json
+// и in-process подмену инстанса, то есть короткий разрыв туннеля на ровном
+// месте — ровно то, чего не должно происходить при повторном открытии
+// лаунчера.
+//
+// Отличие от StartVPN, который проверяет только внутренний RunningState:
+// здесь в daemon-режиме состояние спрашивается у самого демона. К моменту
+// срабатывания таймера автозапуска стрим статуса может ещё не прислать
+// первый кадр, и RunningState будет false при работающем ядре — по нему
+// решать нельзя.
+//
+// Возвращает true, если запуск действительно инициирован.
+func EnsureVPNRunning(skipRunningCheck ...bool) bool {
+	ac := GetController()
+	if ac == nil {
+		return false
+	}
+	if ac.RunningState != nil && ac.RunningState.IsRunning() {
+		debuglog.InfoLog("EnsureVPNRunning: already running (internal state); auto-start is a no-op")
+		return false
+	}
+	// daemon: спросить демон, а не догадываться по локальному состоянию.
+	if b := ac.Backend(); b != nil {
+		if probe, ok := b.(interface{ CoreRunningOnDaemon() (bool, bool) }); ok {
+			if running, known := probe.CoreRunningOnDaemon(); known && running {
+				debuglog.InfoLog("daemon: VPN already running; auto-start is a no-op")
+				return false
+			}
+		}
+	}
+	StartSingBoxProcess(skipRunningCheck...)
+	return true
 }
 
 // StopSingBoxProcess is the unified function to stop the sing-box process.

@@ -93,6 +93,17 @@ func (b *LegacyBackend) RestartVPN() {
 	go op()
 }
 
+// PersistsAfterAppExit implements persistentCoreBackend (SPEC 150): classic
+// НИКОГДА не переживает выход лаунчера.
+//
+// Ядро classic — дочерний процесс лаунчера, и на этом держится вся его
+// модель: ProcessService владеет процессом, Monitor следит за падением и
+// перезапускает, privileged-путь ждёт обёртку, завершение снимает TUN.
+// Отпустить процесс «пусть живёт» значило бы оставить orphan sing-box с
+// поднятыми маршрутами и без владельца — поэтому здесь всегда false, а
+// удержание VPN после выхода доступно только в daemon-режиме.
+func (b *LegacyBackend) PersistsAfterAppExit() bool { return false }
+
 // OnAppExit implements CoreBackend: classic всегда останавливает ядро при
 // выходе из лаунчера (как делал GracefulExit → StopSingBoxProcess).
 //

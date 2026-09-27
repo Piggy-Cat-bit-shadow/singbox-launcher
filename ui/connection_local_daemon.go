@@ -328,18 +328,29 @@ func buildDaemonPanel(ac *core.AppController, win fyne.Window, onPaired func()) 
 		refreshStatus()
 	}
 
-	stopOnExitCheck := widget.NewCheck(locale.T("Stop VPN when quitting the launcher"), nil)
+	// «Keep VPN running after quit» — ПОЛОЖИТЕЛЬНАЯ формулировка (SPEC 150).
+	//
+	// Схему настроек не меняем: хранится по-прежнему daemon_stop_vpn_on_exit,
+	// и чекбокс показывает её инверсию. Так старые settings.json продолжают
+	// работать без миграции, а пользователь читает то, что ему на самом деле
+	// нужно: «VPN останется подключённым».
+	keepRunningCheck := widget.NewCheck(locale.T("Keep VPN running after quitting the launcher"), nil)
 	{
 		st := locale.LoadSettings(binDir)
-		stopOnExitCheck.SetChecked(st.DaemonStopVPNOnExit)
+		keepRunningCheck.SetChecked(!st.DaemonStopVPNOnExit)
 	}
-	stopOnExitCheck.OnChanged = func(checked bool) {
+	keepRunningCheck.OnChanged = func(checked bool) {
 		st := locale.LoadSettings(binDir)
-		st.DaemonStopVPNOnExit = checked
+		st.DaemonStopVPNOnExit = !checked
 		if err := locale.SaveSettings(binDir, st); err != nil {
-			debuglog.WarnLog("conn.daemon: save stop_on_exit: %v", err)
+			debuglog.WarnLog("conn.daemon: save keep_running: %v", err)
 		}
 	}
+	// Пояснение: без него неочевидно, ПОЧЕМУ это вообще возможно — ядро
+	// живёт в системной службе, а лаунчер лишь управляет им.
+	keepRunningHint := widget.NewLabel(locale.T("The VPN core runs independently in the system daemon and remains connected when the launcher is closed. Use Stop VPN to disconnect."))
+	keepRunningHint.Wrapping = fyne.TextWrapWord
+	keepRunningHint.Importance = widget.LowImportance
 
 	refreshBtn := ttwidget.NewButtonWithIcon("", theme.ViewRefreshIcon(), refreshStatus)
 	refreshBtn.SetToolTip(locale.T("Refresh daemon status"))
@@ -372,7 +383,8 @@ func buildDaemonPanel(ac *core.AppController, win fyne.Window, onPaired func()) 
 		widget.NewLabelWithStyle(locale.T("Connection"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewBorder(nil, nil, widget.NewLabel(locale.T("Daemon address:")), nil, addressEntry),
 		container.NewBorder(nil, nil, nil, secretHelp, secretEntry),
-		stopOnExitCheck,
+		keepRunningCheck,
+		keepRunningHint,
 	)
 
 	// Три вкладки вместо одной простыни: повседневное (Status), разовая

@@ -62,6 +62,61 @@ stopped.
 The **REMOTE** tab of the same window is the older remote Clash API override
 (SPEC 064) — a separate thing from daemon mode.
 
+### 1.2 Who owns the core (SPEC 150)
+
+The two engines differ in **who owns the core process**, and that is the whole of
+the lifecycle story. It is not merely an implementation detail — it decides what
+happens when you close the launcher, and the UI says so explicitly on the LOCAL
+tab.
+
+| | **Classic** | **Daemon (lxd)** |
+|---|---|---|
+| Owner | the launcher process | the system service (`launchd` on macOS) |
+| Core lifetime | tied to the GUI | independent of the GUI |
+| Quit launcher | core is stopped, the caller waits for it to die | core keeps running (default) |
+| UI hint | "The VPN stops when the launcher exits." | "Keep VPN running after quitting the launcher" (on) + "The VPN core runs independently in the system daemon and remains connected when the launcher is closed. Use Stop VPN to disconnect." |
+
+Two separate actions, deliberately:
+
+* **Stop VPN** — asks the owner to bring the core down. In daemon mode this is
+  `POST /admin/stop`; the tunnel really goes away.
+* **Quit Launcher** — exits the GUI only. It stops the core *only* when the user
+  has turned the keep-running option off.
+
+The capability is exposed to the UI through `AppController.CorePersistsAfterAppExit()`,
+which type-asserts the active backend onto the optional `persistentCoreBackend`
+interface. `LegacyBackend` answers `false` unconditionally (the core is its child;
+detaching it would manufacture exactly the orphan the project forbids);
+`DaemonBackend` answers `!DaemonStopVPNOnExit`.
+
+**Setting, not migration.** The checkbox reads positively ("Keep VPN running after
+quitting the launcher", default **on**), but the stored field is unchanged:
+`daemon_stop_vpn_on_exit` in `bin/settings.json`. On is `false`, off is `true`.
+The inversion lives in exactly one place in the UI and is pinned by a test.
+
+**Relaunch attaches, never restarts.** When the GUI starts with `-start` while the
+daemon already serves traffic, the launcher must *attach*: subscribe to the status
+stream, restore the server list, logs and traffic, and leave the running core
+alone. `EnsureVPNRunning()` therefore probes the daemon
+(`CoreRunningOnDaemon()` → `/admin/status`) instead of trusting the local
+`RunningState`, which is still `false` for the first moments after startup. An
+unreachable daemon reports `known = false` and does **not** veto auto-start — a
+dead socket must not be read as "the VPN is off". A `STARTING`/`STOPPING` frame
+also counts as "core present", so an in-process config reload never looks like a
+crash and never triggers a redundant `apply`.
+
+**Orphan detection stays classic-only.** The darwin orphan detector matches
+`sing-box run|sing-box-lxd run|start-singbox-privileged` — i.e. only processes
+that *run* a config. `sing-box lxd --state-dir …` and
+`sing-box lxd --service=install` are not matched, so the daemon is never mistaken
+for an orphaned child and never killed by GUI-exit housekeeping.
+
+**Watchdog wording is ownership-aware.** The forced-exit watchdog
+(`shutdownTeardownDeadline`, `shutdownUnwindDeadline`) logs a *warning* about a
+possibly orphaned core in classic mode, and a plain INFO line in daemon
+keep-running mode, where a core outliving the GUI is the configured behaviour
+rather than a fault.
+
 ---
 
 ## 2. Installing the service: sudo, in your own terminal

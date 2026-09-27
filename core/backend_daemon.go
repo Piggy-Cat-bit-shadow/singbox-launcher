@@ -474,6 +474,60 @@ func (b *DaemonBackend) StopVPN() {
 // OnAppExit implements CoreBackend: по умолчанию выход из лаунчера оставляет
 // VPN работать (это и есть смысл daemon-режима); опция DaemonStopVPNOnExit
 // возвращает классическое поведение.
+// CoreRunningOnDaemon спрашивает у САМОГО демона, работает ли ядро
+// (SPEC 150). Возвращает (running, known): known=false, если демон не
+// ответил — тогда решать по этому ответу нельзя, и вызывающий откатывается
+// на обычный путь старта.
+//
+// Нужен автозапуску `-start`: он срабатывает через секунду после старта
+// лаунчера, когда стрим статуса вполне может ещё не прислать первый кадр.
+// Без этого запроса EnsureVPNRunning опирался бы на RunningState, который в
+// этот момент ложно false, и делал бы лишний apply — то есть короткий
+// разрыв туннеля при повторном открытии лаунчера.
+//
+// Запрос ограничен по времени: автозапуск не должен ждать зависший демон.
+//
+// Контекст берётся с fallback'ом на Background: паника «cannot create context
+// from nil parent» здесь недопустима — проба зовётся из автозапуска и из UI,
+// где незаведённый ctx означал бы падение всего приложения вместо честного
+// «состояние неизвестно». nil-admin (backend ещё не собран) — то же самое.
+func (b *DaemonBackend) CoreRunningOnDaemon() (running bool, known bool) {
+	if b.admin == nil {
+		return false, false
+	}
+	parent := b.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, daemonProbeTimeout)
+	defer cancel()
+	info, err := b.admin.StatusCtx(ctx)
+	if err != nil {
+		debuglog.DebugLog("daemon: status probe for auto-start failed: %v", err)
+		return false, false
+	}
+	// Демон отвечает строкой; STARTED — единственное состояние, при котором
+	// apply был бы лишним. STARTING/STOPPING считаем «идёт работа»: не
+	// вмешиваемся, второй apply там точно не нужен.
+	switch strings.ToLower(strings.TrimSpace(info.Status)) {
+	case "started", "starting", "stopping":
+		return true, true
+	default:
+		return false, true
+	}
+}
+
+// daemonProbeTimeout — сколько ждать ответа демона в пробе перед автозапуском.
+const daemonProbeTimeout = 3 * time.Second
+
+// PersistsAfterAppExit implements persistentCoreBackend (SPEC 150): ядро
+// daemon'а живёт в системной службе, и выход GUI его не касается — если
+// пользователь не попросил обратного настройкой.
+func (b *DaemonBackend) PersistsAfterAppExit() bool {
+	binDir := b.ac.FileService.Layout.Data.Bin()
+	return !locale.LoadSettings(binDir).DaemonStopVPNOnExit
+}
+
 func (b *DaemonBackend) OnAppExit() bool {
 	binDir := b.ac.FileService.Layout.Data.Bin()
 	if !locale.LoadSettings(binDir).DaemonStopVPNOnExit {
@@ -502,8 +556,14 @@ func (b *DaemonBackend) appliedProxyServer() string {
 
 // Close implements CoreBackend: гасит supervisor и gRPC-соединение, снимает
 // транспорт-override. Ядро в демоне не трогается.
+//
+// Частично сконструированный backend (ctx не заведён) тоже обязан закрываться
+// без паники: Close вызывается из путей смены движка и выхода, где ронять
+// процесс из-за nil-поля нельзя — это утащило бы за собой и живое ядро.
 func (b *DaemonBackend) Close() {
-	b.cancel()
+	if b.cancel != nil {
+		b.cancel()
+	}
 	// Снимаем override ТОЛЬКО если он всё ещё наш: при daemon→daemon свопе
 	// новый backend уже установил свой транспорт до нашего Close, и затирать
 	// его в nil нельзя (иначе proxy-операции теряют gRPC-транспорт).
@@ -655,6 +715,7 @@ func (b *DaemonBackend) consumeStatusStream(stream grpc.ServerStreamingClient[da
 		}
 		if running && !wasRunning {
 			// Ядро поднялось (в т.ч. кем-то извне) — подтянуть список нод.
+			debuglog.InfoLog("daemon: existing running core detected; attaching without restart")
 			go func() {
 				select {
 				case <-time.After(2 * time.Second):

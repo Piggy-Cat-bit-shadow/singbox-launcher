@@ -23,6 +23,10 @@ import (
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
 const (
 	processHintText = "The launcher spawns `sing-box run` itself and talks to it over the Clash API from config.json. There is nothing to configure here — the clash_api section is managed in the configurator."
+	// processOwnershipText честно описывает владение ядром в classic-режиме:
+	// ядро — дочерний процесс лаунчера, поэтому выход из GUI его останавливает.
+	// В daemon-режиме владелец другой (см. keepRunningHint).
+	processOwnershipText = "The VPN stops when the launcher exits."
 )
 
 // buildLocalEngineTab собирает вкладку LOCAL. daemon-панель приходит из
@@ -52,7 +56,12 @@ func buildLocalEngineTab(ac *core.AppController, win fyne.Window, onChanged func
 	processLabel := locale.T("Process (classic)")
 	daemonLabel := locale.T("Daemon (lxd)")
 
-	processBox := container.NewVBox(processHint)
+	// Классический движок: лаунчер владеет ядром, выход из GUI его останавливает.
+	processOwnership := widget.NewLabel(locale.T(processOwnershipText))
+	processOwnership.Wrapping = fyne.TextWrapWord
+	processOwnership.Importance = widget.LowImportance
+
+	processBox := container.NewVBox(processHint, processOwnership)
 
 	var updatingRadio bool
 	radio := widget.NewRadioGroup([]string{processLabel, daemonLabel}, nil)

@@ -699,13 +699,20 @@ func main() {
 				scheduleDaemonUnsafeNotice(controller, layout.Data, servicePath, command, coreHint, *startInTray)
 			}
 
-			// Auto-start VPN if -start flag is provided
+			// Auto-start VPN if -start flag is provided.
+			//
+			// Идемпотентно (SPEC 150): в daemon-режиме ядро могло уже
+			// работать — его подняла служба в прошлой сессии. Тогда
+			// автозапуск обязан стать no-op: обычный Start прислал бы
+			// POST /admin/apply, то есть пересобрал бы config.json и
+			// подменил инстанс, разорвав туннель на ровном месте.
 			if *autoStart {
 				go func() {
 					// Wait a bit for everything to initialize
 					<-time.After(autoStartDelay)
-					debuglog.InfoLog("Auto-start: Starting VPN due to -start parameter")
-					core.StartSingBoxProcess()
+					if !core.EnsureVPNRunning() {
+						debuglog.InfoLog("Auto-start: VPN is already running; nothing to do")
+					}
 				}()
 			}
 

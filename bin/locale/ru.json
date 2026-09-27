@@ -2452,9 +2452,6 @@
   "Run the VPN core inside a long-lived system daemon (sing-box lxd). Config changes swap the core in-process — no password prompts, and quitting the launcher can keep the VPN up. Managed over gRPC like the Android app.": {
     "value": "Ядро VPN работает внутри долгоживущего системного демона (sing-box lxd). Смена конфига подменяет ядро внутри процесса — без запросов пароля, а выход из лаунчера может оставлять VPN работать. Управление по gRPC, как в Android-приложении."
   },
-  "Stop VPN when quitting the launcher": {
-    "value": "Останавливать VPN при выходе из лаунчера"
-  },
   "Checking daemon status…": {
     "value": "Проверка состояния демона…"
   },
@@ -4810,5 +4807,14 @@
   },
   "State: %s": {
     "value": "Состояние: %s"
+  },
+  "Keep VPN running after quitting the launcher": {
+    "value": "Оставлять VPN подключённым после выхода из лаунчера"
+  },
+  "The VPN core runs independently in the system daemon and remains connected when the launcher is closed. Use Stop VPN to disconnect.": {
+    "value": "Ядро VPN работает в системной службе независимо от лаунчера и остаётся подключённым после его закрытия. Чтобы отключиться, нажмите Stop VPN."
+  },
+  "The VPN stops when the launcher exits.": {
+    "value": "VPN останавливается вместе с выходом из лаунчера."
   }
 }

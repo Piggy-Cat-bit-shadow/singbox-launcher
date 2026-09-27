@@ -54,6 +54,43 @@ type CoreBackend interface {
 	Close()
 }
 
+// persistentCoreBackend — необязательная возможность движка: ядро переживает
+// выход лаунчера (SPEC 150).
+//
+// Отдельный интерфейс, а не метод CoreBackend: возможность есть только у
+// daemon-движка, и добавлять её всем реализациям значило бы заставлять
+// classic отвечать на вопрос, которого у него нет. UI спрашивает через
+// AppController.CorePersistsAfterAppExit и не знает про типы движков.
+type persistentCoreBackend interface {
+	// PersistsAfterAppExit сообщает, останется ли ядро работать после выхода
+	// лаунчера при текущих настройках.
+	PersistsAfterAppExit() bool
+}
+
+// CorePersistsAfterAppExit сообщает, продолжит ли VPN работать после выхода
+// лаунчера (SPEC 150).
+//
+// true: daemon-движок и «Keep VPN running after quit» включён — ядро живёт в
+//
+//	системной службе и выход GUI его не касается.
+//
+// false: classic (ядро принадлежит лаунчеру и гасится вместе с ним) либо
+//
+//	daemon с выключенным удержанием.
+//
+// UI использует это, чтобы честно сказать пользователю, что произойдёт при
+// выходе, вместо того чтобы угадывать по типу движка.
+func (ac *AppController) CorePersistsAfterAppExit() bool {
+	b := ac.Backend()
+	if b == nil {
+		return false
+	}
+	if p, ok := b.(persistentCoreBackend); ok {
+		return p.PersistsAfterAppExit()
+	}
+	return false
+}
+
 // Backend returns the active core backend. Never nil after NewAppController.
 func (ac *AppController) Backend() CoreBackend {
 	ac.backendMu.RLock()
