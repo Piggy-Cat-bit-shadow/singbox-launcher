@@ -13,7 +13,7 @@ struct CoreDetailsView: View {
     let model: AppModel
 
     var body: some View {
-        ScrollView {
+        PanelScaffold(model: model, title: "Core Details", onBack: { model.goBack() }) {
             VStack(alignment: .leading, spacing: 10) {
                 MenuSection("Core") {
                     detail("Status", model.core?.state.label)

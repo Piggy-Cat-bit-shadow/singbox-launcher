@@ -35,6 +35,12 @@ struct JiejieBoxApp: App {
 }
 
 /// Content of the menu-bar window: a compact navigation stack.
+///
+/// NavigationStack is kept only for the path/push machinery. The back and quit
+/// controls are drawn by PanelScaffold on every screen, because the system back
+/// affordance is a toolbar item that a borderless menu-bar panel cannot reliably
+/// present — which is how a page could previously be entered with no way out.
+/// The navigation bar itself is hidden so there is never a second back arrow.
 struct RootView: View {
     let model: AppModel
 
@@ -44,19 +50,32 @@ struct RootView: View {
             set: { model.path = $0 }
         )) {
             HomeView(model: model)
+                .navigationBarBackButtonHidden(true)
                 .navigationDestination(for: AppModel.Screen.self) { screen in
-                    switch screen {
-                    case .coreDetails: CoreDetailsView(model: model)
-                    case .coreMode: CoreModeView(model: model)
-                    case .proxies: ProxiesView(model: model)
-                    case .more: MoreView(model: model)
-                    case .about: AboutView(model: model)
-                    }
+                    destination(screen)
+                        .navigationBarBackButtonHidden(true)
                 }
         }
-        // ~400pt: enough for real information, still a menu-bar utility.
+        // ~420pt: wide enough for a subscription URL or an invite, still a
+        // menu-bar utility rather than a main window.
         .frame(minWidth: Metrics.panelWidth, maxWidth: Metrics.panelWidth,
-               minHeight: 320, maxHeight: 640)
+               minHeight: 360, maxHeight: 680)
         .preferredColorScheme(model.appearance.colorScheme)
+    }
+
+    @ViewBuilder
+    private func destination(_ screen: AppModel.Screen) -> some View {
+        switch screen {
+        case .coreDetails: CoreDetailsView(model: model)
+        case .coreMode: CoreModeView(model: model)
+        case .proxies: ProxiesView(model: model)
+        case .subscriptions: SubscriptionsView(model: model)
+        case .addSubscription: AddSubscriptionView(model: model)
+        case .editSubscription(let id): EditSubscriptionView(model: model, id: id)
+        case .daemon: DaemonView(model: model)
+        case .daemonPair: DaemonPairView(model: model)
+        case .more: MoreView(model: model)
+        case .about: AboutView(model: model)
+        }
     }
 }

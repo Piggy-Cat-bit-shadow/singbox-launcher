@@ -21,6 +21,8 @@ enum BackendClientError: LocalizedError {
     case protocolMismatch(expected: Int, got: Int)
     case backendUnavailable
     case decodingFailed(String)
+    case notRunning
+    case timedOut(method: String)
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +36,10 @@ enum BackendClientError: LocalizedError {
             return "The backend is not running."
         case .decodingFailed(let detail):
             return "Unexpected backend response: \(detail)"
+        case .notRunning:
+            return "The backend is not running."
+        case .timedOut(let method):
+            return "Operation timed out (\(method))."
         }
     }
 }
@@ -303,7 +309,32 @@ actor BackendClient {
         let id = String(nextRequestID)
         let request = BackendRequest(id: id, method: method, params: params)
 
-        return try await withCheckedThrowingContinuation { cont in
+        // Bound every request. A response that never arrives would otherwise
+        // leave its continuation pending forever, which surfaces as a button
+        // stuck on "Switching…" or "Updating…" with no way out — the single
+        // worst failure mode for a menu bar, because the panel is the only UI.
+        let timeout = Self.timeout(for: method)
+
+        return try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask { [weak self] in
+                guard let self else { throw BackendClientError.notRunning }
+                return try await self.awaitResponse(id: id, request: request)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeout)
+                throw BackendClientError.timedOut(method: method)
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw BackendClientError.timedOut(method: method)
+            }
+            return first
+        }
+    }
+
+    /// Wait for the response with a given id.
+    private func awaitResponse(id: String, request: BackendRequest) async throws -> Data {
+        try await withCheckedThrowingContinuation { cont in
             pending[id] = cont
             do {
                 try write(request)
@@ -312,6 +343,43 @@ actor BackendClient {
                 cont.resume(throwing: error)
             }
         }
+    }
+
+    /// Timeout budget per method, in nanoseconds.
+    ///
+    /// Split by what the operation actually does rather than one global value:
+    /// a state read that takes two seconds is broken, while a subscription
+    /// fetch that takes two seconds is normal. A single number would either
+    /// abort healthy network work or let a wedged query hang the panel.
+    static func timeout(for method: String) -> UInt64 {
+        let seconds: Double
+        switch method {
+        case BackendMethod.handshake, BackendMethod.getAppSnapshot,
+             BackendMethod.getProxyGroups, BackendMethod.getProxies:
+            seconds = 8
+        case BackendMethod.switchProxy, BackendMethod.setCoreMode,
+             BackendMethod.restartCore, BackendMethod.startCore,
+             BackendMethod.stopCore:
+            seconds = 20
+        case BackendMethod.testProxy, BackendMethod.testProxyGroup,
+             BackendMethod.refreshSubscription, BackendMethod.updateSubscriptions,
+             BackendMethod.reloadConfig:
+            // Network work: fetching providers and measuring latency. Generous,
+            // because aborting a legitimate slow fetch is worse than waiting.
+            seconds = 120
+        case BackendMethod.getDaemonStatus:
+            // Talks to the control plane and probes the core binary; the
+            // earlier freeze was exactly this call never returning.
+            seconds = 15
+        case BackendMethod.daemonInstall, BackendMethod.daemonStart,
+             BackendMethod.daemonRepair, BackendMethod.daemonUninstall:
+            seconds = 20
+        case BackendMethod.pairDaemon:
+            seconds = 30
+        default:
+            seconds = 20
+        }
+        return UInt64(seconds * 1_000_000_000)
     }
 
     // MARK: - Events
@@ -415,6 +483,87 @@ actor BackendClient {
 
     func updateSubscriptions() async throws -> MaintenanceResult {
         try await request(BackendMethod.updateSubscriptions, as: MaintenanceResult.self)
+    }
+
+    // MARK: - Subscriptions
+
+    func listSubscriptions() async throws -> [Subscription] {
+        let response = try await request(BackendMethod.listSubscriptions,
+                                         as: SubscriptionListResponse.self)
+        return response.subscriptions
+    }
+
+    func addSubscription(name: String, url: String) async throws -> Subscription {
+        try await request(BackendMethod.addSubscription,
+                          params: ["name": .string(name), "url": .string(url)],
+                          as: Subscription.self)
+    }
+
+    func updateSubscription(id: String, name: String, url: String) async throws -> Subscription {
+        try await request(BackendMethod.updateSubscription,
+                          params: ["id": .string(id),
+                                   "name": .string(name),
+                                   "url": .string(url)],
+                          as: Subscription.self)
+    }
+
+    func removeSubscription(id: String) async throws -> [Subscription] {
+        let response = try await request(BackendMethod.removeSubscription,
+                                         params: ["id": .string(id)],
+                                         as: SubscriptionListResponse.self)
+        return response.subscriptions
+    }
+
+    func setSubscriptionEnabled(id: String, enabled: Bool) async throws -> Subscription {
+        try await request(BackendMethod.setSubscriptionEnabled,
+                          params: ["id": .string(id), "enabled": .bool(enabled)],
+                          as: Subscription.self)
+    }
+
+    func refreshSubscription(id: String) async throws -> Subscription {
+        try await request(BackendMethod.refreshSubscription,
+                          params: ["id": .string(id)],
+                          as: Subscription.self)
+    }
+
+    // MARK: - Daemon
+
+    func daemonStatus() async throws -> DaemonStatus {
+        try await request(BackendMethod.getDaemonStatus, as: DaemonStatus.self)
+    }
+
+    func daemonInstall() async throws -> DaemonCommandResult {
+        try await request(BackendMethod.daemonInstall, as: DaemonCommandResult.self)
+    }
+
+    func daemonStart() async throws -> DaemonCommandResult {
+        try await request(BackendMethod.daemonStart, as: DaemonCommandResult.self)
+    }
+
+    func daemonRepair() async throws -> DaemonCommandResult {
+        try await request(BackendMethod.daemonRepair, as: DaemonCommandResult.self)
+    }
+
+    func daemonUninstall(purge: Bool) async throws -> DaemonCommandResult {
+        try await request(BackendMethod.daemonUninstall,
+                          params: ["purge": .bool(purge)],
+                          as: DaemonCommandResult.self)
+    }
+
+    func pairDaemon(invite: String) async throws -> DaemonStatus {
+        try await request(BackendMethod.pairDaemon,
+                          params: ["invite": .string(invite)],
+                          as: DaemonStatus.self)
+    }
+
+    func unpairDaemon() async throws -> DaemonStatus {
+        try await request(BackendMethod.unpairDaemon, as: DaemonStatus.self)
+    }
+
+    func setDaemonKeepRunning(_ enabled: Bool) async throws -> DaemonStatus {
+        try await request(BackendMethod.setDaemonKeepRunning,
+                          params: ["enabled": .bool(enabled)],
+                          as: DaemonStatus.self)
     }
 }
 

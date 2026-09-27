@@ -29,8 +29,16 @@ MenuBarExtra (SwiftUI)  ──JSON over stdio──▶  jiejiebox-backend (Go, h
 | **Proxies** | Pick a group, search nodes, switch the active node, measure latency |
 | **Core Details** | Read-only runtime facts: versions, paths, backend, PID |
 | **Core Mode** | Switch between the classic and daemon engines |
-| **More** | Reload config, update subscriptions, automation toggles, open files |
+| **Subscriptions** | List, add, edit, enable, refresh and delete subscription sources |
+| **Daemon** | Set up and diagnose the system-service engine, then activate it |
+| **More** | Reload config, automation toggles, open files |
 | **About** | Versions and links |
+
+**Navigation invariant.** Every screen draws the same header: `‹ Title … Quit`.
+Back is an explicit control, not the system affordance — inside a borderless
+`MenuBarExtra` window the system back button is a toolbar item with nowhere to
+draw, which is how a page could previously be entered with no dependable exit.
+Quit is present on every screen including Home. See `PanelScaffold.swift`.
 
 Deliberately removed: Remote Machines, the configurator/wizard GUI, the full
 traffic profiler, the diagnostics GUI, and the Fyne settings/help pages. See
@@ -115,6 +123,19 @@ migrated or rewritten on first launch. The bundle identifier stays
   a while on a large subscription.
 - **Speed readout only while connected.** The sampler starts and stops with the
   core, so a stopped core costs nothing.
+- **Subscriptions are managed in place.** The records live in the canonical v8
+  `state.json` source tree — the same records the wizard and the backup importer
+  use. Adding a source does **not** rebuild the config: the app says the config
+  needs a reload and offers the action, because rebuilding is the user's
+  decision.
+- **Daemon is set up before it is activated.** The engine needs an installed
+  launchd service, a paired identity and a reachable control plane. The Daemon
+  screen walks those steps one at a time and only offers "Use Daemon Mode" once
+  status says ready. Privileged steps open Terminal, so a `sudo` prompt never
+  looks like a frozen app.
+- **Requests are time-bounded.** Every backend call has a per-method timeout, so
+  a lost response surfaces as "Operation timed out" rather than a button stuck
+  on "Updating…" forever.
 
 ---
 
@@ -151,7 +172,18 @@ matrix by hand against a real core:
 | Proxy | Node row switches; checkmark moves; latency button re-measures |
 | Proxy | Search filters; count reads "N of M" |
 | Proxy | Test All fills every latency; unreachable nodes stay "—" |
-| More | Reload Config and Update Subscriptions report a result |
-| More | Toggles persist across a restart of the app |
+| More | Reload Config reports a result; toggles persist across a restart |
+| Subscriptions | Add a real URL → appears in the list; duplicate URL is refused |
+| Subscriptions | Edit name/URL, toggle enable, refresh one, Update All |
+| Subscriptions | Delete asks for confirmation and the row disappears |
+| Subscriptions | Empty state offers Add rather than a dead update button |
+| Subscriptions | After adding, "Configuration needs reload" appears with Reload |
+| Daemon | Status rows match reality (service / pairing / connection) |
+| Daemon | Install opens Terminal with a quoted sudo command; Refresh updates |
+| Daemon | Pair rejects a malformed invite with a clear message |
+| Daemon | "Use Daemon Mode" is absent until status is ready |
+| Navigation | Every subpage shows Back; Back returns one level; Home has none |
+| Navigation | Quit is visible on every page and never stops a daemon VPN |
+| Interaction | No operation can leave a button pending indefinitely |
 | Interaction | Every row: hover highlights, click anywhere in the row works, disabled rows look disabled |
 | Interaction | No control smaller than ~24 pt; nothing looks clickable but isn't |

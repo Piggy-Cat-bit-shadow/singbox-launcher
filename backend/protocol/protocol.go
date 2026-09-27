@@ -62,6 +62,34 @@ const (
 	MethodReloadConfig = "reload_config"
 	// MethodUpdateSubscriptions refreshes all subscription nodes.
 	MethodUpdateSubscriptions = "update_subscriptions"
+	// MethodListSubscriptions returns the configured subscription sources.
+	MethodListSubscriptions = "list_subscriptions"
+	// MethodAddSubscription appends a subscription source.
+	MethodAddSubscription = "add_subscription"
+	// MethodUpdateSubscription edits a subscription source.
+	MethodUpdateSubscription = "update_subscription"
+	// MethodRemoveSubscription deletes a subscription source.
+	MethodRemoveSubscription = "remove_subscription"
+	// MethodSetSubscriptionEnabled toggles one source.
+	MethodSetSubscriptionEnabled = "set_subscription_enabled"
+	// MethodRefreshSubscription fetches one source.
+	MethodRefreshSubscription = "refresh_subscription"
+	// MethodGetDaemonStatus reports the daemon engine's setup state.
+	MethodGetDaemonStatus = "get_daemon_status"
+	// MethodDaemonInstall returns the install/update command.
+	MethodDaemonInstall = "daemon_install"
+	// MethodDaemonStart returns the service-start command.
+	MethodDaemonStart = "daemon_start"
+	// MethodDaemonRepair returns the re-pairing command.
+	MethodDaemonRepair = "daemon_repair"
+	// MethodDaemonUninstall returns the service-removal command.
+	MethodDaemonUninstall = "daemon_uninstall"
+	// MethodPairDaemon completes pairing from a pasted invite.
+	MethodPairDaemon = "pair_daemon"
+	// MethodUnpairDaemon drops the local pairing.
+	MethodUnpairDaemon = "unpair_daemon"
+	// MethodSetDaemonKeepRunning stores the daemon exit policy.
+	MethodSetDaemonKeepRunning = "set_daemon_keep_running"
 )
 
 // Request is a single client-to-backend call.
@@ -118,6 +146,10 @@ const (
 	EventProxySelectionChanged = "proxy_selection_changed"
 	// EventTrafficRate carries a periodic up/down speed sample.
 	EventTrafficRate = "traffic_rate"
+	// EventSubscriptionsChanged reports that the source list changed.
+	EventSubscriptionsChanged = "subscriptions_changed"
+	// EventDaemonChanged reports that daemon setup state changed.
+	EventDaemonChanged = "daemon_changed"
 )
 
 // Error is a structured failure. The frontend decides the user-facing
@@ -207,6 +239,10 @@ type CoreState struct {
 	CoreVersion string `json:"core_version,omitempty"`
 	// Backend is "classic" or "daemon".
 	Backend string `json:"backend"`
+	// ConfigStale is true when the built config no longer matches the state —
+	// for example after editing a subscription. The product never rebuilds on
+	// its own, so the UI must surface this and offer a reload.
+	ConfigStale bool `json:"config_stale"`
 	// ErrorMessage carries the last failure, if any.
 	ErrorMessage string `json:"error_message,omitempty"`
 }
@@ -304,6 +340,110 @@ type TrafficRate struct {
 	TotalDown int64 `json:"total_down"`
 	// AtUnixMS is when the sample was taken, in milliseconds since the epoch.
 	AtUnixMS int64 `json:"at_unix_ms"`
+}
+
+// SubscriptionDTO is the compact view of one subscription source.
+//
+// This is deliberately NOT state.Source: that record also carries node bodies,
+// identity overrides, skip rules and update schedules, none of which a menu bar
+// manages. Sending the whole thing would make the frontend depend on the state
+// schema, so a state migration would break the app.
+type SubscriptionDTO struct {
+	// ID is the source ULID, used for every edit and refresh call.
+	ID string `json:"id"`
+	// Name is the user-visible label; auto-derived from the URL when blank.
+	Name string `json:"name"`
+	// URL is the subscription address.
+	URL string `json:"url"`
+	// Enabled excludes the source from the build when false.
+	Enabled bool `json:"enabled"`
+	// NodeCount is how many usable nodes the source currently contributes.
+	NodeCount int `json:"node_count"`
+	// MaxNodes is the per-source cap; 0 means "use the global setting".
+	MaxNodes int `json:"max_nodes"`
+
+	// ProfileTitle is the provider's own name for the profile, when the
+	// provider announced one. Preferred over Name for display when set.
+	ProfileTitle string `json:"profile_title,omitempty"`
+	// SupportURL is the provider's support link, when announced.
+	SupportURL string `json:"support_url,omitempty"`
+
+	// LastAttempt / LastSuccess are RFC3339 UTC timestamps, empty when never.
+	LastAttempt string `json:"last_attempt,omitempty"`
+	LastSuccess string `json:"last_success,omitempty"`
+	// LastStatus is "ok" or "err"; empty when never fetched.
+	LastStatus string `json:"last_status,omitempty"`
+	// LastError is the last failure message, for the row's error line.
+	LastError string `json:"last_error,omitempty"`
+	// HTTPStatusCode and NodesFetched come from the last fetch.
+	HTTPStatusCode int `json:"http_status_code,omitempty"`
+	NodesFetched   int `json:"nodes_fetched,omitempty"`
+}
+
+// Daemon service states. These mirror core.DaemonServiceState so the frontend
+// can branch on a stable string rather than parsing detail text.
+const (
+	// DaemonServiceNotInstalled — no service definition on disk.
+	DaemonServiceNotInstalled = "not_installed"
+	// DaemonServiceUnsafe — the service runs a file the user could replace.
+	DaemonServiceUnsafe = "unsafe"
+	// DaemonServiceStale — the installed copy is not the launcher's core.
+	DaemonServiceStale = "stale"
+	// DaemonServiceNotRunning — installed correctly but not started.
+	DaemonServiceNotRunning = "not_running"
+	// DaemonServiceProcessStale — running an older image than on disk.
+	DaemonServiceProcessStale = "process_stale"
+	// DaemonServiceOK — installed, safe and running the current core.
+	DaemonServiceOK = "ok"
+)
+
+// DaemonStatusDTO describes the daemon engine's setup state.
+//
+// The UI needs this to decide what to offer: an uninstalled service needs
+// install, an unpaired one needs pairing, and only a ready one may be
+// activated. It intentionally carries no secret.
+type DaemonStatusDTO struct {
+	// Supported is false when this build or platform has no daemon engine.
+	Supported bool `json:"supported"`
+	// Service is one of the DaemonService* constants.
+	Service string `json:"service"`
+	// ServiceDetail is the classifier's English reason, for diagnostics.
+	ServiceDetail string `json:"service_detail,omitempty"`
+	// Installed is true once a service definition exists.
+	Installed bool `json:"installed"`
+	// Paired is true when a client identity and server pin are stored.
+	Paired bool `json:"paired"`
+	// Reachable is true when the control plane answered.
+	Reachable bool `json:"reachable"`
+	// Ready is the gate for activating daemon mode: installed + paired +
+	// reachable. Only then may the UI offer to switch engines.
+	Ready bool `json:"ready"`
+	// ActiveMode is true when the daemon is the selected engine.
+	ActiveMode bool `json:"active_mode"`
+
+	// Address is the control-channel endpoint.
+	Address string `json:"address,omitempty"`
+	// Fingerprint is the paired server pin, truncated for display.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// CoreStatus is the daemon's own core state (idle/started/fatal).
+	CoreStatus string `json:"core_status,omitempty"`
+	// DaemonVersion / RunningVersion / LauncherVersion are versions from the
+	// daemon passport, the running image and the launcher's own core.
+	DaemonVersion   string `json:"daemon_version,omitempty"`
+	RunningVersion  string `json:"running_version,omitempty"`
+	LauncherVersion string `json:"launcher_version,omitempty"`
+	// CoreSupportsLxd is false when the installed core has no `lxd` subcommand,
+	// which makes every setup step impossible.
+	CoreSupportsLxd bool `json:"core_supports_lxd"`
+
+	// NeedsInstall / NeedsStart point at the single next repair step.
+	NeedsInstall bool `json:"needs_install"`
+	NeedsStart   bool `json:"needs_start"`
+	// PersistsAfterQuit is the positive phrasing of the exit policy: the VPN
+	// keeps running when the app quits.
+	PersistsAfterQuit bool `json:"persists_after_quit"`
+	// Error carries the daemon's last reported problem, if any.
+	Error string `json:"error,omitempty"`
 }
 
 // Core state values used by CoreState.State.

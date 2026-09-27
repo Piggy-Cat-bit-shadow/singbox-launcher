@@ -12,16 +12,18 @@ struct ProxiesView: View {
     let model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !model.proxiesAvailable {
-                unavailable
-            } else {
-                header
-                searchField
-                nodeList
+        PanelScaffold(model: model, title: "Proxies", onBack: { model.goBack() }) {
+            VStack(alignment: .leading, spacing: 10) {
+                if !model.proxiesAvailable {
+                    unavailable
+                } else {
+                    header
+                    searchField
+                    nodeList
+                }
             }
+            .padding(.vertical, 8)
         }
-        .padding(.vertical, 8)
         .task {
             // Loading in the view's task (not on appear-and-forget) means the
             // spinner reflects the real request lifetime.

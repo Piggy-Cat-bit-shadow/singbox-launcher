@@ -204,6 +204,130 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		}
 		return protocol.Response{ID: req.ID, Result: result}
 
+	case protocol.MethodListSubscriptions:
+		list, err := s.backend.Subscriptions()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: map[string]any{"subscriptions": list}}
+
+	case protocol.MethodAddSubscription:
+		name, _ := req.Params["name"].(string)
+		url, _ := req.Params["url"].(string)
+		dto, err := s.backend.AddSubscription(name, url)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: dto}
+
+	case protocol.MethodUpdateSubscription:
+		id, _ := req.Params["id"].(string)
+		name, _ := req.Params["name"].(string)
+		url, _ := req.Params["url"].(string)
+		// The enabled flag is optional: an edit that does not mention it must
+		// not silently clear it, so absence is distinguished from false.
+		var enabled *bool
+		if v, present := req.Params["enabled"]; present {
+			if b, ok := v.(bool); ok {
+				enabled = &b
+			}
+		}
+		dto, err := s.backend.UpdateSubscription(id, name, url, enabled)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: dto}
+
+	case protocol.MethodRemoveSubscription:
+		id, _ := req.Params["id"].(string)
+		if err := s.backend.RemoveSubscription(id); err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		list, err := s.backend.Subscriptions()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: map[string]any{"subscriptions": list}}
+
+	case protocol.MethodSetSubscriptionEnabled:
+		id, _ := req.Params["id"].(string)
+		enabled, _ := req.Params["enabled"].(bool)
+		dto, err := s.backend.SetSubscriptionEnabled(id, enabled)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: dto}
+
+	case protocol.MethodRefreshSubscription:
+		id, _ := req.Params["id"].(string)
+		dto, err := s.backend.RefreshSubscription(id)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: dto}
+
+	case protocol.MethodGetDaemonStatus:
+		status, err := s.backend.DaemonStatus()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: status}
+
+	case protocol.MethodDaemonInstall:
+		result, err := s.backend.DaemonInstall()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
+	case protocol.MethodDaemonStart:
+		result, err := s.backend.DaemonStart()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
+	case protocol.MethodDaemonRepair:
+		result, err := s.backend.DaemonRepair()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
+	case protocol.MethodDaemonUninstall:
+		purge, _ := req.Params["purge"].(bool)
+		result, err := s.backend.DaemonUninstall(purge)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
+	case protocol.MethodPairDaemon:
+		invite, _ := req.Params["invite"].(string)
+		status, err := s.backend.PairDaemon(invite)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: status}
+
+	case protocol.MethodUnpairDaemon:
+		status, err := s.backend.UnpairDaemonForget()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: status}
+
+	case protocol.MethodSetDaemonKeepRunning:
+		keepRunning, _ := req.Params["enabled"].(bool)
+		if err := s.backend.SetDaemonKeepRunningAfterQuit(keepRunning); err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		status, err := s.backend.DaemonStatus()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: status}
+
 	case protocol.MethodShutdown:
 		// Acknowledge before tearing down so the client is not left waiting.
 		go s.backend.Shutdown()

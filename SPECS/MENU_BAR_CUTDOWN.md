@@ -481,3 +481,139 @@ helper path plus the negative cases.
 This is worth recording because it is the class of bug the menu-bar rewrite
 invites: the Go half kept working, every test passed, and the failure would
 only have appeared when a real user's config was treated as absent.
+
+---
+
+# Navigation, Subscriptions and Daemon completion
+
+Real-device use exposed three product-completeness defects that the earlier
+entry audit could not see, because it counted *features* rather than *paths
+through the app*.
+
+## The three defects
+
+1. **A page with no way out.** NavigationStack's automatic back button is a
+   toolbar item, and a borderless `MenuBarExtra(.window)` panel has nowhere to
+   draw it. More (and every other subpage) could be entered and then had no
+   dependable exit.
+2. **"Update Subscriptions" with no way to enter a subscription.** The KEEP list
+   included subscriptions, but the only control was a button that refreshed
+   sources the user had no way to create.
+3. **Selecting Daemon looked like a freeze.** `set_core_mode("daemon")` was a
+   single click that tried to construct a daemon client immediately. The daemon
+   needs an installed launchd service, a paired identity and a reachable control
+   plane; with none of those present the click stalled instead of explaining.
+
+## What changed
+
+### Navigation
+
+`PanelScaffold` is now the only chrome, used by all 11 screens:
+
+```
+┌──────────────────────────────────────┐
+│ ‹  Title                         Quit │  ← fixed, never scrolls
+├──────────────────────────────────────┤
+│  scrollable page content             │
+└──────────────────────────────────────┘
+```
+
+- **Back is an explicit control**: `model.goBack()`, guarded by
+  `canGoBack`. No reliance on the system affordance, and the navigation bar is
+  hidden so a second back arrow can never appear.
+- **Quit is on every screen**, including Home, from one shared `QuitButton`.
+  It calls `model.quit()` → `shutdown` → backend graceful exit, and never
+  pre-stops the core, so daemon keep-running semantics are preserved.
+- Home passes no `onBack` and shows no back control.
+
+### Subscriptions — a complete loop
+
+| Action | Method | Entry |
+|---|---|---|
+| list | `list_subscriptions` | Subscriptions screen |
+| add | `add_subscription` | Add Subscription |
+| edit | `update_subscription` | row → edit screen |
+| enable / disable | `set_subscription_enabled` | row switch |
+| delete | `remove_subscription` | edit screen, confirmed |
+| refresh one | `refresh_subscription` | edit screen |
+| update all | `update_subscriptions` | Subscriptions screen |
+
+Records live in the canonical **v8 state source tree** via `state.NewSubscriptionSource`
+and `State.Save`. There is no `subscriptions.json` and no second truth. The
+frontend receives a compact `SubscriptionDTO`, never a `state.Source`.
+
+An empty state offers Add rather than an update button that does nothing, and a
+missing `state.json` is treated as a fresh install (the state package's own
+documented meaning of `ErrNotFound`) so the first subscription can be added
+without visiting the wizard.
+
+### Daemon — setup before activation
+
+`get_daemon_status` returns a `DaemonStatusDTO` built from the existing
+`DaemonStatusSnapshot` and the `DaemonServiceCheck` classifier. It carries no
+secret in either direction.
+
+The flow is deliberately two-step:
+
+1. **Setup** (never switches engines): install → start → pair, each returning a
+   quoted shell command from the existing `DaemonInstallCommand` /
+   `DaemonBootstrapCommand` / `DaemonRepairCommand` / `DaemonUninstallCommand`
+   builders. Privileged steps are handed to Terminal instead of running behind a
+   spinner, because a `sudo` operation that waits cannot look like anything but
+   a hang.
+2. **Activate**: `Use Daemon Mode` appears only when status reports
+   `installed && paired && reachable`.
+
+The screen offers exactly **one** next step at a time, so it never presents a
+checklist of parallel actions. Keeping the VPN alive after quit is phrased
+positively in the UI and converted to the stored `DaemonStopVPNOnExit` in the
+backend, so Swift never sees the inverted field.
+
+### No endless pending
+
+`BackendClient` now bounds every request with a per-method timeout (8 s for
+state reads, 15 s for daemon status, 20 s for engine commands, 120 s for network
+work such as provider fetches and latency tests), so a lost response surfaces as
+"Operation timed out (…)" and the button returns to its normal state.
+
+### Two bugs found while verifying
+
+- **`toSubscriptionDTO(nil)` panicked.** A nil source now yields an empty DTO.
+- **Staleness did not survive a restart.** The dirty markers are in-memory, so
+  adding a subscription, quitting and relaunching dropped the "reload needed"
+  prompt. `config_stale` now also compares `state.json` against `config.json`'s
+  mtime, which is durable. The product rule is unchanged: the backend reports
+  staleness and never rebuilds on its own.
+
+## Final audit
+
+Subscriptions:
+
+```
+[x] list          [x] add            [x] edit
+[x] enable        [x] disable        [x] delete
+[x] refresh one   [x] update all
+```
+
+Daemon:
+
+```
+[x] status        [x] install/update [x] start service
+[x] pair          [x] re-pair        [x] mode activate
+[x] switch back to classic           [x] keep running after quit
+[x] error recovery (one next step + refresh, plus Open Core Folder
+    when the installed core has no lxd subcommand)
+```
+
+Navigation:
+
+```
+[x] every child page has Back       [x] every page has Quit
+[x] no dead-end route               [x] no duplicate navigation controls
+```
+
+Verified mechanically: all 10 `Screen` cases have at least one entry
+(`grep path.append`), all 10 subpages call `model.goBack()`, all 11 screens use
+`PanelScaffold`, and all 31 backend methods are dispatched and called by the
+client except `subscribe`, which the transport handles by opening the event
+stream.

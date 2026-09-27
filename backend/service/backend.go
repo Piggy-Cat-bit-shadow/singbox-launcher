@@ -10,6 +10,7 @@ package service
 import (
 	"os"
 	"sync"
+	"time"
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
@@ -18,6 +19,7 @@ import (
 	"singbox-launcher/internal/debuglog"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/paths"
+	"singbox-launcher/internal/platform"
 )
 
 // Backend is the headless application. It wraps the existing core services
@@ -163,7 +165,63 @@ func (b *Backend) coreState() protocol.CoreState {
 		ConfigExists: configExists(b.ac),
 		CoreVersion:  version,
 		Backend:      backend,
+		ConfigStale:  b.configStale(),
 	}
+}
+
+// configStale reports whether the built config has fallen behind the state.
+//
+// Two sources, because the in-memory dirty markers are session-scoped and reset
+// when the backend restarts:
+//
+//  1. the core's own markers, which catch changes made through the config
+//     services in this session; and
+//  2. a timestamp comparison between state.json and config.json, which survives
+//     a restart.
+//
+// The second is what makes the flag honest across launches. Without it, adding
+// a subscription, quitting and relaunching would silently drop the "reload
+// needed" prompt and the user would have no way to learn their new nodes are
+// not in the running config.
+//
+// The product rule is unchanged: this only REPORTS staleness. The backend never
+// rebuilds on its own — rebuilding stays the user's decision.
+func (b *Backend) configStale() bool {
+	if b.ac == nil || b.ac.FileService == nil {
+		return false
+	}
+	if b.ac.StateService != nil &&
+		(b.ac.StateService.IsConfigStale() || b.ac.StateService.IsCacheStale()) {
+		return true
+	}
+	return b.stateNewerThanConfig()
+}
+
+// stateNewerThanConfig compares modification times of state.json and config.json.
+//
+// A missing config is not "stale": a fresh install with no config has nothing to
+// rebuild from, and reporting stale there would show a reload prompt for a
+// config that never existed. A missing state is likewise not stale — there is
+// nothing to build from.
+func (b *Backend) stateNewerThanConfig() bool {
+	statePath := platform.GetWizardStatePath(b.ac.FileService.Layout.Data)
+	configPath := b.ac.FileService.ConfigPath
+	if statePath == "" || configPath == "" {
+		return false
+	}
+
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		return false
+	}
+	configInfo, err := os.Stat(configPath)
+	if err != nil {
+		return false
+	}
+
+	// A one-second tolerance absorbs the same-instant write ordering when a
+	// rebuild saves state and config back to back.
+	return stateInfo.ModTime().Sub(configInfo.ModTime()) > time.Second
 }
 
 // configExists reports whether config.json is present.

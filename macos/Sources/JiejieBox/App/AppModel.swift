@@ -51,6 +51,21 @@ final class AppModel {
         case switchingProxy(String)
         case testingProxy(String)
         case testingGroup
+        case addingSubscription
+        case savingSubscription
+        case removingSubscription
+        case refreshingSubscription
+        case configuringDaemon
+        case pairingDaemon
+    }
+
+    /// A daemon setup step the user can request.
+    enum DaemonSetupStep {
+        case install
+        case start
+        case repair
+        case uninstall
+        case removeAll
     }
 
     private(set) var pending: PendingOperation?
@@ -78,6 +93,45 @@ final class AppModel {
     /// Latest speed sample, nil until the backend sends one. Cleared when the
     /// core stops so a stale rate is never shown as live.
     private(set) var traffic: TrafficRate?
+
+    // MARK: - Subscription state
+
+    private(set) var subscriptions: [Subscription] = []
+    private(set) var subscriptionsLoading = false
+
+    /// Latest maintenance result, shown as a one-line outcome on the
+    /// Subscriptions screen.
+    private(set) var lastMaintenance: MaintenanceResult?
+
+    // MARK: - Daemon state
+
+    /// Daemon setup state, nil until first loaded.
+    private(set) var daemon: DaemonStatus?
+    private(set) var daemonLoading = false
+    /// Command a setup step produced, for the user to copy or run.
+    private(set) var daemonCommand: DaemonCommandResult?
+
+    // MARK: - Navigation
+    //
+    // Back is an explicit model operation rather than the system affordance.
+    // NavigationStack's automatic back button is a toolbar item that a menu-bar
+    // panel cannot reliably show, and a page without a dependable exit is the
+    // defect this whole navigation layer exists to prevent.
+
+    /// True when there is somewhere to go back to.
+    var canGoBack: Bool { !path.isEmpty }
+
+    /// Go back one screen. Safe to call with an empty path.
+    func goBack() {
+        guard !path.isEmpty else { return }
+        path.removeLast()
+    }
+
+    /// Return to the root screen.
+    func goHome() { path.removeAll() }
+
+    /// Current screen, or nil at the root.
+    var currentScreen: Screen? { path.last }
 
     /// Nodes matching the current search, in backend order.
     var filteredProxies: [ProxyNode] {
@@ -120,8 +174,29 @@ final class AppModel {
         case coreDetails
         case coreMode
         case proxies
+        case subscriptions
+        case addSubscription
+        case editSubscription(String)
+        case daemon
+        case daemonPair
         case more
         case about
+
+        /// Title shown in the panel header.
+        var title: String {
+            switch self {
+            case .coreDetails: return "Core Details"
+            case .coreMode: return "Core Mode"
+            case .proxies: return "Proxies"
+            case .subscriptions: return "Subscriptions"
+            case .addSubscription: return "Add Subscription"
+            case .editSubscription: return "Subscription"
+            case .daemon: return "Daemon"
+            case .daemonPair: return "Pair Daemon"
+            case .more: return "More"
+            case .about: return "About"
+            }
+        }
     }
 
     enum AppearancePreference: String, CaseIterable, Identifiable {
@@ -340,6 +415,164 @@ final class AppModel {
         proxiesAvailable = list.available
     }
 
+    // MARK: - Subscriptions
+
+    func loadSubscriptions() async {
+        subscriptionsLoading = true
+        defer { subscriptionsLoading = false }
+        do {
+            subscriptions = try await client.listSubscriptions()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Add a source and return to the list.
+    ///
+    /// Returns true on success so the caller can pop only when the source was
+    /// actually stored — popping on failure would hide the error along with the
+    /// form the user was filling in.
+    func addSubscription(name: String, url: String) async -> Bool {
+        var added = false
+        await withPending(.addingSubscription, success: nil) {
+            _ = try await self.client.addSubscription(name: name, url: url)
+            added = true
+            self.transientStatus = "Subscription added."
+        }
+        if added { await loadSubscriptions() }
+        return added
+    }
+
+    func updateSubscription(id: String, name: String, url: String) async -> Bool {
+        var saved = false
+        await withPending(.savingSubscription, success: nil) {
+            _ = try await self.client.updateSubscription(id: id, name: name, url: url)
+            saved = true
+            self.transientStatus = "Subscription saved."
+        }
+        if saved { await loadSubscriptions() }
+        return saved
+    }
+
+    func setSubscriptionEnabled(_ id: String, enabled: Bool) async {
+        await withPending(.updatingSetting, success: nil) {
+            _ = try await self.client.setSubscriptionEnabled(id: id, enabled: enabled)
+        }
+        await loadSubscriptions()
+    }
+
+    func removeSubscription(_ id: String) async -> Bool {
+        var removed = false
+        await withPending(.removingSubscription, success: nil) {
+            try await self.client.removeSubscription(id: id)
+            removed = true
+            self.transientStatus = "Subscription removed."
+        }
+        if removed { await loadSubscriptions() }
+        return removed
+    }
+
+    /// Refresh one source.
+    ///
+    /// A fetch failure is reported but is NOT fatal to the source: the user's
+    /// URL stays configured with an error line, because a provider being down
+    /// is not a reason to make someone retype their link.
+    func refreshSubscription(_ id: String) async {
+        await withPending(.refreshingSubscription, success: nil) {
+            _ = try await self.client.refreshSubscription(id: id)
+        }
+        await loadSubscriptions()
+    }
+
+    /// Update every enabled source.
+    func updateAllSubscriptions() async {
+        await withPending(.updatingSubscriptions, success: nil) {
+            let result = try await self.client.updateSubscriptions()
+            self.lastMaintenance = result
+            self.report(result, success: "Subscriptions updated.")
+        }
+        await loadSubscriptions()
+        await refreshCoreState()
+    }
+
+    // MARK: - Daemon
+
+    func loadDaemonStatus() async {
+        daemonLoading = true
+        defer { daemonLoading = false }
+        do {
+            daemon = try await client.daemonStatus()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Ask the backend for a setup command (install, start, repair, uninstall).
+    ///
+    /// This never switches engines. Setting up the service and activating it
+    /// are separate steps on purpose: doing both from one click is what made
+    /// selecting Daemon look like a freeze.
+    func daemonSetup(_ step: DaemonSetupStep) async {
+        await withPending(.configuringDaemon, success: nil) {
+            switch step {
+            case .install: self.daemonCommand = try await self.client.daemonInstall()
+            case .start: self.daemonCommand = try await self.client.daemonStart()
+            case .repair: self.daemonCommand = try await self.client.daemonRepair()
+            case .uninstall: self.daemonCommand = try await self.client.daemonUninstall(purge: false)
+            case .removeAll: self.daemonCommand = try await self.client.daemonUninstall(purge: true)
+            }
+            if let cmd = self.daemonCommand { self.daemon = cmd.status }
+        }
+    }
+
+    func pairDaemon(invite: String) async -> Bool {
+        var paired = false
+        await withPending(.pairingDaemon, success: nil) {
+            self.daemon = try await self.client.pairDaemon(invite: invite)
+            paired = self.daemon?.paired ?? false
+            self.transientStatus = paired ? "Daemon paired." : nil
+        }
+        return paired
+    }
+
+    func unpairDaemon() async {
+        await withPending(.pairingDaemon, success: nil) {
+            self.daemon = try await self.client.unpairDaemon()
+            self.transientStatus = "Pairing removed."
+        }
+    }
+
+    func setDaemonKeepRunning(_ keepRunning: Bool) async {
+        await withPending(.updatingSetting, success: nil) {
+            self.daemon = try await self.client.setDaemonKeepRunning(keepRunning)
+        }
+    }
+
+    /// Activate daemon mode. Only offered once the daemon reports ready.
+    func activateDaemonMode() async {
+        guard daemon?.ready == true else {
+            lastError = "Finish the daemon setup before switching to it."
+            return
+        }
+        await setCoreMode("daemon")
+        await loadDaemonStatus()
+    }
+
+    /// Switch back to the classic engine.
+    func activateClassicMode() async {
+        await setCoreMode("classic")
+        await loadDaemonStatus()
+    }
+
+    /// Re-read the core snapshot (used after operations that change staleness).
+    func refreshCoreState() async {
+        do {
+            apply(try await client.snapshot())
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     // MARK: - Maintenance
 
     func reloadConfig() async {
@@ -397,6 +630,13 @@ final class AppModel {
     }
 
     func clearError() { lastError = nil }
+
+    /// Set the transient success line from a view.
+    func setTransientStatus(_ text: String) { transientStatus = text }
+
+    /// Drop the last setup command, so a stale command is not shown next to
+    /// refreshed status.
+    func clearDaemonCommand() { daemonCommand = nil }
 
     // MARK: - Derived state for the views
 

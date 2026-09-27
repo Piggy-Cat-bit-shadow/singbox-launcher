@@ -79,6 +79,20 @@ enum BackendMethod {
     static let testProxyGroup = "test_proxy_group"
     static let reloadConfig = "reload_config"
     static let updateSubscriptions = "update_subscriptions"
+    static let listSubscriptions = "list_subscriptions"
+    static let addSubscription = "add_subscription"
+    static let updateSubscription = "update_subscription"
+    static let removeSubscription = "remove_subscription"
+    static let setSubscriptionEnabled = "set_subscription_enabled"
+    static let refreshSubscription = "refresh_subscription"
+    static let getDaemonStatus = "get_daemon_status"
+    static let daemonInstall = "daemon_install"
+    static let daemonStart = "daemon_start"
+    static let daemonRepair = "daemon_repair"
+    static let daemonUninstall = "daemon_uninstall"
+    static let pairDaemon = "pair_daemon"
+    static let unpairDaemon = "unpair_daemon"
+    static let setDaemonKeepRunning = "set_daemon_keep_running"
     static let shutdown = "shutdown"
 }
 
@@ -93,6 +107,8 @@ enum BackendEventName {
     static let proxiesChanged = "proxies_changed"
     static let proxySelectionChanged = "proxy_selection_changed"
     static let trafficRate = "traffic_rate"
+    static let subscriptionsChanged = "subscriptions_changed"
+    static let daemonChanged = "daemon_changed"
 }
 
 /// A structured backend failure.
@@ -156,6 +172,10 @@ struct CoreStatus: Decodable {
     let config_exists: Bool
     let core_version: String?
     let backend: String
+    /// True when the built config has fallen behind the state (for example
+    /// after editing subscriptions). The product never rebuilds on its own, so
+    /// the UI surfaces this and offers a reload.
+    let config_stale: Bool
     let error_message: String?
 }
 
@@ -262,6 +282,162 @@ enum ByteFormat {
     }
 }
 
+// MARK: - Subscriptions
+
+/// One subscription source, as the backend reports it.
+///
+/// Deliberately a projection rather than the full state record: the app manages
+/// name, URL, enabled and refresh, and never sees node bodies or identity
+/// overrides. See SubscriptionDTO in the Go protocol for the same reasoning.
+struct Subscription: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let url: String
+    let enabled: Bool
+    let node_count: Int
+    let max_nodes: Int
+
+    let profile_title: String?
+    let support_url: String?
+
+    let last_attempt: String?
+    let last_success: String?
+    let last_status: String?
+    let last_error: String?
+    let http_status_code: Int?
+    let nodes_fetched: Int?
+
+    /// Label preference: the provider's own title, then the user's name, then
+    /// the URL host. Providers rename profiles, and their name is the one the
+    /// user recognises from the provider's site.
+    var label: String {
+        if let title = profile_title, !title.isEmpty { return title }
+        if !name.isEmpty { return name }
+        return url
+    }
+
+    /// True when the last fetch failed.
+    var hasError: Bool { last_status == "err" }
+
+    /// True when the source has never been fetched successfully.
+    var neverFetched: Bool { (last_success ?? "").isEmpty }
+
+    /// Human summary of the node count.
+    var nodeSummary: String {
+        node_count == 1 ? "1 node" : "\(node_count) nodes"
+    }
+
+    /// "Updated 2h ago", "Never updated", or the error.
+    var statusSummary: String {
+        if hasError {
+            if let err = last_error, !err.isEmpty { return err }
+            return "Last update failed"
+        }
+        if let success = last_success, !success.isEmpty {
+            return "Updated \(RelativeTime.describe(success))"
+        }
+        return "Never updated"
+    }
+}
+
+/// Result of a list request.
+struct SubscriptionListResponse: Decodable {
+    let subscriptions: [Subscription]
+}
+
+// MARK: - Daemon
+
+/// Daemon engine setup state.
+struct DaemonStatus: Decodable {
+    let supported: Bool
+    let service: String
+    let service_detail: String?
+    let installed: Bool
+    let paired: Bool
+    let reachable: Bool
+    let ready: Bool
+    let active_mode: Bool
+
+    let address: String?
+    let fingerprint: String?
+    let core_status: String?
+    let daemon_version: String?
+    let running_version: String?
+    let launcher_version: String?
+    let core_supports_lxd: Bool
+
+    let needs_install: Bool
+    let needs_start: Bool
+    let persists_after_quit: Bool
+    let error: String?
+
+    /// Short label for the service state, for a status row.
+    var serviceLabel: String {
+        switch service {
+        case "not_installed": return "Not installed"
+        case "unsafe": return "Unsafe"
+        case "stale": return "Update required"
+        case "not_running": return "Stopped"
+        case "process_stale": return "Restart required"
+        case "ok": return "Running"
+        default: return service
+        }
+    }
+
+    /// The single next step, or nil when everything is in place.
+    ///
+    /// One step at a time on purpose: a checklist of five parallel actions
+    /// leaves the user guessing which one matters now.
+    var nextStep: DaemonNextStep? {
+        if !supported { return nil }
+        if !core_supports_lxd { return nil }
+        if !installed || needs_install { return .install }
+        if needs_start { return .start }
+        if !paired { return .pair }
+        if !reachable { return .wait }
+        return nil
+    }
+
+    /// One-line state summary for the Core Mode row.
+    var summary: String {
+        if !supported { return "Unavailable" }
+        if active_mode { return "Active" }
+        if ready { return "Ready" }
+        if !installed || needs_install { return "Setup required" }
+        if needs_start { return "Service stopped" }
+        if !paired { return "Pairing required" }
+        return "Unavailable"
+    }
+}
+
+/// The single next daemon setup step.
+enum DaemonNextStep {
+    case install
+    case start
+    case pair
+    case wait
+
+    var label: String {
+        switch self {
+        case .install: return "Install Service"
+        case .start: return "Start Service"
+        case .pair: return "Pair Service"
+        case .wait: return "Waiting for service…"
+        }
+    }
+}
+
+/// Result of a daemon setup step.
+struct DaemonCommandResult: Decodable {
+    let operation: String
+    let command: String
+    let available: Bool
+    let message: String
+    let needs_admin: Bool
+    let follow_up: String
+    let status: DaemonStatus
+}
+
 // MARK: - Settings
 
 struct SettingsState: Decodable {
@@ -327,4 +503,38 @@ extension BackendEvent {
 struct BackendResponse: Decodable {
     let id: String
     let error: BackendError?
+}
+
+// MARK: - Relative time
+
+/// Renders RFC3339 timestamps as short relative phrases.
+///
+/// The backend sends RFC3339 UTC because that is what the state file stores;
+/// turning it into "2h ago" is presentation, so it lives in the frontend.
+enum RelativeTime {
+    private static let parser: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let parserNoFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// "just now", "5m ago", "2h ago", "3d ago", or the raw string if it
+    /// cannot be parsed (better to show something than nothing).
+    static func describe(_ rfc3339: String) -> String {
+        guard let date = parser.date(from: rfc3339) ?? parserNoFraction.date(from: rfc3339) else {
+            return rfc3339
+        }
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 0 { return "just now" }
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(seconds / 60)m ago" }
+        if seconds < 86_400 { return "\(seconds / 3600)h ago" }
+        return "\(seconds / 86_400)d ago"
+    }
 }

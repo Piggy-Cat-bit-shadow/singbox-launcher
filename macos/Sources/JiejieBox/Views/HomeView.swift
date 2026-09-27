@@ -1,11 +1,20 @@
 // HomeView — the menu-bar panel.
 //
-// Information hierarchy, top to bottom:
-//   identity + status → primary action → banners → runtime → navigation
+// Design intent: answer the seven questions a menu-bar user actually has,
+// top to bottom, without a dashboard.
 //
-// Every row is a MenuRow, so hit targets and feedback are consistent. The
-// window is ~400pt wide: wide enough for real information, still clearly a
-// menu-bar utility rather than a main window.
+//   1. is the VPN running?          → status line
+//   2. how fast is it going?        → speed readout
+//   3. which engine / mode?         → Runtime section
+//   4. which group and node?        → Network section
+//   5. what do I do now?            → the Start/Stop control
+//   6. where is everything else?    → More
+//   7. how do I quit?               → the header, always
+//
+// The previous revision used a full-width prominent button, which outweighed
+// every other element on the panel and read as a web form rather than a macOS
+// utility. The primary control is now a compact button sitting next to the
+// status it acts on, so the visual weight matches how often it is used.
 
 import SwiftUI
 
@@ -13,87 +22,74 @@ struct HomeView: View {
     let model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header
-            primaryAction
-            banners
-            runtimeSection
-            navigationSection
-            Divider().padding(.horizontal, Metrics.sectionPaddingH)
-            footer
+        PanelScaffold(model: model, title: "JiejieBox") {
+            VStack(alignment: .leading, spacing: 10) {
+                statusCard
+                banners
+                if let error = model.lastError { errorBanner(error) }
+                runtimeSection
+                networkSection
+                navigationSection
+            }
+            .padding(.vertical, 10)
         }
-        .padding(.vertical, 10)
     }
 
-    // MARK: - Identity and status
+    // MARK: - Status and the primary control
+    //
+    // Status and its action share one row: the button belongs to the state it
+    // changes, and pairing them removes the need for a giant call-to-action.
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("JiejieBox")
-                    .font(.headline)
-                Spacer(minLength: 0)
-                // The version is the one string here that can be arbitrarily
-                // long (a custom core can carry any tag), so it is the one
-                // that truncates and yields space to the live speed.
-                if let version = model.core?.core_version, !version.isEmpty {
-                    Text(version)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .layoutPriority(-1)
-                        .help(version)
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    StatusLine(state: model.core?.state, error: model.core?.error_message)
+                    if let version = model.core?.core_version, !version.isEmpty {
+                        Text(version)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(version)
+                    }
                 }
+
+                Spacer(minLength: 8)
+
+                primaryButton
             }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                StatusLine(state: model.core?.state, error: model.core?.error_message)
-                Spacer(minLength: 0)
-                if model.core?.state == .running, let rate = model.traffic {
-                    speedReadout(rate)
-                }
+
+            if model.core?.state == .running, let rate = model.traffic {
+                Divider().padding(.vertical, 2)
+                speedReadout(rate)
             }
         }
         .padding(.horizontal, Metrics.rowPaddingH)
+        .padding(.vertical, 6)
     }
 
-    /// Live up/down speed, shown only while connected.
-    ///
-    /// Monospaced digits so the numbers do not jitter the layout as they
-    /// change every second.
-    private func speedReadout(_ rate: TrafficRate) -> some View {
-        HStack(spacing: 6) {
-            Label(ByteFormat.rate(rate.down), systemImage: "arrow.down")
-                .foregroundStyle(.secondary)
-            Label(ByteFormat.rate(rate.up), systemImage: "arrow.up")
-                .foregroundStyle(.secondary)
-        }
-        .font(.caption.monospacedDigit())
-        .labelStyle(.titleAndIcon)
-        .lineLimit(1)
-        .help("Total since connect: ↓ \(ByteFormat.size(rate.total_down)) · ↑ \(ByteFormat.size(rate.total_up))")
-    }
-
-    // MARK: - Primary action
-
-    private var primaryAction: some View {
+    private var primaryButton: some View {
         Button {
             Task { await model.toggleCore() }
         } label: {
-            HStack(spacing: 6) {
-                if let state = model.core?.state, state.isTransitioning {
+            if model.core?.state.isTransitioning == true {
+                HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
+                    Text(primaryTitle)
                 }
+                .frame(minWidth: 78)
+            } else {
                 Text(primaryTitle)
-                    .frame(maxWidth: .infinity)
+                    .frame(minWidth: 78)
             }
-            .frame(minHeight: 34)
         }
         .controlSize(.large)
         .buttonStyle(.borderedProminent)
+        // Prominent only while it is the thing to do; once connected the button
+        // is a plain-bordered stop control, so a running VPN does not shout.
+        .tint(model.core?.state == .running ? nil : .accentColor)
         .disabled(!canAct)
-        .keyboardShortcut(.defaultAction)
-        .padding(.horizontal, Metrics.rowPaddingH)
         .help(primaryHelp)
     }
 
@@ -108,9 +104,8 @@ struct HomeView: View {
         }
     }
 
-    /// Disabled only during a real transition, or when there is no core binary
-    /// to start. The reason is surfaced in the button's help text rather than
-    /// leaving a dead control unexplained.
+    /// Disabled only during a transition or when there is nothing to start, with
+    /// the reason in the help text rather than an unexplained dead control.
     private var canAct: Bool {
         guard case .ready = model.connection else { return false }
         guard let core = model.core else { return false }
@@ -128,18 +123,26 @@ struct HomeView: View {
         return core.state == .running ? "Stop the core" : "Start the core"
     }
 
-    /// The node in use, so Home answers "what am I connected through?"
-    /// without a trip to the Proxy screen.
-    private var proxySummary: String {
-        guard model.core?.state == .running else { return "—" }
-        if let node = model.proxies.first(where: { $0.selected }) {
-            return node.label
+    /// Up/down speed, monospaced so the numbers do not jitter the layout.
+    private func speedReadout(_ rate: TrafficRate) -> some View {
+        HStack(spacing: 16) {
+            speedItem(symbol: "arrow.down", value: ByteFormat.rate(rate.down),
+                      total: rate.total_down, label: "Downloaded")
+            speedItem(symbol: "arrow.up", value: ByteFormat.rate(rate.up),
+                      total: rate.total_up, label: "Uploaded")
+            Spacer(minLength: 0)
         }
-        if let group = model.groups.first(where: { $0.name == model.selectedGroup }),
-           let selected = group.selected_display ?? group.selected, !selected.isEmpty {
-            return selected
+    }
+
+    private func speedItem(symbol: String, value: String, total: Int64, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Label(value, systemImage: symbol)
+                .font(.callout.monospacedDigit())
+            Text("\(ByteFormat.size(total)) total")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-        return "Choose…"
+        .help("\(label) since connecting")
     }
 
     // MARK: - Banners
@@ -151,37 +154,78 @@ struct HomeView: View {
                 Button("Restart") { Task { await model.restart() } }
                     .controlSize(.small)
             }
-        } else if let error = model.lastError {
-            Banner(kind: .error, message: error) {
+        } else if model.coreMissing {
+            Banner(kind: .error, message: "The sing-box core binary was not found.") {
+                Button("Reveal Folder") { model.revealConfigFolder() }
+                    .controlSize(.small)
+            }
+        } else if model.configMissing {
+            Banner(kind: .warning, message: "No config.json yet. Add a subscription to build one.") {
+                Button("Subscriptions") { model.path.append(.subscriptions) }
+                    .controlSize(.small)
+            }
+        } else if model.core?.config_stale == true {
+            Banner(kind: .warning, message: "The configuration has changed since it was built.") {
+                Button("Reload") {
+                    Task {
+                        await model.reloadConfig()
+                        await model.refreshCoreState()
+                    }
+                }
+                .controlSize(.small)
+            }
+        } else if let status = model.transientStatus {
+            Banner(kind: .info, message: status) {
                 Button {
-                    model.clearError()
+                    model.setTransientStatus("")
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)
-                .help("Dismiss")
-            }
-        } else if let status = model.transientStatus {
-            Banner(kind: .success, message: status) {
-                EmptyView()
-            }
-        } else if model.coreMissing || model.configMissing {
-            Banner(kind: .warning, message: missingRecoveryText) {
-                Button("Open Folder") { model.revealConfigFolder() }
-                    .controlSize(.small)
             }
         }
     }
 
-    private var missingRecoveryText: String {
-        if model.coreMissing { return "The sing-box core binary was not found." }
-        return "config.json was not found. Reload or create one, then try again."
+    /// A failure the user must see; dismissible so it cannot trap the panel.
+    private func errorBanner(_ message: String) -> some View {
+        Banner(kind: .error, message: message) {
+            Button {
+                model.clearError()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.plain)
+        }
     }
 
     // MARK: - Runtime
 
     private var runtimeSection: some View {
         MenuSection("Runtime") {
+            MenuRow("Core Details", systemImage: "info.circle",
+                    value: model.core?.state.label ?? "—",
+                    showsChevron: true) {
+                model.path.append(.coreDetails)
+            }
+            MenuRow("Core Mode", systemImage: "gearshape",
+                    value: coreModeValue,
+                    showsChevron: true) {
+                model.path.append(.coreMode)
+            }
+        }
+    }
+
+    private var coreModeValue: String {
+        if model.coreModeLabel == "Daemon" {
+            return model.daemon?.summary == "Active" ? "Daemon" : "Daemon"
+        }
+        return "Classic"
+    }
+
+    // MARK: - Network
+
+    private var networkSection: some View {
+        MenuSection("Network") {
             MenuRow("Proxies", systemImage: "arrow.triangle.branch",
                     value: proxySummary,
                     showsChevron: true) {
@@ -191,75 +235,68 @@ struct HomeView: View {
             .help(model.core?.state == .running
                   ? "Choose a proxy group and node."
                   : "Start the core to choose a proxy.")
-            MenuRow("Core Details", systemImage: "info.circle",
-                    value: model.core?.state.label ?? "—",
-                    showsChevron: true) {
-                model.path.append(.coreDetails)
-            }
-            MenuRow("Core Mode", systemImage: "gearshape",
-                    value: model.coreModeLabel,
-                    showsChevron: true) {
-                model.path.append(.coreMode)
-            }
         }
+    }
+
+    /// The node in use, so Home answers "what am I connected through?"
+    /// without a trip to the Proxies screen.
+    private var proxySummary: String {
+        guard model.core?.state == .running else { return "—" }
+        if let node = model.proxies.first(where: { $0.selected }) {
+            let delay = node.isMeasured ? " · \(node.delay) ms" : ""
+            return node.label + delay
+        }
+        if let group = model.groups.first(where: { $0.name == model.selectedGroup }),
+           let selected = group.selected_display ?? group.selected, !selected.isEmpty {
+            return selected
+        }
+        return "Choose…"
     }
 
     // MARK: - Navigation
 
     private var navigationSection: some View {
-        MenuSection {
+        MenuSection("Manage") {
+            MenuRow("Subscriptions", systemImage: "arrow.down.circle",
+                    value: subscriptionSummary,
+                    showsChevron: true) {
+                model.path.append(.subscriptions)
+            }
             MenuRow("More", systemImage: "ellipsis.circle", showsChevron: true) {
                 model.path.append(.more)
             }
         }
     }
 
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack(spacing: 8) {
-            Button("Reveal Config") { model.revealConfig() }
-                .buttonStyle(.plain)
-                .font(.callout)
-                .help(model.settings?.config_path ?? "Config path unknown")
-                .disabled(model.settings?.config_path.isEmpty ?? true)
-
-            Spacer(minLength: 0)
-
-            Button("Quit") {
-                Task {
-                    // The backend decides the core's fate: in daemon mode with
-                    // keep-running on, the core is meant to outlive the GUI.
-                    // Stopping it here would silently break that policy.
-                    await model.quit()
-                    NSApplication.shared.terminate(nil)
-                }
-            }
-            .buttonStyle(.plain)
-            .font(.callout)
-            .keyboardShortcut("q")
-        }
-        .padding(.horizontal, Metrics.rowPaddingH)
+    private var subscriptionSummary: String {
+        let count = model.subscriptions.count
+        if count == 0 { return "None" }
+        return count == 1 ? "1" : "\(count)"
     }
 }
 
 // MARK: - Shared pieces
 
-/// Status dot plus label.
+/// The status dot and label.
 struct StatusLine: View {
     let state: CoreState?
-    let error: String?
+    var error: String?
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Circle()
                 .fill(color)
-                .frame(width: 7, height: 7)
-            Text(state?.label ?? "Connecting…")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .frame(width: 8, height: 8)
+            Text(label)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.primary)
         }
         .help(error ?? "")
+    }
+
+    private var label: String {
+        guard let state else { return "Connecting…" }
+        return state.label
     }
 
     private var color: Color {
@@ -267,51 +304,51 @@ struct StatusLine: View {
         case .running: return .green
         case .starting, .stopping: return .orange
         case .error: return .red
-        default: return .secondary
+        case .stopped, .none: return .secondary
         }
     }
 }
 
-/// Inline message with an optional trailing action.
+/// An inline message with an optional action.
+///
+/// Rendered as a row rather than a coloured card: the panel is small, and a
+/// full-bleed tinted box competes with the content it is meant to annotate.
 struct Banner<Action: View>: View {
-    enum Kind { case warning, error, success }
+    enum Kind { case info, warning, error }
 
     let kind: Kind
     let message: String
     @ViewBuilder var action: () -> Action
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: symbol)
                 .foregroundStyle(tint)
+                .font(.system(size: 12))
             Text(message)
                 .font(.caption)
+                .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 8)
             action()
         }
         .padding(.horizontal, Metrics.rowPaddingH)
         .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: Metrics.rowCorner)
-                .fill(tint.opacity(0.08))
-                .padding(.horizontal, Metrics.sectionPaddingH)
-        )
     }
 
     private var symbol: String {
         switch kind {
-        case .warning: return "exclamationmark.triangle.fill"
-        case .error: return "exclamationmark.circle.fill"
-        case .success: return "checkmark.circle.fill"
+        case .info: return "info.circle"
+        case .warning: return "exclamationmark.triangle"
+        case .error: return "xmark.octagon"
         }
     }
 
     private var tint: Color {
         switch kind {
+        case .info: return .secondary
         case .warning: return .orange
         case .error: return .red
-        case .success: return .green
         }
     }
 }

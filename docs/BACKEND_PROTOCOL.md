@@ -81,6 +81,20 @@ Exactly one of `result` / `error` is present.
 | `test_proxy_group` | `group` | `ProxyList` | Measure all nodes, sequential |
 | `reload_config` | — | `MaintenanceResult` | Forced full rebuild |
 | `update_subscriptions` | — | `MaintenanceResult` | Refresh all sources |
+| `list_subscriptions` | — | `{subscriptions: [SubscriptionDTO]}` | Configured sources |
+| `add_subscription` | `name`, `url` | `SubscriptionDTO` | URL required; blank name derives from the host |
+| `update_subscription` | `id`, `name`, `url`, `enabled?` | `SubscriptionDTO` | Omitted fields are left unchanged |
+| `remove_subscription` | `id` | `{subscriptions: [...]}` | Returns the remaining list |
+| `set_subscription_enabled` | `id`, `enabled` | `SubscriptionDTO` | |
+| `refresh_subscription` | `id` | `SubscriptionDTO` | Fetches one source; marks config stale |
+| `get_daemon_status` | — | `DaemonStatusDTO` | Setup state; contains no secret |
+| `daemon_install` | — | `DaemonCommandResult` | Command for the user to run |
+| `daemon_start` | — | `DaemonCommandResult` | Loads the installed service |
+| `daemon_repair` | — | `DaemonCommandResult` | Fresh pairing invite |
+| `daemon_uninstall` | `purge` | `DaemonCommandResult` | Removes the service |
+| `pair_daemon` | `invite` | `DaemonStatusDTO` | Enrols from a pasted invite |
+| `unpair_daemon` | — | `DaemonStatusDTO` | Drops the local pairing |
+| `set_daemon_keep_running` | `enabled` | `DaemonStatusDTO` | Positive phrasing of the exit policy |
 
 Unknown methods return `unknown_method`.
 
@@ -99,6 +113,8 @@ Unknown methods return `unknown_method`.
 | `log_line` | `{line}` | Backend log line |
 | `error` | `BackendError` | Non-fatal problem |
 | `shutting_down` | `null` | Backend is exiting |
+| `subscriptions_changed` | `null` | The source list was edited |
+| `daemon_changed` | `null` | Daemon setup state changed |
 
 ### `core_state_changed` is a real transition, not a command echo
 
@@ -152,6 +168,28 @@ produce a flood of events.
 {"up": 2048, "down": 102400, "total_up": 500000, "total_down": 9000000,
  "at_unix_ms": 1700000000000}
 
+// SubscriptionDTO
+{"id": "01M3…", "name": "provider.example", "url": "https://…",
+ "enabled": true, "node_count": 128, "max_nodes": 0,
+ "profile_title": "My Airport", "support_url": "https://…",
+ "last_attempt": "2026-09-27T15:00:00Z", "last_success": "…",
+ "last_status": "ok", "last_error": "", "http_status_code": 200,
+ "nodes_fetched": 128}
+
+// DaemonStatusDTO
+{"supported": true, "service": "not_installed|unsafe|stale|not_running|process_stale|ok",
+ "installed": false, "paired": false, "reachable": false, "ready": false,
+ "active_mode": false, "core_supports_lxd": true,
+ "needs_install": false, "needs_start": false,
+ "address": "127.0.0.1:19091", "fingerprint": "ab12…", "core_status": "idle",
+ "daemon_version": "…", "running_version": "…", "launcher_version": "…",
+ "persists_after_quit": true, "error": ""}
+
+// DaemonCommandResult
+{"operation": "install", "command": "sudo '/…/sing-box' lxd --service=install",
+ "available": true, "message": "Run the command in Terminal…",
+ "needs_admin": true, "follow_up": "pair", "status": {…}}
+
 // MaintenanceResult
 {"ok": true, "message": "5 nodes from 2 sources.",
  "total_sources": 2, "succeeded_sources": 2, "failed_sources": 0,
@@ -191,6 +229,14 @@ first" instead of showing a broken empty list.
 | `update_failed` | yes | Subscription refresh failed |
 | `interrupted` | yes | The system went to sleep mid-request |
 | `persist_failed` | yes | State changed but could not be saved |
+| `state_unreadable` | yes | state.json exists but could not be parsed |
+| `duplicate` | no | That subscription URL is already configured |
+| `not_found` | no | No subscription with that id |
+| `refresh_failed` | yes | The provider fetch failed; the source is kept |
+| `save_failed` | yes | Could not write state.json |
+| `bad_invite` | no | The pasted invite is not address#fingerprint#code |
+| `pair_failed` | yes | Enrolment with the service failed |
+| `unpair_failed` | yes | Could not remove the local pairing |
 
 `recoverable` describes whether retrying after the stated condition can help —
 it is advice for the UI, not a guarantee.
@@ -210,3 +256,14 @@ it is advice for the UI, not a guarantee.
 4. **Operations that can half-succeed report it.** `MaintenanceResult.ok` is
    false when a refresh ran but every source failed — a case that returns no
    error yet changed nothing.
+5. **Editing sources never rebuilds.** Subscriptions and Daemon are the surfaces
+   a menu bar actually touches, and both follow the product rule that rebuilding
+   the config is the user's decision: `config_stale` is reported, and the UI
+   offers Reload. `config_stale` is derived from the core's dirty markers **and**
+   from comparing `state.json` against `config.json`, so it survives a restart.
+6. **Daemon setup and activation are separate.** Setup returns a command for the
+   user to run; only a status reporting `installed && paired && reachable` may be
+   activated. Conflating the two is what made the engine switch look like a hang.
+7. **Every request is bounded by the client.** Per-method timeouts (8 s reads,
+   15 s daemon status, 20 s engine commands, 120 s network work) mean a lost
+   response becomes an error instead of a permanently pending button.
