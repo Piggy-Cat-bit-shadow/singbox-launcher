@@ -4,13 +4,16 @@
 
 ## EN
 ### Highlights
-- **New navigation shell.** A vertical sidebar replaces the horizontal emoji tab strip. Pages are grouped with real sub-sections (Local → Overview / Proxies / Traffic, Remote → Machines / Proxies, Settings → Connection / Subscriptions / Language / Storage), so the launcher reads like a modern desktop client instead of a row of tabs.
-- **Vector icons instead of emoji.** Navigation, buttons and status no longer depend on the system colour-emoji font. Emoji rendered differently on macOS, Windows and Linux — and vanished entirely on a Linux box without an emoji font. Everything is a themed SVG or a Fyne theme icon now, so it scales with the display and follows light/dark.
-- **A window size that makes sense.** The minimum was 560 logical units (395 + 165) while the comment beside it promised 1000 — the window could be shrunk until the right pane collapsed. It now starts at 1180×760 and cannot go below 960×640, and the Local/Remote columns are sized by proportion with real minimums instead of two fixed numbers.
-- **Consistent design system.** Spacing, radii, typography and colours come from one place (`ui/design`) rather than being scattered as magic numbers, so pages share a rhythm and a look.
+- **A real visual redesign, not a re-skin.** The launcher now has its own application theme (light and dark palettes, macOS-like greys, #007AFF accent) instead of Fyne's defaults — which is why earlier layout work still looked like a stock toolkit. Every standard control inherits it.
+- **Flat navigation.** The sidebar is one level of grouped items (Home / Network / Tools, About pinned at the bottom) with a soft rounded highlight on the selected item. The tree — and the admin-panel accent bar — are gone; detail navigation moved into the pages themselves.
+- **A Home dashboard.** Instead of a proxy list beside a service panel, the app opens on a summary: connection state and the Start/Stop action, core and config details, and cards that lead to Proxies, Remote and Traffic. The proxy list gets the full page width where it belongs.
+- **Content is no longer stretched edge to edge.** Pages keep a readable column (860 units, centred on wide windows) instead of cards spanning the whole display.
+- **Settings and Diagnostics are grouped by meaning** into cards rather than a long form divided by rules; destructive actions are set apart.
 
 ### Technical / Internal
-- SPEC 144. New `ui/design` package: `metrics.go` (4-unit spacing, radii, sidebar geometry, split ratios, window sizes), `typography.go` (five text levels), `colors.go` (semantic colours derived from the active theme), `sidebar.go`, `page.go` (PageHeader, SectionCard, StatusBadge).
+- SPEC 145. `ui/design.Theme` implements `fyne.Theme` with explicit light/dark palettes and the app's radii; `Font()`/`Icon()` delegate to the default theme (swapping fonts would break metrics on Windows/Linux). Installed from `main.go` — `core/uiservice` is L2 and must not import `ui/` (L7), so the stock `SetTheme` call there was removed rather than left to overwrite it.
+- `RouteID` separates presentation routes from business domains: `selectSection` runs only when the domain actually changes, so Home → Proxies → Traffic neither re-applies scope/transport nor re-polls.
+- New primitives: `MaxWidthLayout` (constrains and centres content, never its `MinSize`), `Card`/`ClickableCard`/`CardRow`, `SegmentedNav`, `StatusBadge`, primary/secondary/ghost/icon actions, `tintResource` (recolours `currentColor` SVGs so one icon serves normal and selected states).
 - Navigation semantics preserved mechanically: the entire body of `app.tabs.OnSelected` moved verbatim into `App.selectSection` (`ui/navigation.go`). The sidebar and the retained (now off-screen) `AppTabs` both call that single method, so there is exactly one implementation of scope → panel activation → transport → refresh, in the original order.
 - Pages are constructed once and swapped through a content host, so switching sections keeps scroll position, field contents and expanded sections.
 - Collapsed sidebar parents keep the selected highlight while their child is active, and clicking a parent only expands it — it never changes the page.
@@ -20,10 +23,11 @@
 
 ## RU
 ### Основное
-- **Новая навигация.** Вертикальный сайдбар вместо горизонтальной строки вкладок с emoji. Страницы сгруппированы с реальными подразделами (Local → Overview / Proxies / Traffic, Remote → Machines / Proxies, Settings → Connection / Subscriptions / Language / Storage), и лаунчер читается как современный десктопный клиент, а не как ряд вкладок.
-- **Векторные иконки вместо emoji.** Навигация, кнопки и статус больше не зависят от системного emoji-шрифта: emoji выглядели по-разному на macOS, Windows и Linux, а на Linux без такого шрифта просто исчезали. Теперь это themed-SVG или иконки темы Fyne: масштабируются вместе с экраном и следуют light/dark.
-- **Осмысленный размер окна.** Минимум был 560 logical units (395 + 165), хотя комментарий рядом обещал 1000 — окно сжималось до схлопывания правой панели. Теперь старт 1180×760, ниже 960×640 не опускается, а колонки Local/Remote заданы долей с реальными минимумами вместо двух фиксированных чисел.
-- **Единая дизайн-система.** Отступы, радиусы, типографика и цвета — из одного места (`ui/design`), а не россыпью магических чисел: у страниц общий ритм и общий вид.
+- **Настоящий визуальный редизайн, а не перекраска.** У лаунчера появилась своя тема приложения (светлая и тёмная палитры, macOS-подобные серые, акцент #007AFF) вместо дефолтной Fyne — именно поэтому прошлые правки вёрстки всё равно выглядели как «стандартный тулкит». Тема наследуется всеми стандартными контролами.
+- **Плоская навигация.** Сайдбар — один уровень пунктов, сгруппированных заголовками (Главная / Сеть / Инструменты, «О программе» прижат внизу), выбранный пункт подсвечен мягкой скруглённой заливкой. Дерево и полоса-индикатор в стиле админки убраны; детализация переехала на сами страницы.
+- **Дашборд на главной.** Вместо списка узлов рядом со служебной панелью приложение открывается сводкой: состояние и кнопка Start/Stop, сведения о ядре и конфиге, карточки-переходы к Прокси, Remote и Трафику. Список узлов получает всю ширину страницы, где он и нужен.
+- **Контент больше не растянут от края до края.** Страницы держат читаемую колонку (860 units, по центру на широком окне) вместо карточек на весь экран.
+- **Настройки и Диагностика сгруппированы по смыслу** в карточки, а не в длинную форму с линиями; опасные действия вынесены отдельно.
 
 ### Техническое / Внутреннее
 - SPEC 144. Новый пакет `ui/design`: `metrics.go` (4-й ритм отступов, радиусы, геометрия сайдбара, доли сплита, размеры окна), `typography.go` (пять уровней текста), `colors.go` (semantic-цвета из активной темы), `sidebar.go`, `page.go` (PageHeader, SectionCard, StatusBadge).
