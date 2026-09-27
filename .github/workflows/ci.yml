@@ -1,55 +1,39 @@
-name: CI/CD
+name: CI/CD (macOS only)
 
 # ==============================================================================
-# CI/CD Workflow Usage
+# Fork-local workflow: macOS only.
 #
-# This workflow supports three explicit scenarios:
+# This fork is used on a single Apple Silicon Mac, so only the macOS pipeline
+# is kept. Windows (Win64, Win7, installer) and Linux/Ubuntu jobs were removed
+# to stop spending Actions minutes on platforms this fork never ships.
+# The cross-platform SOURCE support is untouched — only CI scope changed.
+#
+# Jobs:
+#   Meta        version/channel computation
+#   Test macOS  go mod download + build/test_darwin.sh
+#   Build macOS Universal .app + Catalina (Intel-only) .app, uploaded as artifacts
+#   Release     macOS packages only, when a tag is pushed or run_mode=prerelease
+#
+# Scenarios:
 #
 # 1) Stable Release (manual tag)
-# ------------------------------------------------------------------------------
-# Create and push a version tag manually:
-#   git tag v0.6.1
-#   git push origin v0.6.1
-#
-# Result:
-# - Workflow is triggered by the tag
-# - Full build is executed
-# - GitHub Release is created (draft)
-# - Release artifacts are attached
-# - prerelease = false
+#   git tag v0.6.1 && git push origin v0.6.1
+#   -> full build, GitHub Release created, prerelease = false
 #
 # 2) Pre-release (manual trigger)
-# ------------------------------------------------------------------------------
-# gh workflow run ci.yml --ref develop \
-#   -f run_mode=prerelease \
-#   -f skip_tests=true
-#
-# Result:
-# - Version/tag generated automatically:
-#   git describe --tags --exclude='*-prerelease' + -prerelease (e.g. v0.8.0-16-gc185054-prerelease)
-# - Tag is created and pushed by workflow
-# - GitHub Pre-release is created (draft)
-# - prerelease = true
+#   gh workflow run ci.yml --ref <branch> -f run_mode=prerelease -f skip_tests=true
+#   -> version = git describe --exclude='*-prerelease' + -prerelease, tag pushed,
+#      GitHub Pre-release created
 #
 # 3) Build only (no release, no tag)
-# ------------------------------------------------------------------------------
-# gh workflow run ci.yml --ref develop \
-#   -f run_mode=build \
-#   -f skip_tests=true
-#
-# Result:
-# - Build artifacts are produced and uploaded
-# - No git tag is created
-# - No GitHub Release is created
+#   gh workflow run ci.yml --ref <branch> -f run_mode=build -f skip_tests=false
+#   -> macOS artifacts uploaded; no tag, no release
 #
 # Notes:
-# - push to main → tests only
-# - pull requests → tests only
-# - workflow_dispatch controls manual behaviors
-# - No automatic tagging happens except prereleases
-#
-# NOTE:
-# Tags with prefix v.dev.* are CI-generated and should not be used as stable releases.
+# - push to main  -> tests only
+# - pull request  -> tests only
+# - workflow_dispatch controls manual behavior
+# - Tags with prefix v.dev.* are CI-generated and are not stable releases.
 # ==============================================================================
 
 on:
@@ -72,11 +56,6 @@ on:
         required: false
         default: false
         type: boolean
-      target:
-        description: "Targets to build (space-separated): macOS, Win64, Win7. Empty = all. Example: macOS Win64"
-        required: false
-        default: ""
-        type: string
 
 # Default permission: read-only. Release job overrides to contents: write.
 permissions:
@@ -88,7 +67,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') ||
         (github.event_name == 'workflow_dispatch' &&
           (github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease'))
-    runs-on: ubuntu-24.04
+    runs-on: macos-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
@@ -142,20 +121,14 @@ jobs:
           fi
 
   test:
-    name: Test
+    name: Test macOS
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main')
       || (github.event_name == 'pull_request')
       || (github.event_name == 'workflow_dispatch' &&
           (github.event.inputs.run_mode == 'tests' ||
            ((github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease')
              && github.event.inputs.skip_tests != 'true')))
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Ubuntu пиннится версией: на плавающем образе GitHub меняет набор
-        # системных пакетов молча, и зелёная сборка краснеет сама собой.
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: macos-latest
 
     steps:
       - name: Checkout code
@@ -169,130 +142,52 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install build dependencies (Linux)
-        if: matrix.os == 'ubuntu-24.04'
-        shell: bash
-        run: |
-          sudo apt-get update
-          # libwayland-dev/libxkbcommon-dev: GLFW 3.4 (fyne >= 2.8) compiles its
-          # Wayland backend unconditionally, so its headers are needed even for
-          # an X11-only build. xorg-dev alone fails with wayland-client-core.h.
-          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libgtk-3-dev libwayland-dev libxkbcommon-dev
-
-      - name: Verify C compiler (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: cmd
-        continue-on-error: true
-        run: |
-          gcc --version || echo GCC check failed, but continuing...
-
       - name: Install dependencies
         run: go mod download
 
-      # Тот же страж стоит в build-win7, но та джоба идёт только на теге и
-      # ручном запуске с целью Win7 — сигнал приезжал бы на выпуске. Здесь он
-      # приезжает на каждом PR и до тестов, за пару секунд.
-      - name: Win7 (go1.20) constructs guard
-        if: matrix.os == 'ubuntu-24.04'
-        shell: bash
-        run: |
-          set -euo pipefail
-          go run ./tools/win7guard
-
-      - name: Clean previous coverage files (Linux/macOS)
-        if: matrix.os != 'windows-latest'
-        shell: bash
-        run: |
-          rm -f coverage.out coverage.txt coverage.html || true
-
-      - name: Clean previous coverage files (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: cmd
-        run: |
-          if exist coverage.out del /q coverage.out
-          if exist coverage.txt del /q coverage.txt
-          if exist coverage.html del /q coverage.html
-
-      - name: Run tests (Ubuntu)
-        if: matrix.os == 'ubuntu-24.04'
-        env:
-          CGO_ENABLED: 1
-        shell: bash
-        run: |
-          bash build/test_linux.sh nopause
-
       - name: Run tests (macOS)
-        if: matrix.os == 'macos-latest'
         env:
           CGO_ENABLED: 1
         shell: bash
         run: |
           bash build/test_darwin.sh nopause
 
-      - name: Run tests (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: cmd
-        env:
-          CGO_ENABLED: 1
-        run: |
-          echo === Verifying coverage files are cleaned ===
-          if exist coverage.out (echo ERROR: coverage.out still exists && exit /b 1)
-          if exist coverage.txt (echo ERROR: coverage.txt still exists && exit /b 1)
-          if exist coverage.html (echo ERROR: coverage.html still exists && exit /b 1)
-          echo Coverage files cleaned successfully
-          echo.
-          echo === Running tests via build script ===
-          call build\test_windows.bat nopause
-
-      - name: L10n checks (SPEC 111)
-        if: matrix.os == 'ubuntu-24.04'
+      # Tooling guards that are platform-independent static checks. They used to
+      # run in the Ubuntu leg; macOS runs them just as well and they are worth
+      # keeping (they catch i18n drift and path-join violations before review).
+      - name: L10n and paths checks
         shell: bash
         run: |
           go run ./tools/l10n/l10n_check --strict
           go run ./tools/l10n/hardcoded_check --strict
           go run ./tools/paths_guard --strict
 
-      - name: Upload coverage (Ubuntu)
-        if: matrix.os == 'ubuntu-24.04'
-        uses: codecov/codecov-action@v5
-        with:
-          # v5 загружает отчёт через Codecov CLI, и входа `file` у него нет:
-          # список файлов теперь `files` (через запятую). Старый ключ
-          # действие молча игнорирует — отчёт уезжал бы пустым.
-          files: ./coverage.out
-          flags: unittests
-          name: codecov-umbrella
+      - name: Win7 (go1.20) constructs guard
+        shell: bash
+        continue-on-error: true
+        run: |
+          go run ./tools/win7guard
 
-      - name: Check go mod tidy is clean (Ubuntu)
-        if: matrix.os == 'ubuntu-24.04'
+      - name: Check go mod tidy is clean
         shell: bash
         run: |
           set -euo pipefail
-
           echo "Running go mod tidy check..."
           go mod tidy
-
           if ! git diff --exit-code; then
             echo ""
-            echo "❌ go.mod / go.sum are not tidy"
-            echo ""
-            echo "Please run locally:"
-            echo "  go mod tidy"
-            echo "  git commit -am \"go mod tidy\""
-            echo ""
-            echo "Diff:"
+            echo ":x: go.mod / go.sum are not tidy"
+            echo "Please run locally: go mod tidy && git commit -am \"go mod tidy\""
             git diff
             exit 1
           fi
-
-          echo "✅ go.mod and go.sum are tidy"
+          echo ":white_check_mark: go.mod and go.sum are tidy"
 
   build-darwin:
     name: Build macOS
     if: startsWith(github.ref, 'refs/tags/v') ||
         (github.event_name == 'workflow_dispatch' &&
-          (github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease') &&
-          (github.event.inputs.target == '' || contains(github.event.inputs.target, 'macOS')))
+          (github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease'))
     needs: meta
     runs-on: macos-latest
 
@@ -366,370 +261,16 @@ jobs:
           path: dist/*
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
 
-  build-windows:
-    name: Build Windows (Win64)
-    if: startsWith(github.ref, 'refs/tags/v') ||
-        (github.event_name == 'workflow_dispatch' &&
-          (github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease') &&
-          (github.event.inputs.target == '' || contains(github.event.inputs.target, 'Win64')))
-    needs: meta
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Export version and channel
-        shell: bash
-        run: |
-          echo "Version: ${{ needs.meta.outputs.version }}"
-          echo "Channel: ${{ needs.meta.outputs.channel }}"
-
-      - name: Install dependencies
-        run: go mod download
-
-      - name: Verify C compiler
-        shell: cmd
-        continue-on-error: true
-        run: |
-          gcc --version || echo GCC check failed, but continuing...
-
-      - name: Install rsrc
-        shell: cmd
-        run: |
-          go install github.com/akavel/rsrc@latest
-          for /f "delims=" %%g in ('go env GOPATH') do echo rsrc installed to: %%g\bin
-
-      - name: Build Windows .exe
-        shell: cmd
-        env:
-          CGO_ENABLED: 1
-          GOOS: windows
-          GOARCH: amd64
-          APP_VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          call build\build_windows.bat silent
-          if not exist dist mkdir dist
-          move /y singbox-launcher.exe dist\singbox-launcher.exe
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v6
-        with:
-          name: artifacts-windows
-          path: dist/*
-          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
-
-  build-win7:
-    name: Build Windows 7 (x86, legacy)
-    if: startsWith(github.ref, 'refs/tags/v') ||
-        (github.event_name == 'workflow_dispatch' &&
-          (github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease') &&
-          (github.event.inputs.target == '' || contains(github.event.inputs.target, 'Win7')))
-    needs: meta
-    runs-on: windows-latest
-    env:
-      GOFLAGS: -mod=mod
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go (legacy)
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.20.14'
-          cache: true
-
-      - name: Show version info
-        shell: bash
-        run: |
-          echo "Version: ${{ needs.meta.outputs.version }}"
-          echo "Channel: ${{ needs.meta.outputs.channel }}"
-
-      - name: Patch go.mod to Go 1.20
-        shell: pwsh
-        run: |
-          Copy-Item -Force go.mod go.mod.orig
-          (Get-Content go.mod) -replace 'go\s+[0-9]+\.[0-9]+(\.[0-9]+)?','go 1.20' | Set-Content go.mod
-
-      - name: Remove Win7 sum file (always regenerate on CI)
-        shell: pwsh
-        run: |
-          if (Test-Path go.win7.sum) {
-            Remove-Item go.win7.sum -Force
-          }
-
-      - name: Download dependencies
-        run: go mod download "-modfile=go.win7.mod"
-
-      - name: Populate Win7 go.sum entries
-        run: go get "-modfile=go.win7.mod" ./...
-
-      # `go get ./...` резолвит все пакеты модуля независимо от build-тегов и
-      # побочно поднимает директиву `go` в go.win7.mod до версии самой новой
-      # зависимости (grpc → 1.25, fyne-tooltip → 1.21). Go 1.20.14 такой модуль
-      # собирать отказывается. Версии пиннятся через replace в go.win7.mod;
-      # здесь возвращаем директиву обратно — ровно как шаг выше делает с go.mod.
-      - name: Restore Go 1.20 directive in go.win7.mod
-        shell: pwsh
-        run: |
-          (Get-Content go.win7.mod) -replace '^go\s+[0-9]+\.[0-9]+(\.[0-9]+)?$','go 1.20' | Set-Content go.win7.mod
-          Select-String -Path go.win7.mod -Pattern '^go ' | ForEach-Object { $_.Line }
-
-      # Конструкции go1.21+ валят сборку тулчейном 1.20.14 ошибкой компилятора
-      # где-то в середине лога; страж называет файл, строку и версию сразу и
-      # до установки MSYS2. Модульный файл — win7-овский, тот же, что у шага
-      # сборки: он уже выкачан шагами выше. `-mod=readonly` перебивает
-      # GOFLAGS джобы, чтобы шаг не мог тронуть go.win7.mod — директиву `go`
-      # в нём только что вернули на 1.20. Сам страж на stdlib, догружать
-      # нечего.
-      - name: Win7 (go1.20) constructs guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          go run -mod=readonly "-modfile=go.win7.mod" ./tools/win7guard
-
-      # MSYS2 нужен ТОЛЬКО для сборки
-      - name: Setup MSYS2 (MINGW32)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW32
-          update: true
-          install: |
-            mingw-w64-i686-toolchain
-            mingw-w64-i686-pkgconf
-            base-devel
-            git
-
-      - name: Build Windows 7 x86 (Fyne +rsrc@fixed)
-        shell: msys2 {0}
-        env:
-          GOOS: windows
-          GOARCH: 386
-          CGO_ENABLED: 1
-          GOFLAGS: -mod=mod
-          APP_VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          set -e
-
-          export GOOS=windows
-          export GOARCH=386
-          export CGO_ENABLED=1
-
-          export PATH="/c/hostedtoolcache/windows/go/1.20.14/x64/bin:$PATH"
-          export PATH="/mingw32/bin:$PATH"
-          export GOPATH_MSYS="$(cygpath -u "$(go env GOPATH)")"
-          export PATH="$GOPATH_MSYS/bin/${GOOS}_${GOARCH}:$PATH"
-          export PATH="$GOPATH_MSYS/bin:$PATH"
-
-          export CC=i686-w64-mingw32-gcc
-          export CXX=i686-w64-mingw32-g++
-
-          go install github.com/akavel/rsrc@v0.10.1
-          echo "=== rsrc diagnostics ==="
-          which rsrc.exe || { echo "rsrc.exe NOT in PATH"; exit 1; }
-
-          echo "GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED GOPATH_MSYS=$GOPATH_MSYS"
-          go version
-          gcc --version | head -n1
-
-          mkdir -p dist
-
-          # Embed icon + manifest. Win7 — app.win7.manifest с
-          # requireAdministrator: UAC при каждом старте, всё под
-          # администратором, TUN сразу; службы и установщика нет, раскладка
-          # только portable. Win64 (Windows 10/11) — app.manifest с asInvoker
-          # (SPEC 139) через build/build_windows.bat. Без
-          # requestedExecutionLevel 32-битный процесс попал бы под
-          # UAC-виртуализацию, и проба записи раскладки (SPEC 135) врала бы.
-          if [ -f "assets/app.ico" ]; then
-            rsrc.exe -arch ${GOARCH} -ico assets/app.ico -manifest app.win7.manifest -o rsrc.syso
-            echo "objdump -f rsrc.syso:"
-            objdump -f rsrc.syso || true
-          fi
-
-          # RequiredTemplateRef pinned to commit being built — see SPEC 046.
-          # Mirrors the resolution done in build/build_windows.bat for parity
-          # with the modern Windows build.
-          TEMPLATE_REF=$(git rev-parse HEAD)
-          if [ -z "$TEMPLATE_REF" ]; then
-            echo "Could not resolve git HEAD for RequiredTemplateRef; aborting"
-            exit 1
-          fi
-          echo "Template ref: $TEMPLATE_REF"
-          echo "App version:  $APP_VERSION"
-
-          go build -modfile=go.win7.mod -v \
-            -tags desktop \
-            -trimpath \
-            -ldflags "-s -w -H windowsgui \
-              -X singbox-launcher/internal/constants.AppVersion=$APP_VERSION \
-              -X singbox-launcher/internal/constants.RequiredTemplateRef=$TEMPLATE_REF" \
-            -o dist/singbox-launcher-win7-32.exe .
-
-          ls -lh dist/singbox-launcher-win7-32.exe
-
-      - name: Upload artifacts (Win7 x86)
-        uses: actions/upload-artifact@v6
-        with:
-          name: artifacts-windows-win7-32
-          path: dist/singbox-launcher-win7-32.exe
-          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
-
-
-  # Установщик Inno Setup (SPEC 140 §7): тот же набор win64-full, что в zip,
-  # но без portable.txt. Собирается там же, где Win64, и из его exe.
-  build-windows-installer:
-    name: Build Windows installer (Win64)
-    if: startsWith(github.ref, 'refs/tags/v') ||
-        (github.event_name == 'workflow_dispatch' &&
-          (github.event.inputs.run_mode == 'build' || github.event.inputs.run_mode == 'prerelease') &&
-          (github.event.inputs.target == '' || contains(github.event.inputs.target, 'Win64')))
-    needs: [meta, build-windows]
-    runs-on: windows-latest
-
-    steps:
-      # fetch-depth: 0 — нужны теги для git describe (числовая версия), а
-      # также шаблон и assets/wintun-*.zip той же ревизии.
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Download Win64 exe
-        uses: actions/download-artifact@v6
-        with:
-          name: artifacts-windows
-          path: win-exe
-
-      - name: Stage win64-full (no portable.txt)
-        shell: bash
-        env:
-          APP_VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          set -euo pipefail
-          bash build/installer/stage_win64_full.sh win-exe/singbox-launcher.exe "$APP_VERSION" installer-stage
-          find installer-stage -type f | sort
-          test ! -e installer-stage/portable.txt
-
-      # VersionInfoVersion требует X.Y.Z.N. AppVersion (v2.1.0,
-      # v2.1.0-11-g…-prerelease, dev.<ветка>.<sha>) так не выразить, поэтому
-      # число берётся из ближайшего stable-тега: --match отсекает mesa3d-* и
-      # v.dev.*, --exclude — пререлизные теги. Не разобралось — job падает,
-      # 0.0.0.0 не подставляется.
-      - name: Compute numeric version
-        id: numver
-        shell: bash
-        run: |
-          set -euo pipefail
-          DESCRIBE="$(git describe --tags --long --match 'v[0-9]*' --exclude '*-prerelease')"
-          echo "describe: $DESCRIBE"
-          if [[ "$DESCRIBE" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-g ]]; then
-            NUMERIC="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}.${BASH_REMATCH[4]}"
-          else
-            echo "::error::cannot derive VersionInfoVersion from '$DESCRIBE' (expected vX.Y.Z-N-g<sha>)"
-            exit 1
-          fi
-          for part in ${NUMERIC//./ }; do
-            if [ "$part" -gt 65535 ]; then
-              echo "::error::VersionInfoVersion component $part of $NUMERIC exceeds 65535"
-              exit 1
-            fi
-          done
-          echo "numeric=$NUMERIC" >> "$GITHUB_OUTPUT"
-          echo "VersionInfoVersion: $NUMERIC"
-
-      - name: Locate Inno Setup compiler
-        id: iscc
-        shell: pwsh
-        run: |
-          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
-          if (-not (Test-Path $iscc)) {
-            Write-Host "ISCC not found in the image, installing Inno Setup via Chocolatey"
-            choco install innosetup -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
-          }
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
-          # Скрипт требует 6.4+ (x64os и UTF-8 без BOM — 6.3,
-          # ExecAndCaptureOutput — 6.4); образ несёт новее, и тогда ставить
-          # ничего не нужно — только проверка. У ISCC.exe нет ресурса версии,
-          # поэтому версия — из записи удаления Inno Setup; нет записи —
-          # остаётся проверка #if VER в самом .iss.
-          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1'
-          $display = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).DisplayVersion
-          Write-Host "ISCC: $iscc (Inno Setup $display)"
-          if ($display) {
-            if ([version]$display -lt [version]'6.4.0') { throw "Inno Setup $display is too old, 6.4+ required" }
-          } else {
-            Write-Host "::warning::Inno Setup version unknown; the .iss checks it at compile time"
-          }
-          "path=$iscc" >> $env:GITHUB_OUTPUT
-
-      - name: Build installer
-        shell: pwsh
-        env:
-          APP_VERSION: ${{ needs.meta.outputs.version }}
-          APP_VERSION_NUMERIC: ${{ steps.numver.outputs.numeric }}
-          ISCC: ${{ steps.iscc.outputs.path }}
-        run: |
-          $stage = (Resolve-Path installer-stage).Path
-          $out = Join-Path $PWD 'dist'
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          & $env:ISCC "/DAppVersion=$env:APP_VERSION" "/DAppVersionNumeric=$env:APP_VERSION_NUMERIC" "/DStageDir=$stage" "/O$out" build\installer\singbox-launcher.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
-          Get-ChildItem $out | Format-Table Name, Length
-
-      # Ветка службы (#ifdef DaemonService) включится после SPEC 141; до тех
-      # пор её компилирует только эта проверка — на пустых файлах-заглушках,
-      # чтобы не жать набор второй раз. Результат выбрасывается.
-      - name: Compile-check DaemonService variant
-        shell: pwsh
-        env:
-          APP_VERSION: ${{ needs.meta.outputs.version }}
-          APP_VERSION_NUMERIC: ${{ steps.numver.outputs.numeric }}
-          ISCC: ${{ steps.iscc.outputs.path }}
-        run: |
-          $fake = Join-Path $env:RUNNER_TEMP 'installer-fake-stage'
-          New-Item -ItemType Directory -Force -Path (Join-Path $fake 'bin'), (Join-Path $fake 'mesa3d') | Out-Null
-          foreach ($f in 'singbox-launcher.exe', 'bin\sing-box.exe', 'mesa3d\opengl32.dll', 'mesa3d\libgallium_wgl.dll', 'mesa3d\dxil.dll') {
-            New-Item -ItemType File -Force -Path (Join-Path $fake $f) | Out-Null
-          }
-          $out = Join-Path $env:RUNNER_TEMP 'installer-check'
-          & $env:ISCC /Q /DDaemonService "/DAppVersion=$env:APP_VERSION" "/DAppVersionNumeric=$env:APP_VERSION_NUMERIC" "/DStageDir=$fake" "/O$out" build\installer\singbox-launcher.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC (DaemonService) failed ($LASTEXITCODE)" }
-
-      - name: Upload installer
-        uses: actions/upload-artifact@v6
-        with:
-          name: artifacts-windows-installer
-          path: dist/*-win64-setup.exe
-          if-no-files-found: error
-          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
-
 
   release:
     name: Create Release
-    needs: [meta, build-darwin, build-windows, build-win7, build-windows-installer]
-    runs-on: ubuntu-24.04
+    needs: [meta, build-darwin]
+    runs-on: macos-latest
     permissions:
       contents: write
     if: always() &&
         needs.meta.result == 'success' &&
-        (needs.build-darwin.result == 'success' || needs.build-darwin.result == 'skipped') &&
-        (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
-        (needs.build-win7.result == 'success' || needs.build-win7.result == 'skipped') &&
-        (needs.build-windows-installer.result == 'success' || needs.build-windows-installer.result == 'skipped') &&
-        (needs.build-darwin.result == 'success' || needs.build-windows.result == 'success' || needs.build-win7.result == 'success') &&
+        needs.build-darwin.result == 'success' &&
         (startsWith(github.ref, 'refs/tags/v') ||
          (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'prerelease'))
 
@@ -774,12 +315,12 @@ jobs:
           cd release-artifacts
 
           VERSION="${{ needs.meta.outputs.version }}"
-          echo "=== Creating release packages for version: $VERSION ==="
+          echo "=== Creating macOS release packages for version: $VERSION ==="
           echo ""
 
           echo "=== Cleaning up unwanted files/directories ==="
           if [ -d "logs" ]; then
-            echo "⚠ Found logs directory, removing it..."
+            echo "Found logs directory, removing it..."
             rm -rf logs
           fi
           find . -name "*.log" -type f -delete 2>/dev/null || true
@@ -788,104 +329,35 @@ jobs:
 
           MACOS_APP=$(find . -name "singbox-launcher.app" -type d | head -1 || true)
           if [ -n "${MACOS_APP:-}" ]; then
-            echo "✓ Found singbox-launcher.app, creating ZIP..."
+            echo "Found singbox-launcher.app, creating ZIP..."
             zip -r "singbox-launcher-${VERSION}-macos.zip" "$MACOS_APP"
-            echo "✓ Created: singbox-launcher-${VERSION}-macos.zip"
+            echo "Created: singbox-launcher-${VERSION}-macos.zip"
           else
-            echo "⚠ Warning: singbox-launcher.app not found"
+            echo "Warning: singbox-launcher.app not found"
           fi
 
-          # Also check for a Catalina-targeted build artifact
+          # Catalina-targeted (Intel-only, macOS 10.15+) build, when present.
           MACOS_APP_CATALINA=$(find . -name "singbox-launcher-macos-catalina.app" -type d | head -1 || true)
           if [ -n "${MACOS_APP_CATALINA:-}" ]; then
-            echo "✓ Found Catalina-targeted app, creating ZIP..."
+            echo "Found Catalina-targeted app, creating ZIP..."
             zip -r "singbox-launcher-${VERSION}-macos-catalina.zip" "$MACOS_APP_CATALINA"
-            echo "✓ Created: singbox-launcher-${VERSION}-macos-catalina.zip"
-          fi
-
-          # Маркер portable-режима (SPEC 135 §3.2): кладётся во все Windows-архивы
-          # (win64, win64-full, win7-32), содержимое не парсится приложением.
-          PORTABLE_MARKER="$(pwd)/portable.txt"
-          printf 'Portable mode: the launcher keeps its data next to this file. Delete this file to store data in %%LOCALAPPDATA%%\\singbox-launcher instead.\r\n' > "$PORTABLE_MARKER"
-
-          WIN_EXE=$(find . -name "singbox-launcher.exe" -type f -size +0 | head -1 || true)
-          if [ -n "${WIN_EXE:-}" ]; then
-            echo "✓ Found singbox-launcher.exe at: $WIN_EXE"
-            echo "Creating ZIP with only the .exe file (no directory structure)..."
-            EXE_DIR=$(dirname "$WIN_EXE")
-            EXE_NAME=$(basename "$WIN_EXE")
-            ORIGINAL_DIR=$(pwd)
-            cp "$PORTABLE_MARKER" "$EXE_DIR/portable.txt"
-            cd "$EXE_DIR"
-            zip -j "${ORIGINAL_DIR}/singbox-launcher-${VERSION}-win64.zip" "$EXE_NAME" "portable.txt"
-            cd "$ORIGINAL_DIR"
-            echo "✓ Created: singbox-launcher-${VERSION}-win64.zip"
-            echo ""
-            echo "=== ZIP contents verification ==="
-            unzip -l "singbox-launcher-${VERSION}-win64.zip" || true
-          else
-            echo "⚠ Warning: singbox-launcher.exe not found"
-            find . -name "*.exe" -type f || echo "No .exe files found"
-          fi
-
-          # ---- Windows "full": exe + ядро + wintun + шаблон + Mesa3D ----
-          # Для машин без интернета к GitHub и для RDP/ВМ без GPU: первый запуск
-          # ничего не качает. Набор собирает общий скрипт — тот же, что у
-          # установщика (SPEC 140 §7), поэтому состав zip и установщика не
-          # расходится. Скрипт portable.txt не кладёт: маркер — только в zip.
-          if [ -n "${WIN_EXE:-}" ]; then
-            echo ""
-            echo "=== Creating win64-full bundle ==="
-            FULL_DIR="$(pwd)/win64-full"
-            bash ../build/installer/stage_win64_full.sh "$WIN_EXE" "$VERSION" "$FULL_DIR"
-            cp "$PORTABLE_MARKER" "$FULL_DIR/portable.txt"
-            ( cd "$FULL_DIR" && zip -qr "../singbox-launcher-${VERSION}-win64-full.zip" . )
-            rm -rf "$FULL_DIR"
-            echo "✓ Created: singbox-launcher-${VERSION}-win64-full.zip"
-            unzip -l "singbox-launcher-${VERSION}-win64-full.zip" || true
-          fi
-
-          WIN7_EXE=$(find . -name "singbox-launcher-win7-32.exe" -type f -size +0 | head -1 || true)
-          if [ -n "${WIN7_EXE:-}" ]; then
-            echo "✓ Found singbox-launcher-win7-32.exe at: $WIN7_EXE"
-            EXE_DIR=$(dirname "$WIN7_EXE")
-            EXE_NAME=$(basename "$WIN7_EXE")
-            ORIGINAL_DIR=$(pwd)
-            cp "$PORTABLE_MARKER" "$EXE_DIR/portable.txt"
-            cd "$EXE_DIR"
-            zip -j "${ORIGINAL_DIR}/singbox-launcher-${VERSION}-win7-32.zip" "$EXE_NAME" "portable.txt"
-            cd "$ORIGINAL_DIR"
-            echo "✓ Created: singbox-launcher-${VERSION}-win7-32.zip"
-          else
-            echo "⚠ Warning: singbox-launcher-win7-32.exe not found (Win7 build may have been skipped)"
-          fi
-
-          # Установщик (SPEC 140) приходит готовым из build-windows-installer —
-          # только поднять в корень, рядом с архивами.
-          SETUP_EXE=$(find . -name "singbox-launcher-${VERSION}-win64-setup.exe" -type f -size +0 | head -1 || true)
-          if [ -n "${SETUP_EXE:-}" ]; then
-            if [ "$SETUP_EXE" != "./singbox-launcher-${VERSION}-win64-setup.exe" ]; then
-              mv -f "$SETUP_EXE" "singbox-launcher-${VERSION}-win64-setup.exe"
-            fi
-            echo "✓ Found installer: singbox-launcher-${VERSION}-win64-setup.exe"
-          else
-            echo "⚠ Warning: singbox-launcher-${VERSION}-win64-setup.exe not found (installer build may have been skipped)"
+            echo "Created: singbox-launcher-${VERSION}-macos-catalina.zip"
           fi
 
           echo ""
           echo "=== Creating checksums ==="
-          find . -maxdepth 1 \( -name "singbox-launcher-${VERSION}-*.zip" -o -name "singbox-launcher-${VERSION}-win64-setup.exe" \) -type f -size +0 -exec sha256sum {} \; > checksums.txt
+          find . -maxdepth 1 -name "singbox-launcher-${VERSION}-*.zip" -type f -size +0 -exec shasum -a 256 {} \; > checksums.txt
           if [ -f checksums.txt ] && [ -s checksums.txt ]; then
             echo "Checksums created:"
             cat checksums.txt
           else
-            echo "⚠ Warning: checksums.txt is empty"
+            echo "Warning: checksums.txt is empty"
             : > checksums.txt
           fi
 
           echo ""
           echo "=== Files to upload ==="
-          ls -lh singbox-launcher-${VERSION}-*.zip singbox-launcher-${VERSION}-win64-setup.exe checksums.txt 2>/dev/null || true
+          ls -lh singbox-launcher-${VERSION}-*.zip checksums.txt 2>/dev/null || true
 
       - name: Read release notes
         id: release_notes
@@ -966,70 +438,38 @@ jobs:
 
             Install with a single command (version ${{ needs.meta.outputs.version }}):
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/Leadaxe/singbox-launcher/develop/scripts/install-macos.sh | bash -s -- ${{ needs.meta.outputs.version }}
+            curl -fsSL "https://raw.githubusercontent.com/Piggy-Cat-bit-shadow/singbox-launcher/main/scripts/install-macos.sh" | bash -s -- ${{ needs.meta.outputs.version }}
             ```
 
-            The script will:
-            - Download the release archive
-            - Extract and install to `/Applications/`
-            - Fix macOS quarantine attributes and permissions
-            - Launch the application automatically
+            The script downloads the release archive, extracts it to `/Applications/`,
+            fixes quarantine attributes and permissions, and launches the app.
 
             **Option 2: Manual Installation**
 
             1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-macos.zip`
             2. Extract the ZIP file
-            3. Remove quarantine attribute (required):
+            3. Remove the quarantine attribute:
                ```bash
-               xattr -cr "singbox-launcher.app" && chmod +x "singbox-launcher.app/Contents/MacOS/singbox-launcher"
+               xattr -cr "singbox-launcher.app"
                ```
             4. Double-click `singbox-launcher.app` to run
-               - If macOS blocks the app, go to **System Settings → Privacy & Security** and click **"Open Anyway"**
-               - Alternatively, right-click the app and select **"Open"** (first time only)
+               - If macOS blocks the app, use **System Settings -> Privacy & Security -> Open Anyway**
 
-            #### Windows (amd64)
+            #### macOS (Catalina, Intel-only)
 
-            **Option 1: Installer (Recommended)**
+            1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-macos-catalina.zip`
+            2. Same installation steps as above; targets macOS 10.15+ on Intel Macs
 
-            1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-win64-setup.exe`
-            2. Run it and confirm the administrator prompt once. The launcher goes to `C:\Program Files\singbox-launcher`, your data to `%LOCALAPPDATA%\singbox-launcher`; `sing-box.exe`, `wintun.dll`, the config template and Mesa3D are included, nothing is downloaded on first launch
-               - Tasks: desktop shortcut, Start with Windows, software OpenGL (Mesa3D) for RDP / VMs without a GPU
-               - Installing over a previous version keeps your data; uninstall from **Settings → Apps** asks whether to remove the data too
-               - The installer is not code-signed yet: if SmartScreen shows "Windows protected your PC", click **More info → Run anyway**
-
-            **Option 2: Portable ZIP**
-
-            1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-win64.zip`
-               - or `singbox-launcher-${{ needs.meta.outputs.version }}-win64-full.zip` — **full** bundle: `sing-box.exe`, `wintun.dll`, the config template and Mesa3D (`mesa3d/`, used only when no hardware OpenGL — RDP, VMs) are already inside, nothing is downloaded on first launch
-            2. Extract the ZIP file to a folder your account can write to, for example `D:\Tools\singbox-launcher\` — settings stay next to the program (`portable.txt`)
-               - Under `C:\Program Files\` the launcher keeps its data in `%LOCALAPPDATA%\singbox-launcher` instead
-            3. Run `singbox-launcher.exe` from that folder — no administrator rights, no UAC prompt
-               - TUN needs administrator rights: Start offers **Restart as administrator** or **Switch to proxy mode**
-               - The regular archive downloads `sing-box` and `wintun.dll` on first launch
-
-            #### Windows 7 (x86, legacy)
-
-            1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-win7-32.zip`
-            2. Extract the ZIP file to a folder and run `singbox-launcher-win7-32.exe`
-               - For Windows 7 / 32-bit or legacy compatibility only
-               - Runs as administrator (UAC prompt on every start), settings stay next to the program (`portable.txt`); no installer and no daemon service
-
-            #### Linux Support
-
-            ⚠️ **Linux build temporarily unavailable** - мы ищем тестировщика для ручного тестирования перед включением автоматической сборки.
+            > This fork builds macOS only. Windows and Linux packages are not produced here.
 
             ### Checksums
 
-            See `checksums.txt` for SHA256 checksums of all files.
+            See `checksums.txt` for SHA256 checksums.
 
             ${{ steps.release_notes.outputs.notes }}
           files: |
             release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-macos.zip
             release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-macos-catalina.zip
-            release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-win64-setup.exe
-            release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-win64.zip
-            release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-win64-full.zip
-            release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-win7-32.zip
             release-artifacts/checksums.txt
           # Publish immediately. RELEASE_PROCESS §1.6 / §2.4 promise the release is
           # ready out of the box (no manual un-draft step). Historical default was
