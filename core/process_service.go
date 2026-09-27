@@ -132,6 +132,11 @@ type ProcessService struct {
 	// для опознания после перезапуска лаунчера, поэтому старт не отменяется,
 	// но состояние видно UI и логу.
 	pidFileWriteFailed atomic.Bool
+	// stopOverrideForTest — шов для проверки, что OnAppExit остаётся
+	// синхронным. Продакшн его не задаёт (nil).
+	stopOverrideForTest func()
+	// privDeps — шов зависимостей привилегированного старта; nil = продакшн.
+	privDeps *privilegedStartDeps
 }
 
 // Куда пишет вывод classic-ядро (ProcessService.coreLog).
@@ -425,6 +430,75 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 // root-owned копии ядра и сам показал диалог с командой (SPEC 137).
 var errPrivilegedCopyNotReady = errors.New("the root-owned core copy for the privileged start is not ready")
 
+// privilegedStartTimeout — сколько ждать ответа AEWP, прежде чем вернуть
+// управление. Диалог авторизации может стоять долго (пользователь отошёл),
+// и без предела GUI остался бы с «идёт запуск» навсегда. Значение заведомо
+// больше любого реального ввода пароля и не влияет на уже запущенный процесс.
+const privilegedStartTimeout = 3 * time.Minute
+
+// privilegedStartDeps — внешние зависимости привилегированного старта.
+//
+// Шов живёт ПОЛЕМ ProcessService, а не переменной пакета: пакетные
+// переменные общие для всех тестов, и параллельно идущие тесты (и
+// goroutine-ожидатель, переживающая тест) гоняются за них — -race это ловит.
+// nil-поле означает продакшн-поведение.
+type privilegedStartDeps struct {
+	// gate — гейт защищённой root-owned копии (читает /Library, нужен root).
+	gate func(*AppController) (string, error)
+	// start — запуск ядра под root через AEWP.
+	start func(corePath, binDir, configName string) (int, int, error)
+	// waitExit — ожидание выхода root-процесса.
+	waitExit func(int)
+}
+
+// deps возвращает действующие зависимости.
+func (svc *ProcessService) deps() privilegedStartDeps {
+	if svc.privDeps != nil {
+		return *svc.privDeps
+	}
+	return privilegedStartDeps{
+		gate:     func(ac *AppController) (string, error) { return ac.privilegedCoreCopyGate() },
+		start:    platform.StartPrivilegedCore,
+		waitExit: platform.WaitForPrivilegedExit,
+	}
+}
+
+// privilegedStartResult — то, что worker обязан вернуть вызывающему.
+// Только данные: никакого состояния здесь не коммитится.
+type privilegedStartResult struct {
+	Script  int
+	Singbox int
+	Err     error
+}
+
+// commitPrivilegedStartLocked фиксирует состояние успешного привилегированного
+// старта.
+//
+// PRECONDITION: ac.CmdMutex УЖЕ удерживается вызывающим. Эта функция НЕ берёт
+// CmdMutex и не имеет права его брать: caller — это ProcessService.Start(),
+// который держит мьютекс на всё время старта, и повторный Lock здесь означал бы
+// самоблокировку (именно она вешала GUI на реальном TUN-старте: worker ждал
+// мьютекс, который caller не отпустит до получения PID от worker'а).
+//
+// Вызывающий получает PID из канала и коммитит состояние сам, поэтому
+// инвариант «Start() вернул успех ⇒ RunningState уже true» сохраняется без
+// вложенного захвата.
+func (svc *ProcessService) commitPrivilegedStartLocked(scriptPID, singboxPID int, pidFilePath string) {
+	ac := svc.ac
+	svc.coreLog.Store(coreLogPrivileged)
+	ac.SingboxCmd = nil
+	ac.SingboxPrivilegedMode = true
+	ac.SingboxPrivilegedPID = scriptPID
+	ac.SingboxPrivilegedSingboxPID = singboxPID
+	ac.SingboxPrivilegedPIDFile = pidFilePath
+	ac.StoppedByUser = false
+	ac.ConsecutiveCrashAttempts = 0
+	if ac.StateService != nil {
+		ac.StateService.ResetAutoUpdateFailedAttempts() // auto-update may retry after a successful start
+	}
+	ac.RunningState.Set(true)
+}
+
 // startSingBoxPrivileged starts sing-box with elevated privileges on macOS (for TUN).
 // Команда root-шелла собирается в platform; оркестрация и состояние — здесь.
 //
@@ -433,9 +507,13 @@ var errPrivilegedCopyNotReady = errors.New("the root-owned core copy for the pri
 // нет. Скрипт в каталоге данных больше не пишется. SPEC 137.1: вывод ядра
 // root пишет в свой каталог (platform.PrivilegedCoreLogPath) и там же
 // ротирует его; каталог пользователя root не трогает.
+//
+// PRECONDITION: ac.CmdMutex удерживается вызывающим (Start). Worker НЕ берёт
+// CmdMutex — см. commitPrivilegedStartLocked.
 func (svc *ProcessService) startSingBoxPrivileged() error {
 	ac := svc.ac
-	corePath, err := ac.privilegedCoreCopyGate()
+	deps := svc.deps()
+	corePath, err := deps.gate(ac)
 	if err != nil {
 		return err
 	}
@@ -453,67 +531,52 @@ func (svc *ProcessService) startSingBoxPrivileged() error {
 	}
 
 	debuglog.WarnLog("startSingBox: Starting Sing-Box with elevated privileges (TUN) from %s...", corePath)
-	type privilegedPids struct {
-		Script, Singbox int
-		Err             error
-	}
-	// Канал без буфера намеренно: горутина не может «отдать PID и убежать».
-	// Она обязана сперва зафиксировать состояние, и только потом вызывающий
-	// получит PID. Иначе Start() возвращал успех при RunningState == false
-	// (SPEC 145) — процесс уже работал, а лаунчер считал ядро остановленным.
-	pidCh := make(chan privilegedPids, 1)
+
+	// Буферизованный канал на 1: worker кладёт ровно один результат и уходит.
+	// Буфер здесь не про асинхронность, а про то, что worker не должен
+	// зависеть от того, успел ли caller к моменту отправки: он обязан
+	// завершиться и не держать ресурсы AEWP.
+	pidCh := make(chan privilegedStartResult, 1)
 	go func() {
-		scriptPID, singboxPID, runErr := platform.StartPrivilegedCore(corePath, binDir, configName)
-		if runErr != nil {
-			pidCh <- privilegedPids{Err: runErr}
-			ac.CmdMutex.Lock()
-			alreadyStopped := ac.SingboxPrivilegedMode
-			ac.CmdMutex.Unlock()
-			if !alreadyStopped {
-				debuglog.WarnLog("startSingBox: privileged run failed: %v", runErr)
-			}
-			return
-		}
-		// Состояние фиксируется ДО отдачи PID и под CmdMutex, который
-		// вызывающий отпустит только после получения PID из канала. Порядок
-		// «коммит состояния → публикация PID» и есть инвариант:
-		// успешный Start() ⇒ состояние уже отражает живой процесс.
-		committed := false
-		if scriptPID > 0 {
-			ac.CmdMutex.Lock()
-			svc.coreLog.Store(coreLogPrivileged)
-			ac.SingboxCmd = nil
-			ac.SingboxPrivilegedMode = true
-			ac.SingboxPrivilegedPID = scriptPID
-			ac.SingboxPrivilegedSingboxPID = singboxPID
-			ac.SingboxPrivilegedPIDFile = pidFilePath
-			ac.StoppedByUser = false
-			ac.ConsecutiveCrashAttempts = 0
-			if ac.StateService != nil {
-				ac.StateService.ResetAutoUpdateFailedAttempts() // auto-update may retry after a successful start
-			}
-			ac.RunningState.Set(true)
-			ac.CmdMutex.Unlock()
-			svc.writePIDFile(pidFilePath, scriptPID, singboxPID)
-			committed = true
-			debuglog.DebugLog("startSingBox: Sing-Box started with privileges (script PID=%d, sing-box PID=%d).", scriptPID, singboxPID)
-		}
-		pidCh <- privilegedPids{Script: scriptPID, Singbox: singboxPID}
-		if !committed {
-			return
-		}
-		// Долгое ожидание выхода root-процесса — уже вне пути старта.
-		platform.WaitForPrivilegedExit(scriptPID)
-		svc.onPrivilegedScriptExited()
+		scriptPID, singboxPID, runErr := deps.start(corePath, binDir, configName)
+		// Только публикация результата. Никаких блокировок: CmdMutex держит
+		// caller, и любой Lock здесь — гарантированный deadlock.
+		pidCh <- privilegedStartResult{Script: scriptPID, Singbox: singboxPID, Err: runErr}
 	}()
 
-	pids := <-pidCh
+	var pids privilegedStartResult
+	select {
+	case pids = <-pidCh:
+	case <-time.After(privilegedStartTimeout):
+		// Авторизация может висеть сколько угодно долго, но не бесконечно:
+		// иначе GUI остаётся с «идёт запуск» навсегда. Таймаут не снимает
+		// процесс (его мог запустить пользователь позже) — он только
+		// возвращает управление, а PID подхватит следующий Start/adoption.
+		return fmt.Errorf("privileged start did not return within %s (authorization still pending?)", privilegedStartTimeout)
+	}
+
+	if pids.Err != nil {
+		// Отказ/отмена авторизации: ничего не коммитим, состояние не трогаем.
+		// CmdMutex отпустит defer в Start().
+		debuglog.WarnLog("startSingBox: privileged run failed: %v", pids.Err)
+		return fmt.Errorf("privileged start failed: %w", pids.Err)
+	}
 	if pids.Script <= 0 {
-		if pids.Err != nil {
-			return fmt.Errorf("privileged start failed: %w", pids.Err)
-		}
 		return fmt.Errorf("privileged start failed or cancelled (no PID)")
 	}
+
+	// Caller владеет CmdMutex — коммитим состояние здесь, до возврата.
+	svc.commitPrivilegedStartLocked(pids.Script, pids.Singbox, pidFilePath)
+	// pid-файл пишем как пользователь; ошибка не глотается (SPEC 145).
+	svc.writePIDFile(pidFilePath, pids.Script, pids.Singbox)
+	debuglog.DebugLog("startSingBox: Sing-Box started with privileges (script PID=%d, sing-box PID=%d).", pids.Script, pids.Singbox)
+
+	// Долгое ожидание выхода root-процесса — в отдельной горутине, вне пути
+	// старта: она не держит CmdMutex и не задерживает возврат Start().
+	go func(scriptPID int) {
+		deps.waitExit(scriptPID)
+		svc.onPrivilegedScriptExited()
+	}(pids.Script)
 
 	go func() {
 		<-time.After(2 * time.Second)
@@ -732,6 +795,10 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 
 // Stop attempts graceful shutdown, mirroring previous StopSingBoxProcess.
 func (svc *ProcessService) Stop() {
+	if svc.stopOverrideForTest != nil {
+		svc.stopOverrideForTest()
+		return
+	}
 	ac := svc.ac
 	ac.CmdMutex.Lock()
 
