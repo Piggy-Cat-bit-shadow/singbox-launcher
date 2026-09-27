@@ -257,12 +257,16 @@ struct HomeView: View {
 
     private var networkSection: some View {
         MenuSection("Network") {
+            // Always navigable, even with the core stopped. ProxiesView
+            // already explains "start the core to list and switch proxies", so
+            // disabling the entry hid the very explanation the user needs — the
+            // same navigation-vs-mutation mistake as the daemon row: not being
+            // able to CHANGE something is not a reason to hide its STATUS.
             MenuRow("Proxies", systemImage: "arrow.triangle.branch",
                     value: proxySummary,
                     showsChevron: true) {
                 model.path.append(.proxies)
             }
-            .disabled(model.core?.state != .running)
             .help(model.core?.state == .running
                   ? "Choose a proxy group and node."
                   : "Start the core to choose a proxy.")

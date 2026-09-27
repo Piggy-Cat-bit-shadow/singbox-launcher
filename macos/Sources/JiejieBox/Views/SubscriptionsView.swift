@@ -87,8 +87,13 @@ struct SubscriptionsView: View {
             ),
             RowAction(
                 id: "enabled-\(sub.id)",
-                title: sub.enabled ? "On" : "Off",
+                // Shows its own saving state, so the row that was clicked
+                // reports progress instead of the whole list going inert.
+                title: model.pending == .updatingSetting(.subscriptionEnabled(sub.id))
+                    ? "Saving…"
+                    : (sub.enabled ? "On" : "Off"),
                 value: nil,
+                isPending: model.pending == .updatingSetting(.subscriptionEnabled(sub.id)),
                 weight: 1,
                 help: sub.enabled
                     ? "Enabled. Click to exclude it from the built config."

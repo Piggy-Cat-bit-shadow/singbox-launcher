@@ -98,10 +98,7 @@ enum BackendMethod {
 
 /// Events the backend may push.
 enum BackendEventName {
-    static let handshakeReady = "handshake_ready"
     static let coreStateChanged = "core_state_changed"
-    static let logLine = "log_line"
-    static let error = "error"
     static let shuttingDown = "shutting_down"
     static let settingsChanged = "settings_changed"
     static let proxiesChanged = "proxies_changed"

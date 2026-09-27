@@ -69,6 +69,10 @@ final class AppModel {
         case autoPing
         case autoUpdateSubscriptions
         case daemonKeepRunning
+        /// Enabling or disabling one subscription source. Its own case, because
+        /// reusing another setting's id made that other row display "Saving…"
+        /// for a save it was not performing.
+        case subscriptionEnabled(String)
     }
 
     /// A daemon setup step the user can request.
@@ -345,6 +349,14 @@ final class AppModel {
             try Task.checkCancellation()
 
             connection = .ready
+
+            // Prime the summaries Home displays. Both are cheap reads, and both
+            // were previously loaded only when their own screen was opened —
+            // which left Home reporting "Subscriptions: None" and an unhelpful
+            // daemon subtitle on a fresh launch, even with sources configured.
+            // Home must not depend on the user having visited another page.
+            await loadSubscriptions()
+            await loadDaemonStatus()
         } catch is CancellationError {
             // The panel closed mid-start. The helper is still ours and the next
             // start() will finish the job, so leave the state resumable rather
@@ -570,7 +582,8 @@ final class AppModel {
     }
 
     func setSubscriptionEnabled(_ id: String, enabled: Bool) async {
-        await withPending(.updatingSetting(.autoUpdateSubscriptions), success: nil) {
+        await withPending(.updatingSetting(.subscriptionEnabled(id)),
+                          success: enabled ? "Subscription enabled." : "Subscription disabled.") {
             _ = try await self.client.setSubscriptionEnabled(id: id, enabled: enabled)
         }
         await loadSubscriptions()
@@ -1037,6 +1050,26 @@ final class AppModel {
         case BackendEventName.proxySelectionChanged:
             if !selectedGroup.isEmpty {
                 await loadProxies(group: selectedGroup)
+            }
+        case BackendEventName.subscriptionsChanged:
+            // Sources were edited, or a refresh changed their node counts and
+            // status. Re-read so the Subscriptions screen and Home's count do
+            // not keep showing a stale list. The query emits nothing, so this
+            // cannot feed back on itself.
+            await loadSubscriptions()
+        case BackendEventName.daemonChanged:
+            // The daemon's setup state changed underneath us (installed,
+            // started, paired, removed). Without this the Daemon screen would
+            // keep showing the state it loaded on entry, and a command prepared
+            // for a previous state would linger as if still valid — the user
+            // would be told to run an invite command the service no longer
+            // needs.
+            await loadDaemonStatus()
+            // A command is only valid for the state that produced it: once the
+            // daemon reports ready, a prepared install or invite command is
+            // stale and would send the user to run something already done.
+            if daemon?.ready == true {
+                daemonCommand = nil
             }
         case BackendEventName.shuttingDown:
             // The backend announced it is exiting. Handled rather than

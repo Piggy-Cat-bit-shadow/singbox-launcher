@@ -128,14 +128,8 @@ type Event struct {
 
 // Event names.
 const (
-	// EventHandshakeReady is sent once the backend is initialised.
-	EventHandshakeReady = "handshake_ready"
 	// EventCoreStateChanged reports a core state transition.
 	EventCoreStateChanged = "core_state_changed"
-	// EventLogLine carries one backend log line for the Diagnostics view.
-	EventLogLine = "log_line"
-	// EventError reports a non-fatal backend problem.
-	EventError = "error"
 	// EventShuttingDown announces that the backend is exiting.
 	EventShuttingDown = "shutting_down"
 	// EventSettingsChanged reports that business settings changed.
@@ -176,8 +170,10 @@ func (e *Error) Error() string {
 
 // HandshakeResult is the reply to MethodHandshake.
 //
-// It is also emitted as EventHandshakeReady with the same payload, so a
-// client that subscribes before calling handshake still learns the version.
+// It is returned only as a reply, and is also carried inside AppSnapshot. There
+// is deliberately no handshake event: the frontend subscribes before taking its
+// snapshot, so the snapshot seq already guarantees a consistent view, and an
+// event nothing emitted was just dead protocol surface.
 type HandshakeResult struct {
 	// ProtocolVersion is the backend's protocol.Version.
 	ProtocolVersion int `json:"protocol_version"`
