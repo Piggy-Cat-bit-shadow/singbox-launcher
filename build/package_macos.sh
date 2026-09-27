@@ -212,11 +212,41 @@ echo "========================================"
 echo "  .app : $(pwd)/$APP_NAME.app"
 echo "  .zip : $(pwd)/$DIST_DIR/$ZIP_NAME"
 [ -n "$DMG_NAME" ] && echo "  .dmg : $(pwd)/$DIST_DIR/$DMG_NAME"
+# Запись параметров сборки рядом с артефактом: хеш меняется с каждым
+# коммитом (в бинарь штампуется RequiredTemplateRef), поэтому храним его
+# вместе с архивом, а не в тексте документации.
+ZIP_SHA=$(shasum -a 256 "$DIST_DIR/$ZIP_NAME" | awk '{print $1}')
+{
+    echo "JiejieBox — build record"
+    echo "========================"
+    echo ""
+    echo "Repository : https://github.com/Piggy-Cat-bit-shadow/singbox-launcher"
+    echo "Commit     : $TEMPLATE_REF"
+    echo "Version    : $VERSION"
+    echo "Bundle ID  : $APP_BUNDLE_ID"
+    echo "Build type : $BUILD_TYPE (macOS $MIN_MACOS_VERSION+)"
+    echo ""
+    echo "Archive    : $ZIP_NAME"
+    echo "Size       : $(stat -f%z "$DIST_DIR/$ZIP_NAME") bytes"
+    echo "SHA256     : $ZIP_SHA"
+    if [ -n "$DMG_NAME" ]; then
+        echo ""
+        echo "DMG        : $DMG_NAME"
+        echo "DMG SHA256 : $(shasum -a 256 "$DIST_DIR/$DMG_NAME" | awk '{print $1}')"
+    fi
+    echo ""
+    echo "Signature  : ad-hoc (NOT notarized)"
+    echo ""
+    echo "Rebuild:"
+    echo "  export GITHUB_ACTIONS=true && ./build/package_macos.sh $BUILD_TYPE"
+} > "$DIST_DIR/BUILD_INFO.txt"
+
 echo ""
 echo "  SHA256:"
 shasum -a 256 "$DIST_DIR/$ZIP_NAME" | sed 's/^/    /'
 [ -n "$DMG_NAME" ] && shasum -a 256 "$DIST_DIR/$DMG_NAME" | sed 's/^/    /'
 echo ""
+echo "  Record: $(pwd)/$DIST_DIR/BUILD_INFO.txt"
 echo "  Install:  unzip $(pwd)/$DIST_DIR/$ZIP_NAME -d /Applications   (or open the .dmg)"
 echo "  Or:       build/package_macos.sh $BUILD_TYPE --install"
 

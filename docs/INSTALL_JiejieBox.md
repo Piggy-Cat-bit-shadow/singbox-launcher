@@ -10,25 +10,30 @@
 ## 1. Файл для установки
 
 ```
-dist/JiejieBox-v2.3.2-16-gcc283ca0-jiejiebox-macos-arm64.zip
+dist/JiejieBox-v2.3.2-17-g4e82b8ff-jiejiebox-macos-arm64.zip
 ```
 
 | | |
 |---|---|
 | Размер | 17 МБ |
-| SHA256 | `3a5a887c01ee82e343f0150c3671aab6c3d8d8c7073bdd7d64ba57c042ba2d08` |
+| SHA256 | `ca8b8c0648375815183f0cd047ecb60a015f128545cfd54aa2d4afc6d9322ec8` |
 | Архитектура | Mach-O 64-bit executable **arm64** (Apple Silicon) |
 | Bundle ID | `com.piggycat.jiejiebox` |
-| Версия | `v2.3.2-16-gcc283ca0-jiejiebox` |
-| Коммит сборки | `cc283ca08f858a65781620c7c6f01318fdea1198` |
+| Версия | `v2.3.2-17-g4e82b8ff-jiejiebox` |
+| Коммит сборки | `4e82b8ff94e97a2c1952ba4066a6bd6514751812` |
 | Подпись | **ad-hoc, НЕ нотаризовано** |
 
 Проверить файл перед установкой:
 
 ```bash
-shasum -a 256 "dist/JiejieBox-v2.3.2-16-gcc283ca0-jiejiebox-macos-arm64.zip"
+shasum -a 256 dist/JiejieBox-*-macos-arm64.zip
 # должно совпасть с SHA256 выше
 ```
+
+Точные значения для любой пересобранной версии лежат в `dist/BUILD_INFO.txt`
+рядом с архивом: имя файла, размер, SHA256, коммит и версия. Хеш меняется с
+каждым коммитом, потому что его штампует сам бинарник (`RequiredTemplateRef`),
+поэтому сверяйтесь с `BUILD_INFO.txt`, а не с этим текстом.
 
 ## 2. Установка
 
