@@ -22,6 +22,19 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+# Временные каталоги и промежуточные бинарники удаляются на любом выходе:
+# успех, ошибка, Ctrl-C. Без trap проба hdiutil оставляла каталог на каждый
+# запуск, а прерывание сборки — ещё и STAGE/DMG_TMP с копией bundle.
+TMP_PATHS=""
+register_tmp() { TMP_PATHS="$TMP_PATHS $1"; }
+cleanup_tmp() {
+    for d in $TMP_PATHS; do
+        [ -n "$d" ] && rm -rf "$d"
+    done
+    rm -f "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64" 2>/dev/null || true
+}
+trap cleanup_tmp EXIT INT TERM
+
 BUILD_TYPE="arm64"
 DO_INSTALL=false
 for arg in "$@"; do
@@ -78,8 +91,24 @@ fi
 VERSION="${APP_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}"
 VERSION="${VERSION}-jiejiebox"
 TEMPLATE_REF=$(git rev-parse HEAD)
+
+# CFBundleVersion по требованиям macOS — числовая строка (цифры и точки),
+# монотонная между сборками. git describe даёт вид
+# `v2.3.2-18-g05aeed5f-dirty-jiejiebox`, где буквы и дефисы недопустимы,
+# поэтому для CFBundleVersion берём отдельное числовое значение: база
+# X.Y.Z (если её видно) и счётчик коммитов. CFBundleShortVersionString
+# остаётся человекочитаемым и может содержать суффиксы.
+BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+BASE_SEMVER="$(printf '%s' "$VERSION" | sed -nE 's/^v?([0-9]+(\.[0-9]+)*).*/\1/p')"
+if [ -z "$BASE_SEMVER" ]; then
+    BASE_SEMVER="0.0.0"
+fi
+# Нормализуем до трёх компонентов, чтобы значение было стабильного вида.
+BASE_SEMVER="$(printf '%s' "$BASE_SEMVER" | awk -F. '{printf "%d.%d.%d", $1, ($2==""?0:$2), ($3==""?0:$3)}')"
+CF_BUNDLE_VERSION="${BASE_SEMVER}.${BUILD_NUMBER}"
 echo "Version:      $VERSION"
 echo "Bundle ID:    $APP_BUNDLE_ID"
+echo "CFBundleVer:  $CF_BUNDLE_VERSION"
 echo "Template ref: $TEMPLATE_REF"
 
 export CGO_ENABLED=1
@@ -88,6 +117,9 @@ export SDKROOT="$SDK_PATH"
 export CGO_CFLAGS="-mmacosx-version-min=$MIN_MACOS_VERSION"
 export CGO_LDFLAGS="-mmacosx-version-min=$MIN_MACOS_VERSION"
 
+# -trimpath убирает абсолютные пути рабочего каталога из бинарника; без него
+# в строках остаётся /Users/<имя>/... и артефакт «протекает» сборочной машиной.
+GO_BUILD_FLAGS="-trimpath -buildvcs=false"
 LDFLAGS="-s -w"
 LDFLAGS="$LDFLAGS -X singbox-launcher/internal/constants.AppVersion=$VERSION"
 LDFLAGS="$LDFLAGS -X singbox-launcher/internal/constants.RequiredTemplateRef=$TEMPLATE_REF"
@@ -104,14 +136,14 @@ mkdir -p "$DIST_DIR"
 echo ""
 echo "=== Building ${BUILD_TYPE} ==="
 if [ "$BUILD_TYPE" = "universal" ]; then
-    GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "${BINARY_NAME}_arm64"
-    GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "${BINARY_NAME}_amd64"
+    GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "${BINARY_NAME}_arm64"
+    GOARCH=amd64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "${BINARY_NAME}_amd64"
     lipo -create -output "$BINARY_NAME" "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
     rm -f "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
 elif [ "$BUILD_TYPE" = "catalina" ]; then
-    GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "$BINARY_NAME"
+    GOARCH=amd64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 else
-    GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "$BINARY_NAME"
+    GOARCH=arm64 go build $GO_BUILD_FLAGS -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 fi
 file "$BINARY_NAME"
 
@@ -151,7 +183,7 @@ fi
     echo '    <key>CFBundleShortVersionString</key>'
     echo "    <string>$VERSION</string>"
     echo '    <key>CFBundleVersion</key>'
-    echo "    <string>$VERSION</string>"
+    echo "    <string>$CF_BUNDLE_VERSION</string>"
     echo '    <key>LSMinimumSystemVersion</key>'
     echo "    <string>$MIN_MACOS_VERSION</string>"
     if [ "$BUILD_TYPE" = "universal" ]; then
@@ -197,9 +229,13 @@ ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$DIST_DIR/$ZIP_NAME"
 # упаковки приложения: zip уже собран и полностью годится для установки,
 # поэтому dmg здесь — необязательное дополнение, и его отсутствие не
 # считается провалом сборки.
-if hdiutil create -size 1m -fs HFS+ -volname Probe "$(mktemp -d)/probe.dmg" >/dev/null 2>&1; then
+PROBE_DIR="$(mktemp -d)"
+register_tmp "$PROBE_DIR"
+if hdiutil create -size 1m -fs HFS+ -volname Probe "$PROBE_DIR/probe.dmg" >/dev/null 2>&1; then
     STAGE="$(mktemp -d)"
     DMG_TMP="$(mktemp -d)"
+    register_tmp "$STAGE"
+    register_tmp "$DMG_TMP"
     cp -R "$APP_NAME.app" "$STAGE/"
     ln -s /Applications "$STAGE/Applications"
     if hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG_TMP/$DMG_NAME" >/dev/null 2>&1; then

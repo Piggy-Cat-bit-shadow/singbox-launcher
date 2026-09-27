@@ -208,6 +208,7 @@ jobs:
         run: |
           echo "Version: ${{ needs.meta.outputs.version }}"
           echo "Channel: ${{ needs.meta.outputs.channel }}"
+          echo "VERSION=${{ needs.meta.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: go mod download
@@ -230,11 +231,14 @@ jobs:
           APP_VERSION: ${{ needs.meta.outputs.version }}
         run: |
           ./build/package_macos.sh universal
-          mkdir -p dist
-          cp -R JiejieBox.app dist/singbox-launcher.app
-          # The packaging script also drops its own zip/BUILD_INFO into dist/;
-          # CI publishes only the .app bundles (the release job zips them).
-          rm -f dist/*.zip dist/*.dmg dist/BUILD_INFO.txt
+          # The ditto-produced ZIP is the deliverable: it carries the bundle
+          # seal. A raw .app does NOT survive the Actions artifact round-trip —
+          # _CodeSignature is dropped and the bundle arrives unsigned — so the
+          # archive is what we ship and what the release job attaches.
+          mkdir -p release
+          cp dist/JiejieBox-*-macos-universal.zip release/JiejieBox-${VERSION}-macos-universal.zip
+          # Keep the unpacked bundle only for the hygiene check below.
+          rm -f dist/*.dmg dist/BUILD_INFO.txt
 
       - name: Build macOS .app bundle (Catalina target, Intel-only)
         shell: bash
@@ -244,28 +248,24 @@ jobs:
           APP_VERSION: ${{ needs.meta.outputs.version }}
         run: |
           ./build/package_macos.sh catalina
-          mkdir -p dist
-          if [ -d "JiejieBox.app" ]; then
-            cp -R JiejieBox.app dist/singbox-launcher-macos-catalina.app
-          else
-            echo "Warning: catalina build did not produce JiejieBox.app"
-          fi
-          rm -f dist/*.zip dist/*.dmg dist/BUILD_INFO.txt
+          mkdir -p release
+          cp dist/JiejieBox-*-macos-catalina.zip release/JiejieBox-${VERSION}-macos-catalina.zip
+          rm -f dist/*.dmg dist/BUILD_INFO.txt
 
-      - name: Upload Catalina artifacts
+      - name: Upload Catalina package
         uses: actions/upload-artifact@v6
         with:
-          name: artifacts-macos-catalina
-          path: |
-            dist/singbox-launcher-macos-catalina.app
-            dist/singbox-launcher-macos-catalina.zip
+          name: jiejiebox-macos-catalina
+          path: release/JiejieBox-*-macos-catalina.zip
+          if-no-files-found: error
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
 
-      - name: Upload artifacts
+      - name: Upload Universal package
         uses: actions/upload-artifact@v6
         with:
-          name: artifacts-darwin
-          path: dist/*
+          name: jiejiebox-macos-universal
+          path: release/JiejieBox-*-macos-universal.zip
+          if-no-files-found: error
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 30 }}
 
 
@@ -315,56 +315,45 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: Create release packages
+      # The release job does NOT rebuild or repackage anything. It verifies
+      # the ZIPs the build job produced and attaches them unchanged, so the
+      # signed bundle and its permissions reach the user exactly as built.
+      - name: Verify release packages
         shell: bash
         run: |
           set -euo pipefail
-          cd release-artifacts
-
           VERSION="${{ needs.meta.outputs.version }}"
-          echo "=== Creating macOS release packages for version: $VERSION ==="
-          echo ""
-
-          echo "=== Cleaning up unwanted files/directories ==="
-          if [ -d "logs" ]; then
-            echo "Found logs directory, removing it..."
-            rm -rf logs
+          mkdir -p release
+          found=$(find release-artifacts -name 'JiejieBox-*-macos-*.zip' -type f | wc -l | tr -d ' ')
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no macOS ZIP artifact found"
+            exit 1
           fi
-          find . -name "*.log" -type f -delete 2>/dev/null || true
-          find . -name "*.tmp" -type f -delete 2>/dev/null || true
-          echo ""
+          # Normalise names so users always see the same scheme.
+          i=0
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            case "$base" in
+              *-universal.zip) cp "$f" "release/JiejieBox-${VERSION}-macos-universal.zip" ;;
+              *-catalina.zip)  cp "$f" "release/JiejieBox-${VERSION}-macos-catalina.zip" ;;
+              *) echo "::warning::unexpected artifact name: $base" ;;
+            esac
+            i=$((i + 1))
+          done < <(find release-artifacts -name 'JiejieBox-*-macos-*.zip' -type f)
 
-          MACOS_APP=$(find . -name "singbox-launcher.app" -type d | head -1 || true)
-          if [ -n "${MACOS_APP:-}" ]; then
-            echo "Found singbox-launcher.app, creating ZIP..."
-            zip -r "singbox-launcher-${VERSION}-macos.zip" "$MACOS_APP"
-            echo "Created: singbox-launcher-${VERSION}-macos.zip"
-          else
-            echo "Warning: singbox-launcher.app not found"
-          fi
+          echo "=== Verifying archives ==="
+          ls -lh release/
+          for z in release/*.zip; do
+            echo "--- $z"
+            unzip -t "$z" >/dev/null || { echo "::error::$z is not a valid archive"; exit 1; }
+            if ! unzip -l "$z" | grep -q 'JiejieBox.app/Contents/MacOS/JiejieBox'; then
+              echo "::error::$z does not contain the JijieBox executable"
+              exit 1
+            fi
+          done
 
-          # Catalina-targeted (Intel-only, macOS 10.15+) build, when present.
-          MACOS_APP_CATALINA=$(find . -name "singbox-launcher-macos-catalina.app" -type d | head -1 || true)
-          if [ -n "${MACOS_APP_CATALINA:-}" ]; then
-            echo "Found Catalina-targeted app, creating ZIP..."
-            zip -r "singbox-launcher-${VERSION}-macos-catalina.zip" "$MACOS_APP_CATALINA"
-            echo "Created: singbox-launcher-${VERSION}-macos-catalina.zip"
-          fi
-
-          echo ""
-          echo "=== Creating checksums ==="
-          find . -maxdepth 1 -name "singbox-launcher-${VERSION}-*.zip" -type f -size +0 -exec shasum -a 256 {} \; > checksums.txt
-          if [ -f checksums.txt ] && [ -s checksums.txt ]; then
-            echo "Checksums created:"
-            cat checksums.txt
-          else
-            echo "Warning: checksums.txt is empty"
-            : > checksums.txt
-          fi
-
-          echo ""
-          echo "=== Files to upload ==="
-          ls -lh singbox-launcher-${VERSION}-*.zip checksums.txt 2>/dev/null || true
+          echo "=== Checksums ==="
+          ( cd release && shasum -a 256 ./*.zip > checksums.txt && cat checksums.txt )
 
       - name: Read release notes
         id: release_notes
@@ -475,9 +464,9 @@ jobs:
 
             ${{ steps.release_notes.outputs.notes }}
           files: |
-            release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-macos.zip
-            release-artifacts/singbox-launcher-${{ needs.meta.outputs.version }}-macos-catalina.zip
-            release-artifacts/checksums.txt
+            release/JiejieBox-${{ needs.meta.outputs.version }}-macos-universal.zip
+            release/JiejieBox-${{ needs.meta.outputs.version }}-macos-catalina.zip
+            release/checksums.txt
           # Publish immediately. RELEASE_PROCESS §1.6 / §2.4 promise the release is
           # ready out of the box (no manual un-draft step). Historical default was
           # `draft: true` from Feb 2026 when the release-notes pipeline was less
