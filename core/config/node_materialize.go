@@ -348,3 +348,12 @@ func mapStringValue(m map[string]interface{}, key string) string {
 	v, _ := m[key].(string)
 	return v
 }
+
+// MaterializeNodeBodyForVerdict — тело узла и его коды, для проверки формы
+// (SPEC 145). Возвращает тело (nil, если узел отвергнут), коды санитайзера и
+// отказ. Экспортируется, чтобы форма ввода проверяла узел ТЕМ ЖЕ путём, что
+// и сборка конфига: иначе форма пропускает значение, которое сборка потом
+// отвергает, и человек узнаёт об ошибке не там, где её исправлять.
+func MaterializeNodeBodyForVerdict(node *configtypes.ParsedNode) (json.RawMessage, []configtypes.Warning, *configtypes.Warning) {
+	return materializeParsedNodeBody(node)
+}

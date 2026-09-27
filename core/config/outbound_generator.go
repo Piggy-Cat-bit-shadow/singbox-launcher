@@ -46,6 +46,7 @@ import (
 	"singbox-launcher/core/config/configtypes"
 	"singbox-launcher/core/config/nodeflow"
 	"singbox-launcher/core/config/registry"
+	"singbox-launcher/core/config/subscription"
 	"singbox-launcher/core/state"
 	"singbox-launcher/internal/debuglog"
 )
@@ -715,9 +716,50 @@ func GenerateEndpointJSONBare(node *ParsedNode) (string, error) {
 	return generateEndpointJSONBare(node, false)
 }
 
+// sanitizeEndpointBody прогоняет тело endpoint-схемы через правила реестра
+// (format/base64_32, required, on_invalid) — тем же санитайзером, что и
+// outbound'ы, чтобы «годность значения» судилась в одном месте и одинаково
+// на всех входах (SPEC 145).
+//
+// Возвращает каноническое тело, отказ (drop_node) и коды санитайзера.
+// Схема вне реестра — правил нет, тело проходит как есть: ручной JSON
+// экзотического типа продолжает работать.
+func sanitizeEndpointBody(node *ParsedNode, forConfig bool) (map[string]interface{}, *configtypes.Warning, []configtypes.Warning) {
+	if node == nil || len(node.Outbound) == 0 {
+		return nil, nil, nil
+	}
+	if _, known := registry.MustGet().Body(node.Scheme); !known {
+		return node.Outbound, nil, nil
+	}
+	// Источник передаём тот же, что и у outbound-пути: правила значений
+	// различают, кто сочинил значение (тело из формы ядра лаунчер молча не
+	// переписывает).
+	source := subscription.NodeSourceFromOriginKind(string(node.Source))
+	res := nodeflow.SanitizeFrom(node.Scheme, source, node.Outbound)
+	if res.Drop != nil {
+		return nil, res.Drop, res.Warnings
+	}
+	// Для config.json берём КАНОНИЧЕСКУЮ форму (порядок и типы по реестру);
+	// для «голой» подписи содержимого — тоже каноническую: она не должна
+	// зависеть от того, какое ядро стояло в момент сохранения.
+	return res.Clean, nil, res.Warnings
+}
+
 func generateEndpointJSONBare(node *ParsedNode, forConfig bool) (string, error) {
 	if node == nil || !IsEndpointScheme(node.Scheme) || node.Outbound == nil {
 		return "", fmt.Errorf("GenerateEndpointJSON requires an endpoint-scheme node with Outbound set")
+	}
+	// Полевой суд реестра для endpoint'ов (SPEC 145). До этого эмиттер
+	// маршалил node.Outbound напрямую, и правила значений реестра для схемы
+	// (format base64_32 у ключей wireguard с on_invalid drop_node) на этом
+	// пути НЕ выполнялись — в отличие от outbound'ов, которые идут через
+	// materializeParsedNodeBody. Последствие: ключ `!!! not base64 !!!`
+	// уезжал в config.json и ронял ВЕСЬ конфиг фаталом
+	// «decode private key: illegal base64 data», а короткий base64-ключ
+	// создавал узел, который падал уже в рантайме. Ровно тот класс тихого
+	// отказа, ради которого правило и заведено в реестре.
+	if _, drop, _ := sanitizeEndpointBody(node, forConfig); drop != nil {
+		return "", fmt.Errorf("%s: %s", node.Scheme, dropReason(drop))
 	}
 	// Use node.Tag (includes tag_prefix, e.g. "4:wg-parnas") so endpoint tag matches outbound references
 	endpoint := make(map[string]interface{})

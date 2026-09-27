@@ -277,7 +277,7 @@ func TestEmitE2_WireGuardTakesDetourLikeAnyNode(t *testing.T) {
 		Kind:    "server",
 		Tag:     "wg-1",
 		Enabled: true,
-		Body:    json.RawMessage(`{"type":"wireguard","address":["10.0.0.2/32"],"private_key":"k"}`),
+		Body:    json.RawMessage(`{"type":"wireguard","address":["10.0.0.2/32"],"private_key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=","peers":[{"address":"1.2.3.4","port":51820,"public_key":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=","allowed_ips":["0.0.0.0/0"]}]}`),
 		Detour:  &configtypes.NodeLink{Tag: "C"},
 	}
 	res := runCanonicalBuild(t, []ProxySource{
@@ -810,10 +810,13 @@ func TestEmitWireguardDanglingDetourDropsNode(t *testing.T) {
 	// Висячая цель у WG — тот же fail-closed, что у любого узла: тихий
 	// прямой дозвон вместо заданного маршрута недопустим.
 	wg := configtypes.CanonicalNode{
-		Kind:       "server",
-		Tag:        "WG",
-		Enabled:    true,
-		Body:       json.RawMessage(`{"type":"wireguard","server":"wg.example","server_port":51820}`),
+		Kind:    "server",
+		Tag:     "WG",
+		Enabled: true,
+		// Тело обязано быть годным целиком: ключи и обязательные поля судит
+		// реестр (SPEC 145), а тест проверяет, что рабочий detour доезжает
+		// и не объявляется деградацией.
+		Body:       json.RawMessage(`{"type":"wireguard","server":"wg.example","server_port":51820,"private_key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=","address":["10.0.0.2/32"],"peers":[{"address":"1.2.3.4","port":51820,"public_key":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=","allowed_ips":["0.0.0.0/0"]}]}`),
 		OriginKind: "uri",
 		OriginRaw:  "wireguard://wg.example:51820#WG",
 		Detour:     &configtypes.NodeLink{Tag: "ghost"},
@@ -841,10 +844,13 @@ func TestEmitWireguardDanglingDetourDropsNode(t *testing.T) {
 // про это говорят features/directions.md, а не отчёт каждой сборки.
 func TestEmitWireguardResolvableDetourStaysQuiet(t *testing.T) {
 	wg := configtypes.CanonicalNode{
-		Kind:       "server",
-		Tag:        "WG",
-		Enabled:    true,
-		Body:       json.RawMessage(`{"type":"wireguard","server":"wg.example","server_port":51820}`),
+		Kind:    "server",
+		Tag:     "WG",
+		Enabled: true,
+		// Тело обязано быть годным целиком: ключи и обязательные поля судит
+		// реестр (SPEC 145), а тест проверяет, что рабочий detour доезжает
+		// и не объявляется деградацией.
+		Body:       json.RawMessage(`{"type":"wireguard","server":"wg.example","server_port":51820,"private_key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=","address":["10.0.0.2/32"],"peers":[{"address":"1.2.3.4","port":51820,"public_key":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=","allowed_ips":["0.0.0.0/0"]}]}`),
 		OriginKind: "uri",
 		OriginRaw:  "wireguard://wg.example:51820#WG",
 		Detour:     &configtypes.NodeLink{FolderID: "F1", Tag: "NL-1"},

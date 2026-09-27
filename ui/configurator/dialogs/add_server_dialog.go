@@ -802,7 +802,31 @@ func engineVerdict(uri string) error {
 	if msg := nodewarn.Summary(nodewarn.FromParsed(node.Warnings)); msg != "" {
 		return fmt.Errorf("%s", msg)
 	}
+	// Годность ЗНАЧЕНИЙ судит реестр, и судит её материализация, а не разбор
+	// (SPEC 145). Без этого шага форма принимала узел, который потом ронялся:
+	// негодный ключ wireguard (`!!! not base64 !!!`, короткий base64) проходил
+	// проверку ссылки, а в конфиг его не пускал уже эмиттер — то есть человек
+	// видел ошибку не в форме, где её исправлять, а позже и в другом месте.
+	// Прогоняем узел через ту же материализацию, что и сборка: форма обязана
+	// отвергать ровно то, что отвергнет конфиг.
+	if _, warns, drop := config.MaterializeNodeBodyForVerdict(node); drop != nil {
+		if msg := nodewarn.Summary(nodewarn.FromParsed([]configtypes.Warning{*drop})); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return fmt.Errorf("%s", dropReasonText(drop))
+	} else if msg := nodewarn.Summary(nodewarn.FromParsed(warns)); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
 	return nil
+}
+
+// dropReasonText — запасной текст, если у кода нет локализованной пары:
+// показываем сам код, а не пустоту.
+func dropReasonText(w *configtypes.Warning) string {
+	if w != nil && w.Code != "" {
+		return w.Code
+	}
+	return "invalid value"
 }
 
 // wgURIInput — вход сборки wireguard:// URI, отвязанный от виджетов.

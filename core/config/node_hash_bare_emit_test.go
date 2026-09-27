@@ -65,7 +65,19 @@ func TestGenerateEndpointJSONBareHasNoComment(t *testing.T) {
 			"type":        "wireguard",
 			"server":      "1.2.3.4",
 			"server_port": 51820,
-			"private_key": "k",
+			// Тело обязано быть ГОДНЫМ целиком: реестр судит и ключи, и
+			// обязательные поля (SPEC 145), а тест проверяет отсутствие
+			// комментария в голой форме, не годность тела.
+			"private_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+			"address":     []string{"10.0.0.2/32"},
+			"peers": []interface{}{
+				map[string]interface{}{
+					"address":     "1.2.3.4",
+					"port":        51820,
+					"public_key":  "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+					"allowed_ips": []string{"0.0.0.0/0"},
+				},
+			},
 		},
 	}
 	bare, err := GenerateEndpointJSONBare(node)

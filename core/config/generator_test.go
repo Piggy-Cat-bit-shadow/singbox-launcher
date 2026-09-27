@@ -612,12 +612,16 @@ func TestGenerateEndpointJSON_CommentSanitized(t *testing.T) {
 		Tag:     "wg-test-tag",
 		Comment: "line1\nline2\xff\xfe",
 		Outbound: map[string]interface{}{
-			"private_key": "YFabc1234567890123456789012345678901234567890=",
+			// 32-байтный ключ: формат судит реестр (SPEC 145), и
+			// заполнитель здесь означал бы проверку не той вещи — тест
+			// про санитайзинг комментария, а не про годность ключа.
+			"private_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 			"address":     []string{"10.0.0.2/32"},
 			"peers": []interface{}{
 				map[string]interface{}{
-					"address":     "203.0.113.1:51820",
-					"public_key":  "YFpeerpub9876543210987654321098765432109876543210=",
+					"address":     "203.0.113.1",
+					"port":        51820,
+					"public_key":  "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
 					"allowed_ips": []string{"0.0.0.0/0"},
 				},
 			},
