@@ -134,11 +134,12 @@ func (ac *AppController) runScheduledRefresh(trigger string) {
 	now := time.Now().UTC()
 	stale := 0
 	skipped := 0
-	for _, src := range s.Sources {
-		if src.Kind != state.SourceKindSubscription || !src.Enabled || src.URL == "" {
+	for i := range s.Sources {
+		src := &s.Sources[i]
+		if !src.Enabled || !state.CanRefreshSubscription(src) {
 			continue
 		}
-		if !sourceIsStale(&src, settings, now) {
+		if !sourceIsStale(src, settings, now) {
 			skipped++
 			continue
 		}
@@ -284,8 +285,9 @@ func (ac *AppController) triggerRetryForFailedSources(trigger string) {
 		return
 	}
 	now := time.Now()
-	for _, src := range s.Sources {
-		if src.Kind != state.SourceKindSubscription || !src.Enabled || src.URL == "" {
+	for i := range s.Sources {
+		src := &s.Sources[i]
+		if !src.Enabled || !state.CanRefreshSubscription(src) {
 			continue
 		}
 		if src.UpdateStatus == nil || src.UpdateStatus.LastStatus != "err" {

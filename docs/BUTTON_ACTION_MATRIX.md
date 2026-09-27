@@ -52,7 +52,10 @@ code path between them.
 
 | Control | Type | Action | IPC | Pending | Success | Failure | Timeout | Verified |
 |---|---|---|---|---|---|---|---|---|
-| Add Subscription | MenuRow | navigate | — | navigation | form | n/a | n/a | ✅ |
+| Add Subscription | MenuActionRow | open menu | — | menu opens | Add from URL… / Import from File… | n/a | n/a | ✅ |
+| Add from URL… | Menu item | navigate | — | navigation | form | n/a | n/a | ✅ |
+| Import from File… | Menu item | `importSubscriptionFile` | `import_subscription_file` | "Importing from file…" | toast "Imported N nodes."; row appears | error banner (backend code + message) | 30 s | ✅ |
+| Import from File (empty state) | Button | same | same | same | same | same | 30 s | ✅ |
 | Add | Button | `addSubscription` | `add_subscription` | "Adding…" | toast + list; pops back | error banner, form kept | 20 s | ✅ |
 | row (left, weight 4) | Button (sibling) | navigate to edit | — | navigation | edit screen | n/a | n/a | ✅ |
 | row On/Off (right) | Button (sibling) | `setSubscriptionEnabled` | `set_subscription_enabled` | row disabled | state flips from backend | error banner | 20 s | ✅ |
@@ -67,6 +70,23 @@ code path between them.
 Delete is behind a `confirmationDialog` with an explicit destructive role.
 A failed fetch keeps the source with an error line — a provider being down never
 discards the URL the user typed.
+
+**Local sources are rendered differently, and the difference is data-driven.**
+`Import from File…` appears only when `capabilities.local_subscription_import` is
+true. A row whose `input_kind` is `local_snapshot`:
+
+- shows `Imported from <file>` instead of a URL (`sourceSummary`), because its URL
+  is empty by design and an empty URL line reads as a broken provider;
+- shows `Imported <time>` instead of `Never updated`, since it is never fetched;
+- offers **no** `Refresh Now` — the detail screen states "Not available for an
+  imported file" as a fact rather than drawing a dead button, and the backend
+  refuses independently with `not_refreshable`;
+- keeps its name editable but **not** its URL: the URL field is omitted, and Save
+  sends the stored value back so a rename cannot blank it.
+
+`Update All` skips local sources entirely (shared `state.CanRefreshSubscription`
+guard, the same one auto-update uses), so an imported source is never the cause of
+a provider error it could not have produced.
 
 ---
 
@@ -120,8 +140,10 @@ things depending on the row.
 | Control | Type | Action | IPC | Verified |
 |---|---|---|---|---|
 | banner Restart | Button | `model.restart()` | `handshake`… | ✅ |
+| banner Load Core… | Button | `importCoreFile` | `import_core_file` | ✅ — only when `core.binary_exists == false` **and** `capabilities.core_import` |
 | banner Reveal Folder / Subscriptions / Reload | Button | navigate or `reloadConfig` | `reload_config` | ✅ |
 | banner dismiss (×) | Button | `clearError` / `setTransientStatus("")` | — | ✅ |
+| sing-box version row | Button | `importCoreFile` | `import_core_file` | ✅ — see below |
 | Proxies / Core Details / Core Mode / Subscriptions / More | MenuRow | navigate | — | ✅ |
 | Reload Config | MenuRow | `reloadConfig` | `reload_config` | ✅ — shown only when `core.config_rebuildable`; otherwise a "Config Source: External" note plus **Open Config** |
 | Appearance | MenuPickerRow | `model.appearance = …` | — (UserDefaults) | ✅ |
@@ -136,24 +158,53 @@ Launch at Login now **reports** failure instead of silently snapping back: a
 thrown error or a state mismatch produces an explanation naming Login Items in
 System Settings.
 
+### The sing-box version row
+
+The version line under the status doubles as the core-replacement entry point,
+because that is where a user looks to answer "which core am I running?". Three
+mutually exclusive states, decided by capability and state — never by the OS:
+
+| Backend reports | Row renders | Why |
+|---|---|---|
+| `core_import` true, `core_version` present | version text + ↻ icon, clickable | the common case: replace the installed core |
+| `core_import` true, no `core_version` | "Load Core…", clickable | a missing core is the only state where loading one is the way out |
+| `core_import` false | plain version text (or nothing) | an action the backend cannot perform must not be offered |
+
+Clicking opens an `NSOpenPanel` with **no file-type filter**: a sing-box binary
+has no extension and is not a registered content type, so any filter would hide
+the file the user is looking for. Validation — runnable, right architecture,
+actually sing-box, config still parses — belongs to the backend, which reports
+exactly why a candidate was refused.
+
+A cancelled panel is a silent no-op, not an error: the user changed their mind,
+which is not a failure. While the swap is in flight the row reads "Installing
+core…" and is disabled; on success the version shown afterwards is the backend's
+read-back of the installed binary, never the filename the user picked.
+
 ---
 
 ## Tally
 
 ```
-Visible interactive controls:        77 sites / 11 screens
-Frontend-only controls:              16  (navigation, NSWorkspace, clipboard, SMAppService, Links)
-Backend-backed controls:             61
-Backend-backed with a real handler:  61
+Visible interactive controls:        85 sites / 11 screens
+Frontend-only controls:              19  (navigation, NSWorkspace, clipboard, SMAppService, Links, file panels)
+Backend-backed controls:             66
+Backend-backed with a real handler:  66
 Missing handler:                      0
-Controls with a timeout:             61 / 61  (100%)
-Controls with visible feedback:      77 / 77  (100%)
-Controls with an error path:         77 / 77  (100%)
+Controls with a timeout:             66 / 66  (100%)
+Controls with visible feedback:      85 / 85  (100%)
+Controls with an error path:         85 / 85  (100%)
 Silent controls:                      0
 No-op controls:                       0
 Dead controls:                        0
 Nested interactive controls:          0
 ```
+
+The four import controls added in this pass: Home version row, missing-core
+banner **Load Core…**, Subscriptions **Import from File…** menu item, and the
+empty-state **Import from File** button. `Add Subscription` became a
+`MenuActionRow` rather than a navigating `MenuRow`, so the two add paths share one
+entry point; the menu is the row's only control, preserving the no-nesting rule.
 
 ## Root causes found and fixed in this pass
 

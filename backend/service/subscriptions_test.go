@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,6 +223,47 @@ func TestServerDispatchesSubscriptionMethods(t *testing.T) {
 		resp := srv.handle(protocol.Request{ID: "1", Method: method})
 		if resp.Error != nil && resp.Error.Code == "unknown_method" {
 			t.Errorf("%s is not dispatched by the server", method)
+		}
+	}
+}
+
+// TestServerDispatchesImportMethods — both import paths must be reachable over
+// the wire, not merely implemented on the backend.
+//
+// This is the "UI-reachable" half of the import contract: a feature that exists
+// in a Go method but has no dispatch case is a feature the Swift client cannot
+// invoke at all, and no amount of frontend work would surface it. The assertion
+// is deliberately about dispatch only — the params are empty here, so each call
+// is expected to fail on validation, which proves the case exists and ran.
+func TestServerDispatchesImportMethods(t *testing.T) {
+	b := backendWithConfig(t)
+	srv := NewServer(b, &bytes.Buffer{})
+
+	for _, tc := range []struct {
+		method string
+		// wantCode is the validation failure an empty-params call must produce,
+		// which is how we know the handler ran rather than being absent.
+		wantCode string
+	}{
+		{protocol.MethodImportCoreFile, "bad_path"},
+		{protocol.MethodImportSubscriptionFile, "bad_path"},
+	} {
+		resp := srv.handle(protocol.Request{ID: "1", Method: tc.method})
+		if resp.Error == nil {
+			t.Errorf("%s with no params succeeded; want %s", tc.method, tc.wantCode)
+			continue
+		}
+		if resp.Error.Code == "unknown_method" {
+			t.Errorf("%s is not dispatched by the server", tc.method)
+			continue
+		}
+		if resp.Error.Code != tc.wantCode {
+			t.Errorf("%s error code = %q, want %q", tc.method, resp.Error.Code, tc.wantCode)
+		}
+		// A missing path must still explain itself, since this is what the user
+		// sees when a panel returns nothing.
+		if strings.TrimSpace(resp.Error.Message) == "" {
+			t.Errorf("%s produced an error with no message", tc.method)
 		}
 	}
 }

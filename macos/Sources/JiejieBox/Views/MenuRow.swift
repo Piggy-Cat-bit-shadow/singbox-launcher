@@ -358,3 +358,103 @@ struct MenuPickerRow<Option: Hashable & Identifiable>: View {
         .accessibilityLabel("\(title): \(label(selection))")
     }
 }
+
+/// One choice inside a `MenuActionRow`.
+///
+/// An explicit id rather than the title: two entries may legitimately share a
+/// title, and the id is what the action closure switches on.
+struct MenuAction: Identifiable {
+    let id: String
+    let title: String
+    let systemImage: String?
+    let disabled: Bool
+    let action: () -> Void
+
+    init(id: String, title: String, systemImage: String? = nil,
+         disabled: Bool = false, action: @escaping () -> Void) {
+        self.id = id
+        self.title = title
+        self.systemImage = systemImage
+        self.disabled = disabled
+        self.action = action
+    }
+}
+
+/// A row whose root IS a `Menu`, offering a list of ACTIONS.
+///
+/// Distinct from `MenuPickerRow`, which picks one value out of a set and shows
+/// the current choice in the row: here the entries are verbs ("Add from URL…",
+/// "Import from File…") and there is no selected state to display. Reusing the
+/// picker for this would render a "selection" that does not exist.
+///
+/// The Menu is the row's only control, for the reason documented on
+/// MenuPickerRow: a Button wrapping a Menu nests two interactive controls, so
+/// the inner one becomes hit-disabled and appears broken.
+struct MenuActionRow: View {
+    let title: String
+    var subtitle: String?
+    var systemImage: String?
+    let actions: [MenuAction]
+    /// Row-level disablement, e.g. while an unrelated operation is running.
+    var disabled: Bool = false
+
+    private var hover: HoverState { HoverStore.box(for: "menuaction:\(title)") }
+
+    var body: some View {
+        Menu {
+            ForEach(actions) { action in
+                Button {
+                    action.action()
+                } label: {
+                    if let image = action.systemImage {
+                        Label(action.title, systemImage: image)
+                    } else {
+                        Text(action.title)
+                    }
+                }
+                .disabled(action.disabled)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13))
+                        .frame(width: 18)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            // Same full-width hit target and height as MenuRow, so the row reads
+            // as the same kind of thing and the whole width is clickable.
+            .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight, alignment: .leading)
+            .padding(.horizontal, Metrics.rowPaddingH)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: Metrics.rowCorner)
+                    .fill(hover.isHovering && !disabled
+                          ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .disabled(disabled)
+        .onHover { hover.isHovering = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+    }
+}

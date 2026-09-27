@@ -29,6 +29,22 @@ with no compile error on either side.
 - **Malformed frames do not kill the loop**: a bad line produces an `error`
   response and the backend keeps serving.
 
+### Version policy
+
+`protocol_version` is bumped only for a **breaking** change to a request,
+response or event shape.
+
+The two import methods (`import_core_file`, `import_subscription_file`), the
+`core_import` / `local_subscription_import` capabilities and the
+`input_kind` / `can_refresh` / `filename` fields on `SubscriptionDTO` were added
+**without** a bump: they are purely additive. New methods were previously
+`unknown_method`, and every new field is either optional in the JSON or absent
+from an older backend — the Swift DTOs declare the capabilities as `Bool?` and
+the subscription fields as `String?`/`Bool?`, each with a default that means
+"this feature does not exist here". A client therefore still asks the
+capability block before offering either control, and an older backend that omits
+the keys simply never shows them.
+
 ### Request
 
 ```json
@@ -86,7 +102,9 @@ Exactly one of `result` / `error` is present.
 | `update_subscription` | `id`, `name`, `url`, `enabled?` | `SubscriptionDTO` | Omitted fields are left unchanged |
 | `remove_subscription` | `id` | `{subscriptions: [...]}` | Returns the remaining list |
 | `set_subscription_enabled` | `id`, `enabled` | `SubscriptionDTO` | |
-| `refresh_subscription` | `id` | `SubscriptionDTO` | Fetches one source; marks config stale |
+| `refresh_subscription` | `id` | `SubscriptionDTO` | Fetches one source; marks config stale. Refused with `not_refreshable` for a local snapshot |
+| `import_core_file` | `path` | `CoreImportResult` | Install a user-selected sing-box binary as the Data core. Gated by the `core_import` capability |
+| `import_subscription_file` | `path` | `SubscriptionImportResult` | Store a local file's nodes as a new source. Gated by the `local_subscription_import` capability |
 | `get_daemon_status` | — | `DaemonStatusDTO` | Setup state; contains no secret |
 | `daemon_install` | — | `DaemonCommandResult` | Command for the user to run |
 | `daemon_start` | — | `DaemonCommandResult` | Loads the installed service |
@@ -256,6 +274,23 @@ first" instead of showing a broken empty list.
 | `bad_invite` | no | The pasted invite is not address#fingerprint#code |
 | `pair_failed` | yes | Enrolment with the service failed |
 | `unpair_failed` | yes | Could not remove the local pairing |
+| `bad_path` | no | An import was called without a usable path |
+| `file_not_found` | no | The selected import file does not exist |
+| `not_regular_file` | no | The selected path is a directory or device |
+| `file_too_large` | no | Over the core cap (256 MiB) or the shared subscription cap (10 MiB) |
+| `wrong_architecture` | no | The core candidate has no slice for this machine |
+| `invalid_core` | no | The candidate runs but is not a sing-box core |
+| `unsupported` | no | Core import is not implemented on this platform |
+| `core_busy` | yes | Stop the core before replacing it |
+| `core_override_active` | no | `SINGBOX_LAUNCHER_CORE` overrides the Data core |
+| `already_installed` | no | The selected core is already the installed one |
+| `core_config_incompatible` | no | The candidate core cannot parse the current config; the installed core is left unchanged |
+| `install_failed` | yes | The staged copy or the final replace failed |
+| `decode_failed` | no | The subscription file could not be decoded at all |
+| `unsupported_format` | no | Decoded, but is not a recognisable subscription |
+| `parse_failed` | no | Recognised, but yielded no parsable material |
+| `no_nodes` | no | Parsed, but contains no usable proxy nodes |
+| `not_refreshable` | no | This source has no provider to refresh from (a local snapshot) |
 
 `recoverable` describes whether retrying after the stated condition can help —
 it is advice for the UI, not a guarantee.

@@ -90,6 +90,13 @@ const (
 	MethodUnpairDaemon = "unpair_daemon"
 	// MethodSetDaemonKeepRunning stores the daemon exit policy.
 	MethodSetDaemonKeepRunning = "set_daemon_keep_running"
+	// MethodImportCoreFile installs a user-selected sing-box as the Data core.
+	MethodImportCoreFile = "import_core_file"
+	// MethodImportSubscriptionFile imports a local file as a subscription
+	// snapshot. Distinct from add_subscription on purpose: a remote URL and a
+	// local file are different operations, and overloading one method would
+	// mean guessing the intent from the payload.
+	MethodImportSubscriptionFile = "import_subscription_file"
 )
 
 // Request is a single client-to-backend call.
@@ -198,6 +205,12 @@ type Capabilities struct {
 	Traffic bool `json:"traffic"`
 	// Subscriptions reports whether the subscription manager is available.
 	Subscriptions bool `json:"subscriptions"`
+	// CoreImport reports whether a user-selected core can be installed.
+	CoreImport bool `json:"core_import"`
+	// LocalSubscriptionImport reports whether a local subscription file can be
+	// imported. Reported so the frontend never offers an action the backend
+	// cannot perform.
+	LocalSubscriptionImport bool `json:"local_subscription_import"`
 	// Deprecated: remote machine management and the config wizard were removed
 	// from the product. The fields stay so an older frontend still decodes the
 	// block, but they are always false — a capability that claims a deleted
@@ -395,6 +408,17 @@ type SubscriptionDTO struct {
 	NodeCount int `json:"node_count"`
 	// MaxNodes is the per-source cap; 0 means "use the global setting".
 	MaxNodes int `json:"max_nodes"`
+
+	// InputKind is "remote" or "local_snapshot"; empty means remote, which keeps
+	// every subscription created before local import working unchanged.
+	InputKind string `json:"input_kind,omitempty"`
+	// CanRefresh reports whether a network refresh is meaningful. False for a
+	// local snapshot, so the UI hides Refresh without inferring the type from an
+	// empty URL — inference is what produces "why is this source broken?".
+	CanRefresh bool `json:"can_refresh"`
+	// Filename is the original file's basename for a local snapshot. Never a
+	// full path: the import is a snapshot, not a dependency on that file.
+	Filename string `json:"filename,omitempty"`
 
 	// ProfileTitle is the provider's own name for the profile, when the
 	// provider announced one. Preferred over Name for display when set.

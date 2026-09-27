@@ -93,6 +93,8 @@ enum BackendMethod {
     static let pairDaemon = "pair_daemon"
     static let unpairDaemon = "unpair_daemon"
     static let setDaemonKeepRunning = "set_daemon_keep_running"
+    static let importCoreFile = "import_core_file"
+    static let importSubscriptionFile = "import_subscription_file"
     static let shutdown = "shutdown"
 }
 
@@ -139,10 +141,23 @@ struct Capabilities: Decodable {
     let traffic: Bool
     /// The subscription manager.
     let subscriptions: Bool
+    /// Whether a user-selected core binary can be installed. False on
+    /// platforms whose core import the backend cannot perform, so the version
+    /// row must not offer the action there.
+    ///
+    /// Defaulted because an older backend does not send the key at all: absent
+    /// must decode as "no", never as a crash or as "yes".
+    let core_import: Bool?
+    /// Whether a local subscription file can be imported.
+    let local_subscription_import: Bool?
     /// Always false: remote machines and the config wizard were removed from
     /// the product. Kept so the block still decodes against older backends.
     let remote: Bool
     let configurator: Bool
+
+    /// Capability flags are asked for, never inferred from the platform.
+    var canImportCore: Bool { core_import ?? false }
+    var canImportLocalSubscription: Bool { local_subscription_import ?? false }
 }
 
 struct HandshakeResult: Decodable {
@@ -318,6 +333,20 @@ struct Subscription: Decodable, Identifiable, Hashable {
     let node_count: Int
     let max_nodes: Int
 
+    /// How this source was created: "remote" for a provider URL,
+    /// "local_snapshot" for a file the user imported.
+    ///
+    /// Optional because a backend from before local import does not send the
+    /// key; an absent value means "remote", which is what every source was
+    /// before this feature existed.
+    let input_kind: String?
+    /// Whether the backend can refresh this source from its provider. The
+    /// frontend never decides this itself — a local snapshot has no provider to
+    /// ask, and offering Refresh on one would only ever produce an error.
+    let can_refresh: Bool?
+    /// Original filename of an imported file, for display.
+    let filename: String?
+
     let profile_title: String?
     let support_url: String?
 
@@ -328,12 +357,30 @@ struct Subscription: Decodable, Identifiable, Hashable {
     let http_status_code: Int?
     let nodes_fetched: Int?
 
+    /// True when this source came from a local file rather than a provider.
+    var isLocalSnapshot: Bool { (input_kind ?? "remote") == "local_snapshot" }
+
+    /// Whether a Refresh action may be offered.
+    var isRefreshable: Bool { can_refresh ?? !isLocalSnapshot }
+
     /// Label preference: the provider's own title, then the user's name, then
     /// the URL host. Providers rename profiles, and their name is the one the
     /// user recognises from the provider's site.
     var label: String {
         if let title = profile_title, !title.isEmpty { return title }
         if !name.isEmpty { return name }
+        return url
+    }
+
+    /// Where this source came from, for the row's secondary line.
+    ///
+    /// A local snapshot has no URL to show — showing an empty one would look
+    /// like a broken source, so the file it came from is named instead.
+    var sourceSummary: String {
+        if isLocalSnapshot {
+            if let f = filename, !f.isEmpty { return "Imported from \(f)" }
+            return "Imported from a file"
+        }
         return url
     }
 
@@ -354,6 +401,14 @@ struct Subscription: Decodable, Identifiable, Hashable {
             if let err = last_error, !err.isEmpty { return err }
             return "Last update failed"
         }
+        // A local snapshot is never fetched, so "Never updated" would read as a
+        // fault rather than as the normal state of an imported file.
+        if isLocalSnapshot {
+            if let success = last_success, !success.isEmpty {
+                return "Imported \(RelativeTime.describe(success))"
+            }
+            return "Imported"
+        }
         if let success = last_success, !success.isEmpty {
             return "Updated \(RelativeTime.describe(success))"
         }
@@ -364,6 +419,74 @@ struct Subscription: Decodable, Identifiable, Hashable {
 /// Result of a list request.
 struct SubscriptionListResponse: Decodable {
     let subscriptions: [Subscription]
+}
+
+/// Result of importing a local subscription file.
+///
+/// The frontend reports what the backend actually did — it never parses,
+/// decodes or counts nodes itself. `nodes_imported` is the backend's count
+/// after the shared pipeline ran, so the two can never disagree.
+struct SubscriptionImportResult: Decodable {
+    let subscription: Subscription
+    let nodes_imported: Int
+    /// Nodes the shared parser recognised but cannot express as an outbound.
+    /// Surfaced because silently dropping them would misrepresent the file.
+    let unsupported_count: Int
+    let warnings: [String]?
+    let warnings_count: Int
+    let raw_bytes: Int64
+    /// True when the imported nodes are not yet in the built config.
+    let config_stale: Bool
+    /// Whether the config may be rebuilt from state. False for an
+    /// externally-managed config, which must never be overwritten.
+    let config_rebuildable: Bool
+
+    /// Human summary of the import, for the confirmation line.
+    var summary: String {
+        var text = nodes_imported == 1
+            ? "Imported 1 node."
+            : "Imported \(nodes_imported) nodes."
+        if unsupported_count > 0 {
+            text += " \(unsupported_count) entr"
+                + (unsupported_count == 1 ? "y was" : "ies were")
+                + " not recognised."
+        }
+        return text
+    }
+}
+
+/// Result of installing a user-selected core binary.
+struct CoreImportResult: Decodable {
+    /// Version that was in place before the import, empty when unknown.
+    let old_version: String?
+    let new_version: String
+    /// Where the binary now lives.
+    let installed_path: String
+    /// Which binary will actually run — differs from `installed_path` when an
+    /// override such as SINGBOX_LAUNCHER_CORE is in effect.
+    let active_path: String
+    /// "env", "data", "app" or "path": where the running core comes from.
+    let core_source: String
+    /// True when the candidate was actually run against the current config.
+    let config_checked: Bool
+    /// Whether the current config parsed under the new core.
+    let config_compatible: Bool
+    /// True when a running daemon still serves the previous binary, so the
+    /// service must be refreshed before the change takes effect.
+    let daemon_update_required: Bool
+    let warning: String?
+
+    /// Core state after the swap, so the UI updates without a second round
+    /// trip.
+    let core: CoreStatus
+
+    /// Confirmation line for the version row.
+    var summary: String {
+        if let old = old_version, !old.isEmpty, old != new_version {
+            return "Core updated: \(old) → \(new_version)"
+        }
+        return "Core installed: \(new_version)"
+    }
 }
 
 // MARK: - Daemon

@@ -454,6 +454,52 @@ latter for nodes saved before the pipeline existed.
    Then skip-filter + dedup + raw-tag uniquification → `Subscription.nodes[]`;
    tag prefix/postfix is applied later, at emission (`EmitCanonicalSource`).
 
+   **Local file import** (`service.ImportSubscriptionFile`) enters this same
+   pipeline at `DecodeSubscriptionContent` and differs only in where the bytes
+   come from — no fetcher, no network, otherwise identical. The resulting source
+   is saved with `kind: subscription` and `input_kind: local_snapshot`, an empty
+   URL and `local_filename` set, so it is a self-contained snapshot: deleting the
+   original file does not affect it. Refreshability is answered in exactly one
+   place, `state.CanRefreshSubscription` (manual Refresh, Update All,
+   auto-update and warm-up all consult it), because a per-site `url != ""` test
+   would send a local snapshot to the network with an empty URL and report a
+   provider error the user never caused. Local snapshots otherwise behave like
+   any source: their nodes are emitted into the config normally. Legacy records
+   with no `input_kind` read as `remote`; no migration is involved. See
+   [IMPORT_FLOW_AUDIT.md](IMPORT_FLOW_AUDIT.md).
+
+### 6.1a Custom core import
+
+`service.ImportCoreFile` installs a user-selected sing-box binary as the Data
+core. It is deliberately a transaction whose destination is untouched until the
+candidate is fully verified:
+
+```
+validate path (regular file, ≤ 256 MiB)
+  → platform support (darwin only; CoreImportSupported())
+  → core settled-stopped (not merely "not running")
+  → Mach-O architecture via debug/macho (fat slice or thin; never `file`)
+  → no SINGBOX_LAUNCHER_CORE override shadowing the Data core
+  → selected path is not the installed path
+  → stage a copy BESIDE the target (a temp file, then Sync)
+  → probe `<staged> version` (3 s) must parse a version banner
+  → `<staged> check -c config.json` (5 s) must accept the current config
+  → os.Rename over the target (atomic: same directory, one filesystem)
+  → InvalidateCoreBinaryCaches() + FileService.ResolveCore()
+```
+
+Every step before the rename returns an error with the old binary untouched, and
+the tests assert that byte-for-byte (SHA-256 before/after) for each rejection
+class. Two orderings are load-bearing: the architecture check runs before the
+same-path check, and the override check runs after validation so the user gets the
+more specific reason when both apply. Off macOS `CoreImportSupported()` is false,
+so the capability block never advertises an action the backend cannot perform.
+
+`InvalidateCoreBinaryCaches` is required rather than merely tidy:
+`installedCoreVersionCache` is session-lifetime and does **not** self-expire on an
+mtime change, so without it the UI would report the previous version for the rest
+of the session after a successful swap.
+
    An imported `selector`/`urltest` becomes a **node** with scheme `group`
    (`configtypes.SchemeGroup`), sitting in the same list as regular nodes. It has
    no privileges: it never enters the wizard's Directions tab, routing rules do

@@ -412,6 +412,23 @@ type Source struct {
 	// галки: там он и должен быть виден.
 	RelaysInDirections bool `json:"relays_in_directions,omitempty"`
 
+	// InputKind — откуда взялся состав этой подписки: из сети (remote) или из
+	// файла, выбранного пользователем (local_snapshot).
+	//
+	// Пустое значение = legacy remote: все подписки, созданные до появления
+	// локального импорта, имеют URL и обязаны продолжать работать без миграции.
+	// Явный дискриминатор нужен потому, что «URL пуст» — это вывод, а не факт:
+	// он заставляет каждое место в коде самостоятельно догадываться о типе
+	// источника, и любая новая причина пустого URL молча получила бы
+	// семантику local.
+	InputKind SubscriptionInputKind `json:"input_kind,omitempty"`
+	// LocalFilename — имя файла, из которого импортирован состав
+	// (local_snapshot). Только basename: абсолютный путь — это и утечка
+	// структуры каталогов пользователя, и ложная зависимость от файла,
+	// которого к моменту показа может уже не быть. Импорт — снимок, а не
+	// ссылка на файл.
+	LocalFilename string `json:"local_filename,omitempty"`
+
 	Skip         []map[string]string `json:"skip,omitempty"`
 	MaxNodes     int                 `json:"max_nodes,omitempty"`
 	Update       *UpdateSpec         `json:"update,omitempty"`
@@ -504,6 +521,75 @@ type SubUpdateStatus struct {
 	NodesCountFetched int            `json:"nodes_count_fetched,omitempty"`
 	Truncated         bool           `json:"truncated,omitempty"`
 	Warnings          []FetchWarning `json:"warnings,omitempty"`
+}
+
+// SubscriptionInputKind — как состав подписки попал в состояние.
+type SubscriptionInputKind string
+
+const (
+	// SubscriptionInputRemote — состав тянется из URL провайдера по сети.
+	// Пустое значение читается как remote (legacy-записи без поля).
+	SubscriptionInputRemote SubscriptionInputKind = "remote"
+	// SubscriptionInputLocalSnapshot — состав импортирован из файла и живёт
+	// в состоянии сам по себе. Файл можно удалить: источник не зависит от него.
+	SubscriptionInputLocalSnapshot SubscriptionInputKind = "local_snapshot"
+)
+
+// SubscriptionInputKindOf — тип входа подписки с учётом legacy-записей.
+//
+// Единственное место, где «пусто» превращается в remote: без него каждый
+// вызывающий писал бы `if src.InputKind == ""` и рано или поздно написал бы
+// по-разному.
+func SubscriptionInputKindOf(src *Source) SubscriptionInputKind {
+	if src == nil || src.InputKind == "" {
+		return SubscriptionInputRemote
+	}
+	return src.InputKind
+}
+
+// IsLocalSnapshot сообщает, что состав пришёл из файла.
+func (s *Source) IsLocalSnapshot() bool {
+	return s != nil && s.InputKind == SubscriptionInputLocalSnapshot
+}
+
+// SourceLabel — человекочитаемое имя источника для логов, предупреждений и
+// отчётов.
+//
+// У локального снимка URL пуст by design, поэтому `src.URL` в сообщении даёт
+// пустое место вместо имени («subscription  has no nodes»). Имя источника —
+// единственное, что у такого снимка есть, и именно его пользователь узнаёт.
+func SourceLabel(src *Source) string {
+	if src == nil {
+		return ""
+	}
+	if src.Name != "" {
+		return src.Name
+	}
+	if src.URL != "" {
+		return src.URL
+	}
+	if src.LocalFilename != "" {
+		return src.LocalFilename
+	}
+	return src.ID
+}
+
+// CanRefreshSubscription — можно ли тянуть состав этого источника по сети.
+//
+// Единственный источник правды о refresheability. Все, кто делает сетевой
+// fetch — ручной Refresh, Update All, автообновление, retry-таймер и прогрев
+// на старте — обязаны спрашивать здесь. Проверка `src.URL != ""` на местах
+// давала бы верный ответ для remote и молча неверный для local: локальный
+// снимок ушёл бы в сеть с пустым URL, а с ним — ошибки провайдера в отчёте,
+// которых пользователь не совершал.
+func CanRefreshSubscription(src *Source) bool {
+	if src == nil || src.Kind != SourceKindSubscription {
+		return false
+	}
+	if SubscriptionInputKindOf(src) != SubscriptionInputRemote {
+		return false
+	}
+	return strings.TrimSpace(src.URL) != ""
 }
 
 // ── Конструкторы ─────────────────────────────────────────────────

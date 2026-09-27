@@ -78,12 +78,16 @@ func toSubscriptionDTO(src *state.Source) protocol.SubscriptionDTO {
 	if src == nil {
 		return protocol.SubscriptionDTO{}
 	}
+	inputKind := state.SubscriptionInputKindOf(src)
 	dto := protocol.SubscriptionDTO{
-		ID:       src.ID,
-		Name:     src.Name,
-		URL:      src.URL,
-		Enabled:  src.Enabled,
-		MaxNodes: src.MaxNodes,
+		ID:         src.ID,
+		Name:       src.Name,
+		URL:        src.URL,
+		Enabled:    src.Enabled,
+		MaxNodes:   src.MaxNodes,
+		InputKind:  string(inputKind),
+		CanRefresh: state.CanRefreshSubscription(src),
+		Filename:   src.LocalFilename,
 		// Only enabled, non-unsupported nodes count: reporting every record
 		// would advertise nodes the build will not emit.
 		NodeCount: countUsableNodes(src),
@@ -292,6 +296,19 @@ func (b *Backend) RefreshSubscription(id string) (protocol.SubscriptionDTO, erro
 	if b.ac == nil || b.ac.ConfigService == nil {
 		return protocol.SubscriptionDTO{}, &protocol.Error{
 			Code: "not_ready", Message: "the configuration service is not available", Recoverable: true,
+		}
+	}
+
+	// Final defence: the UI hides Refresh for a local snapshot, but a stale
+	// client must not be able to send it to the network with an empty URL.
+	if s, _, lerr := b.loadState(); lerr == nil {
+		if existing := s.FindSource(id); existing != nil && !state.CanRefreshSubscription(existing) {
+			return protocol.SubscriptionDTO{}, &protocol.Error{
+				Code: "not_refreshable",
+				Message: "this subscription was imported from a file and has no " +
+					"provider to refresh from. Delete it and import the file again.",
+				Recoverable: false,
+			}
 		}
 	}
 

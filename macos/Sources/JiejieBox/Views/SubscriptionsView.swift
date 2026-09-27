@@ -24,9 +24,7 @@ struct SubscriptionsView: View {
                     emptyState
                 } else {
                     MenuSection {
-                        MenuRow("Add Subscription", systemImage: "plus") {
-                            model.path.append(.addSubscription)
-                        }
+                        addMenu
                     }
 
                     MenuSection("Sources") {
@@ -65,6 +63,41 @@ struct SubscriptionsView: View {
     }
 
     // MARK: - Rows
+
+    /// Add a source, from a URL or from a file.
+    ///
+    /// Both paths produce the same kind of source, so they share one entry
+    /// point instead of two rows competing for the same intent. The file option
+    /// appears only when the backend reports it can do the import: a row that
+    /// leads to a guaranteed refusal is worse than no row.
+    private var addMenu: some View {
+        var actions: [MenuAction] = [
+            MenuAction(id: "url", title: "Add from URL…", systemImage: "link") {
+                model.path.append(.addSubscription)
+            },
+        ]
+        if model.localSubscriptionImportAvailable {
+            actions.append(
+                MenuAction(id: "file", title: "Import from File…",
+                           systemImage: "doc.badge.plus") {
+                    importFromFile()
+                }
+            )
+        }
+        return MenuActionRow(title: "Add Subscription",
+                             systemImage: "plus",
+                             actions: actions,
+                             disabled: model.pending != nil)
+    }
+
+    /// Ask for a file and hand the path to the backend.
+    ///
+    /// A cancelled panel is not a failure and reports nothing; every rejected
+    /// file is explained by the backend, which is the only side that parsed it.
+    private func importFromFile() {
+        guard let path = FilePicker.chooseSubscriptionFile() else { return }
+        Task { await model.importSubscriptionFile(path: path) }
+    }
 
     /// One source: open it, or flip it on and off.
     ///
@@ -107,6 +140,14 @@ struct SubscriptionsView: View {
     }
 
     private func subtitle(for sub: Subscription) -> String {
+        // A local snapshot has no fetch status to report: its "updated" time is
+        // when it was imported, and its origin is a file rather than a URL. The
+        // source line names the file so the row does not show an empty URL,
+        // which would read as a broken source.
+        if sub.isLocalSnapshot {
+            if sub.hasError { return "Error · \(sub.statusSummary)" }
+            return sub.sourceSummary
+        }
         if sub.hasError {
             return "Error · \(sub.statusSummary)"
         }
@@ -119,15 +160,33 @@ struct SubscriptionsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("No Subscriptions")
                 .font(.callout.weight(.medium))
-            Text("Add a subscription URL to import proxy nodes.")
+            Text(model.localSubscriptionImportAvailable
+                 ? "Add a subscription URL, or import a file from disk."
+                 : "Add a subscription URL to import proxy nodes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button {
-                model.path.append(.addSubscription)
-            } label: {
-                Label("Add Subscription", systemImage: "plus")
+            HStack(spacing: 8) {
+                Button {
+                    model.path.append(.addSubscription)
+                } label: {
+                    Label("Add from URL", systemImage: "plus")
+                }
+                .controlSize(.regular)
+                .disabled(model.pending != nil)
+
+                if model.localSubscriptionImportAvailable {
+                    Button {
+                        importFromFile()
+                    } label: {
+                        Label("Import from File", systemImage: "doc.badge.plus")
+                    }
+                    .controlSize(.regular)
+                    .disabled(model.pending != nil)
+                }
             }
-            .controlSize(.regular)
+            if model.pending == .importingSubscription {
+                PendingRow("Importing from file…")
+            }
         }
         .padding(.horizontal, Metrics.rowPaddingH)
         .padding(.vertical, 12)

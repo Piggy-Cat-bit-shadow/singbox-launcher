@@ -50,8 +50,9 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 
 	// Считаем enabled subscriptions для progress reporting.
 	enabledCount := 0
-	for _, src := range s.Sources {
-		if src.Kind == state.SourceKindSubscription && src.Enabled && src.URL != "" {
+	for i := range s.Sources {
+		src := &s.Sources[i]
+		if src.Enabled && state.CanRefreshSubscription(src) {
 			enabledCount++
 		}
 	}
@@ -75,7 +76,7 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 	idx := 0
 	for i := range s.Sources {
 		src := &s.Sources[i]
-		if src.Kind != state.SourceKindSubscription || !src.Enabled || src.URL == "" {
+		if !src.Enabled || !state.CanRefreshSubscription(src) {
 			continue
 		}
 		idx++
@@ -114,7 +115,7 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 // На failed fetch / недостоверный разбор: nodes[] НЕ трогаются (SPEC 113-A),
 // ошибка — в updateStatus. На success: merge в nodes[], заголовки в Meta.
 func refreshOneSubscriptionSource(src *state.Source, settings locale.Settings) bool {
-	if src == nil || src.Kind != state.SourceKindSubscription || src.URL == "" {
+	if !state.CanRefreshSubscription(src) {
 		return false
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -340,8 +341,13 @@ func (svc *ConfigService) RefreshSourceInPlace(src *state.Source) (bool, error) 
 	if src.Kind != state.SourceKindSubscription {
 		return false, fmt.Errorf("source %s is not a subscription (type=%q)", src.ID, src.Kind)
 	}
+	// A local snapshot has no provider to ask. Saying so plainly beats "empty
+	// URL", which describes the storage rather than the reason.
+	if src.IsLocalSnapshot() {
+		return false, fmt.Errorf("source %s was imported from a file and cannot be refreshed from the network", src.ID)
+	}
 	if src.URL == "" {
-		return false, fmt.Errorf("source %s has empty URL", src.ID)
+		return false, fmt.Errorf("source %s has no subscription URL", src.ID)
 	}
 	dataDir := svc.ac.FileService.Layout.Data
 

@@ -62,6 +62,11 @@ final class AppModel {
         case savingSubscription
         case removingSubscription
         case refreshingSubscription
+        /// Importing a subscription file. Distinct from adding: the file must
+        /// be read and parsed, so the row shows its own progress text.
+        case importingSubscription
+        /// Installing a user-selected core binary.
+        case importingCore
         case configuringDaemon
         case pairingDaemon
     }
@@ -714,6 +719,60 @@ final class AppModel {
         await loadSubscriptions()
     }
 
+    /// Import a subscription from a local file the user picked.
+    ///
+    /// Returns true only when the backend actually stored the source, so the
+    /// caller can dismiss its sheet on success and keep it open on failure —
+    /// a sheet that closes on error takes the explanation with it.
+    ///
+    /// The imported nodes are NOT yet in the built config, so `config_stale`
+    /// comes back true. This deliberately does not rebuild: rebuilding is the
+    /// user's decision, and for an externally-managed config it must never
+    /// happen at all.
+    @discardableResult
+    func importSubscriptionFile(path: String) async -> Bool {
+        var imported = false
+        await withPending(.importingSubscription, success: nil) {
+            let result = try await self.client.importSubscriptionFile(path: path)
+            imported = true
+            self.showTransient(result.summary)
+            // A count the parser could not express is worth naming: silently
+            // dropping entries would misrepresent what the file contained.
+            if result.unsupported_count > 0, let first = result.warnings?.first, !first.isEmpty {
+                self.setError(first)
+            }
+        }
+        if imported { await loadSubscriptions() }
+        return imported
+    }
+
+    /// Install a core binary the user picked.
+    ///
+    /// Returns true when the swap succeeded. The version shown afterwards comes
+    /// from the backend's read-back of the installed binary, never from the
+    /// file the user selected — those differ whenever the backend rejects a
+    /// candidate, and assuming otherwise would show a version that is not
+    /// running.
+    @discardableResult
+    func importCoreFile(path: String) async -> Bool {
+        var installed = false
+        await withPending(.importingCore, success: nil) {
+            let result = try await self.client.importCoreFile(path: path)
+            installed = true
+            self.showTransient(result.summary)
+            // A warning here means the swap worked but something about it needs
+            // saying — for example a daemon still serving the old binary.
+            if let warning = result.warning, !warning.isEmpty {
+                self.setError(warning)
+            }
+        }
+        if installed {
+            await refreshCoreState()
+            await loadDaemonStatus()
+        }
+        return installed
+    }
+
     /// Update every enabled source.
     func updateAllSubscriptions() async {
         await withPending(.updatingSubscriptions, success: nil) {
@@ -1107,6 +1166,19 @@ final class AppModel {
 
     /// Whether the daemon engine is offered by this build.
     var daemonAvailable: Bool { handshake?.capabilities.daemon ?? false }
+
+    /// Whether this backend can install a user-selected core binary.
+    ///
+    /// Asked of the backend rather than assumed from the platform: the swap is
+    /// implemented only where the backend can do it, and a version row that
+    /// offers an action the backend will refuse is worse than one that stays
+    /// plain text.
+    var coreImportAvailable: Bool { handshake?.capabilities.canImportCore ?? false }
+
+    /// Whether this backend can import a subscription from a local file.
+    var localSubscriptionImportAvailable: Bool {
+        handshake?.capabilities.canImportLocalSubscription ?? false
+    }
 
     // MARK: - Desktop actions (NSWorkspace)
     //

@@ -159,7 +159,10 @@ func FeedBuildReportFromFetchStatus(gen config.BuildGeneration, sources []state.
 			label = src.Label
 		}
 		if label == "" {
-			label = src.URL
+			// SourceLabel, а не src.URL: у локального снимка URL пуст, и
+			// отчёт показывал бы запись без имени — «источник сломан» вместо
+			// названия того, что сломалось.
+			label = state.SourceLabel(src)
 		}
 		st := src.UpdateStatus
 

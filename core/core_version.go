@@ -46,15 +46,31 @@ func coreVersionAt(path string) (string, error) {
 		return "", fmt.Errorf("failed to get version: %w", err)
 	}
 
-	outputStr := strings.TrimSpace(string(output))
-	versionRegex := regexp.MustCompile(`sing-box version\s+(\S+)`)
-	matches := versionRegex.FindStringSubmatch(outputStr)
-	if len(matches) > 1 {
-		return matches[1], nil
+	version := ParseCoreVersionOutput(string(output))
+	if version == "" {
+		debuglog.WarnLog("GetInstalledCoreVersion: unable to parse version from output: %q", output)
+		return "", fmt.Errorf("unable to parse version from output: %s", strings.TrimSpace(string(output)))
 	}
+	return version, nil
+}
 
-	debuglog.WarnLog("GetInstalledCoreVersion: unable to parse version from output: %q", outputStr)
-	return "", fmt.Errorf("unable to parse version from output: %s", outputStr)
+// coreVersionRegexp recognizes the `sing-box version X` line.
+//
+// One pattern for the whole project: the version is printed by the core and read
+// in more than one place (the installed core, and a candidate during import), and
+// two parsers would eventually disagree about what a build calls itself.
+var coreVersionRegexp = regexp.MustCompile(`sing-box version\s+(\S+)`)
+
+// ParseCoreVersionOutput extracts the version from `sing-box version` output.
+//
+// Returns "" when the output does not look like a sing-box version banner, which
+// is how a non-core binary gets rejected.
+func ParseCoreVersionOutput(output string) string {
+	matches := coreVersionRegexp.FindStringSubmatch(strings.TrimSpace(output))
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
 }
 
 // GetCoreBinaryPath возвращает путь к бинарнику sing-box для отображения.
@@ -150,4 +166,37 @@ func (ac *AppController) InvalidateInstalledCoreVersionCache() {
 	ac.installedCoreVersionCacheMu.Lock()
 	defer ac.installedCoreVersionCacheMu.Unlock()
 	ac.installedCoreVersionCache = ""
+}
+
+// InvalidateCoreBinaryCaches сбрасывает ВСЕ кэши, выведенные из бинаря ядра.
+//
+// Единственный владелец инвалидации: любой путь, заменяющий бинарь ядра,
+// обязан звать этот метод, а не чистить кэши по одному в своём обработчике —
+// иначе новый кэш, добавленный позже, переживёт подмену бинаря и будет
+// рассказывать о нём неправду до перезапуска приложения.
+//
+// Кэши делятся на два вида:
+//
+//   - версия ядра: сессионный, сам не протухает — сбрасывается здесь;
+//   - теги сборки и поддержка chain: ключуются (mtime, size) бинаря и потому
+//     сами промахиваются после подмены. Всё равно сбрасываются явно: полагаться
+//     на то, что у нового файла гарантированно другие mtime и size, значит
+//     зависеть от файловой системы (совпадение размера и секундной точности
+//     mtime возможно), а последствие — узел уезжает в конфиг, который ядро
+//     отвергает целиком.
+func (ac *AppController) InvalidateCoreBinaryCaches() {
+	if ac == nil {
+		return
+	}
+	ac.InvalidateInstalledCoreVersionCache()
+
+	ac.coreBuildTagsCacheMu.Lock()
+	ac.coreBuildTagsCache = nil
+	ac.coreBuildTagsCacheMu.Unlock()
+
+	ac.chainSupportCacheMu.Lock()
+	ac.chainSupportCache = nil
+	ac.chainSupportCacheMu.Unlock()
+
+	debuglog.InfoLog("CoreBinaryCaches: invalidated after a core binary change")
 }

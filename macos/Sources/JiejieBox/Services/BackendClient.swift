@@ -549,6 +549,19 @@ actor BackendClient {
             seconds = 20
         case BackendMethod.pairDaemon:
             seconds = 30
+        case BackendMethod.importCoreFile:
+            // The backend's worst case is bounded but additive: validate the
+            // path, copy up to 256 MB, probe the candidate's version (3 s cap),
+            // then run `sing-box check` on the current config (5 s cap). A
+            // timeout below that sum would abort a healthy import on a slow
+            // disk and — worse — could fire while the backend is mid-swap,
+            // leaving the UI reporting failure for a swap that succeeded.
+            seconds = 45
+        case BackendMethod.importSubscriptionFile:
+            // Reads a local file (capped at the shared 10 MB response limit),
+            // runs the full decode/classify/parse pipeline and writes state.
+            // No network, but the parse is real work.
+            seconds = 30
         default:
             // Every method the client actually calls is listed explicitly
             // above; this fallback exists only so a future method cannot be
@@ -700,6 +713,31 @@ actor BackendClient {
         try await request(BackendMethod.refreshSubscription,
                           params: ["id": .string(id)],
                           as: Subscription.self)
+    }
+
+    /// Import a subscription from a file the user chose.
+    ///
+    /// Only the path crosses the wire. The frontend does not read the file,
+    /// guess its format or count nodes: the backend runs the same pipeline a
+    /// network fetch uses, so an imported source and a fetched one are
+    /// indistinguishable downstream.
+    func importSubscriptionFile(path: String) async throws -> SubscriptionImportResult {
+        try await request(BackendMethod.importSubscriptionFile,
+                          params: ["path": .string(path)],
+                          as: SubscriptionImportResult.self)
+    }
+
+    // MARK: - Core
+
+    /// Install a core binary the user chose.
+    ///
+    /// The backend validates and swaps the binary, then answers with the
+    /// version it actually installed — the frontend never inspects the file
+    /// itself, and never assumes the swap worked because the request returned.
+    func importCoreFile(path: String) async throws -> CoreImportResult {
+        try await request(BackendMethod.importCoreFile,
+                          params: ["path": .string(path)],
+                          as: CoreImportResult.self)
     }
 
     // MARK: - Daemon

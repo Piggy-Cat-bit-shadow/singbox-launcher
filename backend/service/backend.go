@@ -137,8 +137,12 @@ func (b *Backend) capabilities() protocol.Capabilities {
 		Elevation:     core.ElevationSupported(),
 		Traffic:       true,
 		Subscriptions: true,
-		Remote:        false,
-		Configurator:  false,
+		// Platform-specific: importing a core needs a runnable-executable check
+		// for this machine's format, so it is reported rather than assumed.
+		CoreImport:              CoreImportSupported(),
+		LocalSubscriptionImport: true,
+		Remote:                  false,
+		Configurator:            false,
 	}
 }
 

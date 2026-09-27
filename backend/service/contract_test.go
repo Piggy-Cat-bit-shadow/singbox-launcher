@@ -792,6 +792,23 @@ func TestSwiftTimeoutBudgets(t *testing.T) {
 			t.Errorf("%s timeout = %.1fs, want >= 30s for network work", m, v)
 		}
 	}
+
+	// The imports are the two operations where a too-tight budget is actively
+	// harmful rather than merely slow: the backend spends it validating,
+	// copying and probing, so a timeout that fires mid-transaction makes the UI
+	// report a failure for a swap that may well have succeeded. Both must have
+	// an explicit budget comfortably above the backend's own internal caps
+	// (3 s version probe + 5 s config check).
+	for _, m := range []string{"importCoreFile", "importSubscriptionFile"} {
+		v, ok := secondsOf[m]
+		if !ok {
+			t.Errorf("%s has no explicit timeout; it must not fall through to the default", m)
+			continue
+		}
+		if v < 30 {
+			t.Errorf("%s timeout = %.1fs, want >= 30s: the backend may be mid-swap when it fires", m, v)
+		}
+	}
 }
 
 // TestErrorsCarryAReadableMessage — every failure must reach the UI as text a

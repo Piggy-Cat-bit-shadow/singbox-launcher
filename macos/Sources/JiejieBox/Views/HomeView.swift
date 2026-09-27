@@ -44,14 +44,7 @@ struct HomeView: View {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     StatusLine(state: model.core?.state, error: model.core?.error_message)
-                    if let version = model.core?.core_version, !version.isEmpty {
-                        Text(version)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(version)
-                    }
+                    versionRow
                 }
 
                 Spacer(minLength: 8)
@@ -68,8 +61,74 @@ struct HomeView: View {
         .padding(.vertical, 6)
     }
 
-    private var primaryButton: some View {
-        Button {
+    /// The sing-box version line, which doubles as the core-replacement entry
+    /// point.
+    ///
+    /// The version is where a user looks to answer "which core am I running?",
+    /// so the action that changes it belongs on the same line rather than
+    /// buried in a menu. Three states, deliberately distinct:
+    ///
+    ///   * import available and a core is installed — a button, so the row is
+    ///     reachable and obviously interactive;
+    ///   * import available and no core — the same button, phrased as loading
+    ///     one, because that is the only way out of the missing-core state;
+    ///   * import unavailable — plain text. Offering an action the backend
+    ///     cannot perform produces a button whose only outcome is an error.
+    @ViewBuilder
+    private var versionRow: some View {
+        if model.coreImportAvailable {
+            Button {
+                loadCore()
+            } label: {
+                HStack(spacing: 4) {
+                    if model.pending == .importingCore {
+                        ProgressView().controlSize(.mini)
+                        Text("Installing core…")
+                    } else if let version = installedVersion {
+                        Text(version)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption2)
+                    } else {
+                        Text("Load Core…")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(model.pending != nil)
+            .help(installedVersion == nil
+                  ? "Choose a sing-box binary to install"
+                  : "Replace the sing-box core")
+        } else if let version = installedVersion {
+            Text(version)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(version)
+        }
+    }
+
+    /// Installed core version, or nil when none is known.
+    private var installedVersion: String? {
+        guard let version = model.core?.core_version, !version.isEmpty else { return nil }
+        return version
+    }
+
+    /// Ask for a core binary and hand the path to the backend.
+    ///
+    /// A cancelled panel is not a failure, so nothing is reported; the backend
+    /// speaks for every rejected candidate.
+    private func loadCore() {
+        guard let path = FilePicker.chooseCoreBinary() else { return }
+        Task { await model.importCoreFile(path: path) }
+    }
+
+    private var primaryButton: some View {        Button {
             Task { await model.toggleCore() }
         } label: {
             if primaryIsBusy {
@@ -185,7 +244,15 @@ struct HomeView: View {
                     .controlSize(.small)
             }
         } else if model.coreMissing {
+            // With no core at all, choosing one is the only way forward, so the
+            // banner leads with it. Revealing the folder stays available as the
+            // second option for someone who wants to place the binary by hand.
             Banner(kind: .error, message: "The sing-box core binary was not found.") {
+                if model.coreImportAvailable {
+                    Button("Load Core…") { loadCore() }
+                        .controlSize(.small)
+                        .disabled(model.pending != nil)
+                }
                 Button("Reveal Folder") { model.revealConfigFolder() }
                     .controlSize(.small)
             }

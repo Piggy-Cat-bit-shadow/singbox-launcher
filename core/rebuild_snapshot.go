@@ -47,12 +47,12 @@ func buildSnapshotFromState(s *state.State, l paths.Layout, subst config.VarSubs
 	enabledSubs := 0
 	for i := range s.Sources {
 		src := &s.Sources[i]
-		if src.Kind != state.SourceKindSubscription || !src.Enabled || src.URL == "" {
+		if src.Kind != state.SourceKindSubscription || !src.Enabled {
 			continue
 		}
 		enabledSubs++
 		if len(src.Nodes) == 0 {
-			empty = append(empty, src.URL)
+			empty = append(empty, state.SourceLabel(src))
 		}
 	}
 	if enabledSubs > 0 && len(empty) == enabledSubs {
@@ -60,9 +60,9 @@ func buildSnapshotFromState(s *state.State, l paths.Layout, subst config.VarSubs
 			ErrNoMaterializedNodes, len(empty), empty[0])
 	}
 	var partialWarnings []string
-	for _, url := range empty {
-		debuglog.WarnLog("buildSnapshotFromState: subscription %s has no nodes — source degraded (fetch failing?), config is built from the rest", url)
-		partialWarnings = append(partialWarnings, fmt.Sprintf("subscription %s has no nodes yet (last fetch failed?) — built without it", url))
+	for _, name := range empty {
+		debuglog.WarnLog("buildSnapshotFromState: subscription %s has no nodes — source degraded (fetch failing?), config is built from the rest", name)
+		partialWarnings = append(partialWarnings, fmt.Sprintf("subscription %s has no nodes yet (last fetch failed?) — built without it", name))
 	}
 
 	parserCfg := s.ParserConfig

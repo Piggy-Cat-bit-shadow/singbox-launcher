@@ -382,6 +382,22 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		}
 		return protocol.Response{ID: req.ID, Result: status}
 
+	case protocol.MethodImportCoreFile:
+		path, _ := req.Params["path"].(string)
+		result, err := s.backend.ImportCoreFile(path)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
+	case protocol.MethodImportSubscriptionFile:
+		path, _ := req.Params["path"].(string)
+		result, err := s.backend.ImportSubscriptionFile(path)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
 	case protocol.MethodSetDaemonKeepRunning:
 		keepRunning, _ := req.Params["enabled"].(bool)
 		if err := s.backend.SetDaemonKeepRunningAfterQuit(keepRunning); err != nil {
