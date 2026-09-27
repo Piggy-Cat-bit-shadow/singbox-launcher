@@ -18,8 +18,8 @@ Backend methods chain-verified:            10
 Proxy state paths audited:                 10
 Core state paths audited:                   5
 
-Confirmed bugs:                             6
-  P0 fixed:                                 2
+Confirmed bugs:                             7
+  P0 fixed:                                 3
   P1 fixed:                                 3
   P2 fixed:                                 1
 Remaining known core-flow bugs:             0
@@ -125,7 +125,36 @@ remembered one is gone, then loads that group's nodes.
 
 ---
 
-### BUG-6 — Reload Config was a dead end for a non-wizard config (P1/P2)
+### BUG-6 — Quit skipped the EOF fallback when the ACK failed (P0)
+
+**Root cause**: `shutdownGracefully` closed stdin only `if acknowledged`. On a
+shutdown timeout or decode failure the pipe stayed **open**, so the helper — whose
+read loop blocks on stdin and whose `GracefulExit` cannot stop it — had no way to
+learn the frontend was gone. The wait then burned its whole budget and the process
+was force-terminated without its graceful teardown ever running.
+
+That inverts the intent: EOF is precisely the fallback for a broken IPC channel,
+so it is needed most when the ACK did not arrive. Measured on a helper that only
+exits on EOF: **3207 ms with the pipe left open and a force-terminate, versus
+155 ms with the EOF fallback and no force-terminate.**
+
+**Fix**: stdin is closed on every path. The ACK ordering still protects the
+normal case (the response is written before teardown starts, so it has already
+arrived), and on the failure path there is no ACK to protect and the caller's
+waiter has already been resumed with the timeout error.
+
+The log line also claimed `"(no ACK; EOF-only path)"` for a route that never
+performed an EOF handoff; it now says `"(no ACK; EOF fallback used)"`.
+
+**Regression check**: `TestQuitAlwaysSendsTheEOFFallback` is a static invariant —
+closing stdin must not mention the ACK, must precede the force-terminate, and must
+follow the shutdown request. Verified to **fail** when the bug is restored.
+`TestEOFAloneRunsTheSameTeardownAsTheMethod` proves EOF reaches the full
+exactly-once teardown rather than a weaker exit.
+
+---
+
+### BUG-7 — Reload Config was a dead end for a non-wizard config (P1/P2)
 
 **What the audit found**: the empty-state copy told users to reload the config,
 so the closure was checked — and it does not close for every user. A rebuild
@@ -187,9 +216,16 @@ than appearing to succeed.
 - **Runtime truth.** Node selection comes from the core's `now` field
   (`Selected: p.Name == selected`); there is no optimistic local flag, and
   `switch_proxy` returns a freshly-read list rather than what was requested.
-- **Config-stale closure.** Editing a subscription sets `config_stale` and it
-  survives a restart; the Proxies screen surfaces it with a Reload action.
-  (The reload itself is gated per BUG-6.)
+- **Config-stale closure — verified closed.** With a buildable state:
+  edit → `config_stale = true` → `reload_config` → `config_stale = false`. The
+  rebuild additionally refuses to overwrite a working config with an empty one
+  ("no nodes parsed from any source"), which is a safeguard rather than a failure:
+  it prevents a misconfigured subscription list from destroying a working config.
+- **Original semantics preserved.** The UI copy in the empty state promises the
+  subscription/reload route, and the chain behind it is real: the SwiftUI app
+  switches proxies through the same `SwitchProxyVia` the old UI used, including
+  its side effects (active name, per-group last-selected memory, the
+  `OnProxySwitched` hook). Nothing was lost in the rewrite.
 - **Core-start recovery.** A transition to `running` reloads groups, so the
   Proxies screen becomes usable without leaving and re-entering it.
 - **Stop degradation.** `proxyListState` returns `coreStopped` when the core is
@@ -222,7 +258,7 @@ than appearing to succeed.
 | 12 | Return to Proxies | groups reload before nodes (BUG-5) |
 | 13 | Home summary | from the snapshot, not page visits |
 | 14 | Error readability | real backend message (BUG-1) |
-| 15 | Quit | unaffected; 66 ms path from the previous round |
+| 15 | Quit | ACK path 66 ms; no-ACK path now uses the EOF fallback (BUG-6) |
 
 ---
 
