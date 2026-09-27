@@ -394,7 +394,7 @@ final class AppModel {
             // two consumers after a restart.
             eventTask?.cancel()
             let stream = await client.events()
-            eventTask = Task { [weak self] in
+            eventTask = Task<Void, Never> { [weak self] in
                 for await event in stream {
                     await self?.apply(event)
                 }
@@ -915,6 +915,26 @@ final class AppModel {
     func setError(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         lastError = trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Reload the configuration and re-read the proxy groups.
+    ///
+    /// Exposed as one call so views do not have to sequence two awaits inside a
+    /// Task closure — a multi-statement `Task { }` is ambiguous against
+    /// `Task.init(name:priority:operation:)` on newer Swift toolchains.
+    func reloadAndReloadGroups() async {
+        await reloadConfig()
+        await loadGroups()
+    }
+
+    /// Refresh subscriptions, rebuild the config, then re-read the groups.
+    ///
+    /// The full recovery path for "the node list is out of date": fetch, rebuild,
+    /// reload. Named for the same reason as above.
+    func updateSubscriptionsAndReload() async {
+        await updateAllSubscriptions()
+        await reloadConfig()
+        await loadGroups()
     }
 
     func clearError() { lastError = nil }

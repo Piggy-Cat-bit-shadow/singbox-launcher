@@ -252,12 +252,7 @@ struct ProxiesView: View {
                 title: "Configuration needs reload",
                 detail: "Subscriptions changed, so the node list is out of date.",
                 tone: .warning,
-                action: ("Reload Config", {
-                    Task {
-                        await model.reloadConfig()
-                        await model.loadGroups()
-                    }
-                }))
+                action: ("Reload Config", { reloadConfig() }))
 
         case .noGroups:
             ProxyNotice(
@@ -269,12 +264,7 @@ struct ProxiesView: View {
                 tone: .neutral,
                 action: model.subscriptions.isEmpty
                     ? ("Open Subscriptions", { model.path.append(.subscriptions) })
-                    : ("Reload Config", {
-                        Task {
-                            await model.reloadConfig()
-                            await model.loadGroups()
-                        }
-                    }))
+                    : ("Reload Config", { reloadConfig() }))
 
         case .noGroupSelected:
             ProxyNotice(
@@ -293,13 +283,7 @@ struct ProxiesView: View {
                 tone: .neutral,
                 action: model.subscriptions.isEmpty
                     ? ("Open Subscriptions", { model.path.append(.subscriptions) })
-                    : ("Update Subscriptions", {
-                        Task {
-                            await model.updateAllSubscriptions()
-                            await model.reloadConfig()
-                            await model.loadGroups()
-                        }
-                    }))
+                    : ("Update Subscriptions", { updateAndReload() }))
 
         case .ready:
             if model.filteredProxies.isEmpty {
@@ -313,6 +297,21 @@ struct ProxiesView: View {
                 nodeList
             }
         }
+    }
+
+    /// Reload the configuration, then re-read the groups so the list reflects
+    /// what was rebuilt.
+    ///
+    /// Named rather than inlined: a multi-statement `Task { }` inside a ternary
+    /// makes `Task.init` ambiguous on newer Swift toolchains, and the compiler
+    /// reports it as an unhelpful "ambiguous use of init(name:priority:operation:)".
+    private func reloadConfig() {
+        Task { await model.reloadAndReloadGroups() }
+    }
+
+    /// Refresh subscriptions, then rebuild, then re-read the groups.
+    private func updateAndReload() {
+        Task { await model.updateSubscriptionsAndReload() }
     }
 
     private var loadingRow: some View {
