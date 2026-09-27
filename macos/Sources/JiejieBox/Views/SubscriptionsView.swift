@@ -138,23 +138,43 @@ struct SubscriptionsView: View {
     /// The product never rebuilds on its own, so the screen states the fact and
     /// offers the action instead of leaving the user to wonder why a new
     /// subscription produced no nodes.
+    /// Prompts for the step that applies an edited subscription list.
+    ///
+    /// The action depends on ownership: for an externally managed config a
+    /// rebuild is impossible, so pointing at Reload would offer a step that can
+    /// only fail. That user gets the file instead.
     private var reloadPrompt: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Configuration needs reload")
+            Text(model.configRebuildable
+                 ? "Configuration needs reload"
+                 : "Configuration is managed externally")
                 .font(.caption.weight(.medium))
-            Text("Reload the config to apply the new node list.")
+            Text(model.configRebuildable
+                 ? "Reload the config to apply the new node list."
+                 : "These changes will not take effect until the external configuration is updated.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button {
-                Task {
-                    await model.reloadConfig()
-                    await model.refreshCoreState()
+                .fixedSize(horizontal: false, vertical: true)
+
+            if model.configRebuildable {
+                Button {
+                    Task {
+                        await model.reloadConfig()
+                        await model.refreshCoreState()
+                    }
+                } label: {
+                    Text("Reload Config")
                 }
-            } label: {
-                Text("Reload Config")
+                .controlSize(.small)
+                .disabled(model.pending != nil)
+            } else {
+                Button {
+                    model.revealConfig()
+                } label: {
+                    Text("Open Config")
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
-            .disabled(model.pending != nil)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
         .padding(.vertical, 6)

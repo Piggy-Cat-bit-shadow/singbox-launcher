@@ -31,7 +31,7 @@ MenuBarExtra (SwiftUI)  ──JSON over stdio──▶  jiejiebox-backend (Go, h
 | **Core Mode** | Switch between the classic and daemon engines |
 | **Subscriptions** | List, add, edit, enable, refresh and delete subscription sources |
 | **Daemon** | Set up and diagnose the system-service engine, then activate it |
-| **More** | Reload config, automation toggles, open files |
+| **More** | Reload config (when JiejieBox owns it), appearance, automation toggles, open files |
 | **About** | Versions and links |
 
 **Navigation invariant.** Every screen draws the same header: `‹ Title … Quit`.
@@ -128,6 +128,13 @@ migrated or rewritten on first launch. The bundle identifier stays
   use. Adding a source does **not** rebuild the config: the app says the config
   needs a reload and offers the action, because rebuilding is the user's
   decision.
+- **Reload Config is offered only for a config JiejieBox built.** A rebuild
+  replays the wizard state, so a config written by hand or by another tool cannot
+  be rebuilt here — the app says so and offers "Open Config" instead. Ownership
+  is recorded in a marker beside `config.json`, not inferred from the presence of
+  a state file.
+- **Appearance is a frontend-only preference** (System / Light / Dark), stored in
+  `UserDefaults`. It never reaches the backend, and it survives a relaunch.
 - **Daemon is set up before it is activated.** The engine needs an installed
   launchd service, a paired identity and a reachable control plane. The Daemon
   screen walks those steps one at a time and only offers "Use Daemon Mode" once

@@ -384,3 +384,104 @@ func TestMarkerGrantsOwnership(t *testing.T) {
 		t.Error("a corrupt marker must refuse, not assume ownership")
 	}
 }
+
+// TestRebuildabilityMatrix covers the six cases the frontend depends on.
+//
+// `config_rebuildable` drives whether a Reload affordance is offered at all, so
+// a wrong answer here is either a dead button (offered when it cannot work) or a
+// missing one (hidden when it would work).
+func TestRebuildabilityMatrix(t *testing.T) {
+	t.Run("A: launcher-built config is rebuildable", func(t *testing.T) {
+		b := backendWithConfig(t)
+		if err := b.markConfigManaged(); err != nil {
+			t.Fatalf("markConfigManaged: %v", err)
+		}
+		if !b.configIsRebuildable() {
+			t.Error("a config carrying our marker must be rebuildable")
+		}
+		if !b.coreState().ConfigRebuildable {
+			t.Error("the DTO does not report the rebuildable config")
+		}
+	})
+
+	t.Run("B: external config with no state is not rebuildable", func(t *testing.T) {
+		b := backendWithConfig(t) // fixture writes config.json, no marker
+		if b.configIsRebuildable() {
+			t.Error("an unmarked config must not be rebuildable")
+		}
+		if b.coreState().ConfigRebuildable {
+			t.Error("the DTO claims ownership of a config we did not build")
+		}
+	})
+
+	t.Run("C: external config stays unrebuildable after AddSubscription", func(t *testing.T) {
+		// The regression that matters: the subscription manager creates
+		// state.json, and a check based on that file's existence would flip.
+		b := backendWithConfig(t)
+		if _, err := b.AddSubscription("P", "https://p.example/s"); err != nil {
+			t.Fatalf("AddSubscription: %v", err)
+		}
+		statePath := platform.GetWizardStatePath(b.ac.FileService.Layout.Data)
+		if _, err := os.Stat(statePath); err != nil {
+			t.Fatalf("precondition: AddSubscription should have created a state file: %v", err)
+		}
+		if b.configIsRebuildable() {
+			t.Error("a state file created by the subscription manager must not confer " +
+				"ownership of a config we did not build")
+		}
+		if b.coreState().ConfigRebuildable {
+			t.Error("the DTO flipped to rebuildable because state.json appeared")
+		}
+	})
+
+	t.Run("D: fresh install with no config is rebuildable", func(t *testing.T) {
+		b := backendWithConfig(t)
+		if err := os.Remove(b.ac.FileService.ConfigPath); err != nil {
+			t.Fatalf("remove config: %v", err)
+		}
+		// Nothing to overwrite, so a rebuild is how the file comes into
+		// existence — it must not be blocked by a marker that cannot exist yet.
+		if !b.configIsRebuildable() {
+			t.Error("a missing config must be rebuildable")
+		}
+	})
+
+	t.Run("E: provenance survives a new backend over the same layout", func(t *testing.T) {
+		b := backendWithConfig(t)
+		if err := b.markConfigManaged(); err != nil {
+			t.Fatalf("markConfigManaged: %v", err)
+		}
+		// A new Backend over the same data directory models a process restart:
+		// the marker is on disk, so ownership must persist.
+		fresh := &Backend{ac: b.ac}
+		if !fresh.configIsRebuildable() {
+			t.Error("ownership did not survive a restart")
+		}
+		if !fresh.coreState().ConfigRebuildable {
+			t.Error("the restored backend does not report rebuildability")
+		}
+	})
+
+	t.Run("F: the DTO carries the flag", func(t *testing.T) {
+		b := backendWithConfig(t)
+		raw, err := json.Marshal(b.coreState())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := m["config_rebuildable"]; !present {
+			t.Error("CoreState is missing config_rebuildable; the frontend cannot " +
+				"decide whether to offer Reload")
+		}
+		// The three config fields belong together, so a rename of one is a
+		// contract change the client must see.
+		for _, key := range []string{"config_exists", "config_stale", "config_rebuildable"} {
+			if _, present := m[key]; !present {
+				t.Errorf("CoreState is missing %q", key)
+			}
+		}
+	})
+}

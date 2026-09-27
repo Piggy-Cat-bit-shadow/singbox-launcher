@@ -342,11 +342,12 @@ than appearing to succeed.
    whether a state file happens to exist (BUG-8). Making an external config
    rebuildable is a product decision, not a defect.
 
-   Open question for the owner: the Proxies screen still *offers* Reload
-   unconditionally, because rebuildability is not exposed to the frontend. The
-   backend refuses correctly and explains why, so this is a UX nit rather than a
-   correctness issue — exposing a `rebuildable` flag would let the button be
-   hidden or replaced.
+   **Resolved.** Rebuildability is now exposed as
+   `CoreState.config_rebuildable`, and every Reload affordance is gated on it:
+   More, the Proxies stale and no-groups notices, the Subscriptions reload
+   prompt, and the Home banner. Where a rebuild is impossible the UI states that
+   the config is managed externally and offers **Open Config** instead — a real
+   next step rather than a control whose only outcome is an error.
 2. **The manual GUI walkthrough is still unrun.** Every claim above is static
    analysis plus IPC exercised against the packaged helper with a stub Clash API.
    Layout, hover states and click feel need a human.

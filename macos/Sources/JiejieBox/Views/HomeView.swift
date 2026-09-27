@@ -195,14 +195,25 @@ struct HomeView: View {
                     .controlSize(.small)
             }
         } else if model.core?.config_stale == true {
-            Banner(kind: .warning, message: "The configuration has changed since it was built.") {
-                Button("Reload") {
-                    Task {
-                        await model.reloadConfig()
-                        await model.refreshCoreState()
+            // Reload only when JiejieBox owns the config; otherwise the only
+            // possible outcome is the backend refusing, so the banner points at
+            // the file instead.
+            Banner(kind: .warning,
+                   message: model.configRebuildable
+                       ? "The configuration has changed since it was built."
+                       : "The configuration changed, but it is managed outside JiejieBox.") {
+                if model.configRebuildable {
+                    Button("Reload") {
+                        Task {
+                            await model.reloadConfig()
+                            await model.refreshCoreState()
+                        }
                     }
+                    .controlSize(.small)
+                } else {
+                    Button("Open Config") { model.revealConfig() }
+                        .controlSize(.small)
                 }
-                .controlSize(.small)
             }
         }
 

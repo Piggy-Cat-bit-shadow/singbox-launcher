@@ -123,7 +123,8 @@ things depending on the row.
 | banner Reveal Folder / Subscriptions / Reload | Button | navigate or `reloadConfig` | `reload_config` | ✅ |
 | banner dismiss (×) | Button | `clearError` / `setTransientStatus("")` | — | ✅ |
 | Proxies / Core Details / Core Mode / Subscriptions / More | MenuRow | navigate | — | ✅ |
-| Reload Config | MenuRow | `reloadConfig` | `reload_config` | ✅ |
+| Reload Config | MenuRow | `reloadConfig` | `reload_config` | ✅ — shown only when `core.config_rebuildable`; otherwise a "Config Source: External" note plus **Open Config** |
+| Appearance | MenuPickerRow | `model.appearance = …` | — (UserDefaults) | ✅ |
 | Restart Core | MenuRow | `restartCore` | `restart_core` | ✅ |
 | Auto Ping / Auto Update toggles | MenuRow + drawn switch | `setAutoPing` / `setAutoUpdateSubscriptions` | `set_auto_ping` / `set_auto_update_subscriptions` | ✅ |
 | Launch at Login | MenuRow + drawn switch | `setLaunchAtLogin` (SMAppService) | — | ✅ |

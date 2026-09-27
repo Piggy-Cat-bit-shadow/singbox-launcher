@@ -266,6 +266,17 @@ type CoreState struct {
 	// for example after editing a subscription. The product never rebuilds on
 	// its own, so the UI must surface this and offer a reload.
 	ConfigStale bool `json:"config_stale"`
+	// ConfigRebuildable reports whether JiejieBox may rebuild this config.
+	//
+	// A rebuild replays the wizard state, so it is only valid for a config the
+	// launcher itself built. A config written by hand or by another tool is not
+	// ours to overwrite, and the frontend must know that BEFORE offering the
+	// action — a button whose only possible outcome is an error is worse than no
+	// button.
+	//
+	// The backend keeps enforcing this independently: hiding the affordance is
+	// presentation, not a security boundary.
+	ConfigRebuildable bool `json:"config_rebuildable"`
 	// ErrorMessage carries the last failure, if any.
 	ErrorMessage string `json:"error_message,omitempty"`
 }

@@ -190,6 +190,13 @@ struct CoreStatus: Decodable {
     /// after editing subscriptions). The product never rebuilds on its own, so
     /// the UI surfaces this and offers a reload.
     let config_stale: Bool
+    /// Whether JiejieBox may rebuild this config.
+    ///
+    /// False for a config written by hand or by another tool: a rebuild replays
+    /// the wizard state, which would overwrite somebody else's file. The UI must
+    /// not offer a Reload action in that case — the backend would refuse it, and
+    /// a button whose only outcome is an error is worse than no button.
+    let config_rebuildable: Bool
     let error_message: String?
 }
 

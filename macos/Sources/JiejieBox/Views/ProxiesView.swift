@@ -251,12 +251,26 @@ struct ProxiesView: View {
                 action: ("Try Again", { Task { await model.loadGroups() } }))
 
         case .configStale:
-            ProxyNotice(
-                symbol: "arrow.triangle.2.circlepath",
-                title: "Configuration needs reload",
-                detail: "Subscriptions changed, so the node list is out of date.",
-                tone: .warning,
-                action: ("Reload Config", { reloadConfig() }))
+            // The offered action depends on who owns the config. Pointing an
+            // external-config user at "Reload Config" would lead to an action
+            // that can only fail; they get the file instead.
+            if model.configRebuildable {
+                ProxyNotice(
+                    symbol: "arrow.triangle.2.circlepath",
+                    title: "Configuration needs reload",
+                    detail: "Subscriptions changed, so the node list is out of date.",
+                    tone: .warning,
+                    action: ("Reload Config", { reloadConfig() }))
+            } else {
+                ProxyNotice(
+                    symbol: "doc.text",
+                    title: "Configuration is managed externally",
+                    detail: "Subscriptions changed, but this config is not built by "
+                        + "JiejieBox, so it cannot be rebuilt here. Edit the file "
+                        + "directly to apply the change.",
+                    tone: .warning,
+                    action: ("Open Config", { model.revealConfig() }))
+            }
 
         case .noGroups:
             ProxyNotice(
@@ -268,7 +282,9 @@ struct ProxiesView: View {
                 tone: .neutral,
                 action: model.subscriptions.isEmpty
                     ? ("Open Subscriptions", { model.path.append(.subscriptions) })
-                    : ("Reload Config", { reloadConfig() }))
+                    : (model.configRebuildable
+                        ? ("Reload Config", { reloadConfig() })
+                        : ("Open Config", { model.revealConfig() })))
 
         case .noGroupSelected:
             ProxyNotice(

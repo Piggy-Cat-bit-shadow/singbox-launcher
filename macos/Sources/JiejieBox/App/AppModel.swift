@@ -1023,6 +1023,13 @@ final class AppModel {
         (settings?.core_backend_mode ?? "classic").capitalized
     }
 
+    /// Whether JiejieBox may rebuild the config it is running on.
+    ///
+    /// Reported by the backend, which decides ownership from an explicit
+    /// provenance marker rather than from whether a state file happens to
+    /// exist. The frontend never inspects files itself.
+    var configRebuildable: Bool { core?.config_rebuildable ?? false }
+
     /// True when the saved preference and the running engine disagree, which is
     /// what happens when a switch succeeded but persisting it did not. Surfaced
     /// rather than hidden: the next launch uses the saved value, so the user

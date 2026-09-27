@@ -227,3 +227,134 @@ struct MenuSection<Content: View>: View {
         .padding(.horizontal, Metrics.sectionPaddingH)
     }
 }
+
+/// A read-only label/value line.
+///
+/// Not a row: it is not interactive, and rendering it as a button would create
+/// exactly the "looks clickable but does nothing" defect the row primitives
+/// exist to avoid. Lives here beside them because several screens use it.
+///
+/// Not a MenuRow: it is not interactive, and rendering it as a button would
+/// create exactly the "looks clickable but does nothing" defect the row
+/// primitives exist to avoid.
+struct DetailLine: View {
+    enum Tone { case normal, error }
+
+    let label: String
+    let value: String
+    var tone: Tone = .normal
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // The label yields first: values such as a core version, an
+            // endpoint or an error message are the information, while the label
+            // is a fixed caption that is meaningless when truncated.
+            Text(label)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .layoutPriority(-1)
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(tone == .error ? Color.red : Color.primary)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(3)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                // The full value stays reachable even when it is clipped, so a
+                // long path or error is never lost to the panel width.
+                .help(value)
+        }
+        .font(.callout)
+        .padding(.horizontal, Metrics.rowPaddingH)
+        .padding(.vertical, 5)
+    }
+}
+
+/// A row whose root IS a `Menu`, for choosing one of a few options.
+///
+/// Why this exists rather than a `Menu` inside `MenuRow`: MenuRow's root is a
+/// Button, so putting a Menu in its label nests two interactive controls — the
+/// defect the row primitives were written to eliminate. Here the Menu is the
+/// only control, and the visual layout is shared with MenuRow so the row still
+/// looks like every other row.
+///
+/// `Menu` rather than `Picker` for the same reason: a Picker in a menu-bar panel
+/// renders as its own control with its own hit area, and it would sit inside the
+/// row rather than being the row.
+struct MenuPickerRow<Option: Hashable & Identifiable>: View {
+    let title: String
+    var subtitle: String?
+    var systemImage: String?
+    let options: [Option]
+    let selection: Option
+    let label: (Option) -> String
+    let onSelect: (Option) -> Void
+    /// Row-level disablement, e.g. while an unrelated operation is running.
+    var disabled: Bool = false
+
+    private var hover: HoverState { HoverStore.box(for: "menupicker:\(title)") }
+
+    var body: some View {
+        Menu {
+            ForEach(options) { option in
+                Button {
+                    onSelect(option)
+                } label: {
+                    // A checkmark marks the active choice, matching the group
+                    // picker on the Proxies screen.
+                    if option == selection {
+                        Label(label(option), systemImage: "checkmark")
+                    } else {
+                        Text(label(option))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13))
+                        .frame(width: 18)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                Text(label(selection))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            // Same full-width hit target and height as MenuRow, so the row reads
+            // as the same kind of thing and the whole width is clickable.
+            .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight, alignment: .leading)
+            .padding(.horizontal, Metrics.rowPaddingH)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: Metrics.rowCorner)
+                    .fill(hover.isHovering && !disabled
+                          ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .disabled(disabled)
+        .onHover { hover.isHovering = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(label(selection))")
+    }
+}

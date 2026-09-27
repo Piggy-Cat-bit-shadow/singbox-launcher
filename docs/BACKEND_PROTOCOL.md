@@ -143,7 +143,8 @@ produce a flood of events.
 
 // CoreState
 {"state": "stopped|starting|running|stopping|error",
- "binary_exists": true, "config_exists": true,
+ "binary_exists": true, "config_exists": true, "config_stale": false,
+ "config_rebuildable": false,
  "core_version": "1.15.0", "backend": "classic|daemon",
  "error_message": "…"}          // omitted when empty
 
@@ -203,6 +204,24 @@ produce a flood of events.
 
 It is **not** 0 ms. Zero is a legitimate reading, and conflating the two would
 show an untested node as instant. The UI renders `-1` as "—".
+
+### `config_rebuildable` decides whether Reload is offered
+
+A rebuild replays the wizard state, so it is only valid for a config the launcher
+itself built. `config_rebuildable` reports ownership, determined by an explicit
+marker written beside config.json when the launcher builds it — **not** by
+whether a state file exists, because the subscription manager creates one the
+first time a source is added and that would misattribute an external config.
+
+| Case | Value |
+|---|---|
+| No config.json | `true` — a rebuild is how the file comes into existence |
+| config.json + our marker | `true` — we built it |
+| config.json, no marker | `false` — somebody else owns this file |
+
+The frontend uses this to choose its affordance (Reload, or Open Config with an
+explanation). The backend enforces the same rule independently: hiding a button
+is presentation, not a security boundary.
 
 ### `available: false` is not an error
 

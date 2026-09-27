@@ -227,6 +227,9 @@ func (b *Backend) coreState() protocol.CoreState {
 		CoreVersion:  version,
 		Backend:      backend,
 		ConfigStale:  b.configStale(),
+		// Report ownership alongside staleness: the UI pairs "this is out of
+		// date" with "and I can/cannot fix it", so they belong in one payload.
+		ConfigRebuildable: b.configIsRebuildable(),
 	}
 }
 

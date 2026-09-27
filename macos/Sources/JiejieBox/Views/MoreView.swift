@@ -23,15 +23,41 @@ struct MoreView: View {
                             showsChevron: true) {
                         model.path.append(.subscriptions)
                     }
-                    MenuRow("Reload Config", systemImage: "arrow.triangle.2.circlepath") {
-                        Task {
-                            await model.reloadConfig()
-                            await model.refreshCoreState()
+                    // Reload is offered only for a config JiejieBox owns.
+                    // A rebuild replays the wizard state, so for a config written
+                    // by hand or by another tool the backend would refuse — and
+                    // a button whose only possible outcome is an error is worse
+                    // than no button. The backend still enforces this on its own;
+                    // this is presentation, not the safety boundary.
+                    if model.configRebuildable {
+                        MenuRow("Reload Config", systemImage: "arrow.triangle.2.circlepath") {
+                            Task {
+                                await model.reloadConfig()
+                                await model.refreshCoreState()
+                            }
                         }
-                    }
-                    .disabled(model.pending != nil)
-                    if model.pending == .reloadingConfig {
-                        PendingRow("Rebuilding config.json…")
+                        .disabled(model.pending != nil)
+                        if model.pending == .reloadingConfig {
+                            PendingRow("Rebuilding config.json…")
+                        }
+                    } else {
+                        // The fact, as content rather than a disabled control:
+                        // a greyed-out button still reads as "there is an action
+                        // here that you cannot use", while this simply states
+                        // what the file is. Open Config supplies the real next
+                        // step.
+                        DetailLine(label: "Config Source", value: "External")
+                        Text("This configuration is managed outside JiejieBox "
+                             + "and cannot be rebuilt here. Edit the file directly.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, Metrics.rowPaddingH)
+                            .padding(.vertical, 2)
+                        MenuRow("Open Config", systemImage: "square.and.pencil") {
+                            model.revealConfig()
+                        }
+                        .disabled(model.settings?.config_path.isEmpty ?? true)
                     }
                 }
 
@@ -66,6 +92,20 @@ struct MoreView: View {
                                       help: "Start JiejieBox when you sign in.") { value in
                         model.setLaunchAtLogin(value)
                     }
+                }
+
+                MenuSection("Application") {
+                    // Frontend-only preference: it never reaches the backend, so
+                    // UserDefaults stays the single source of truth and there is
+                    // no IPC method or settings.json field for it.
+                    MenuPickerRow(
+                        title: "Appearance",
+                        subtitle: "How JiejieBox looks.",
+                        systemImage: "circle.lefthalf.filled",
+                        options: AppModel.AppearancePreference.allCases,
+                        selection: model.appearance,
+                        label: { $0.label },
+                        onSelect: { model.appearance = $0 })
                 }
 
                 MenuSection("Files") {
