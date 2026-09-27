@@ -96,7 +96,7 @@ func TestSnapshotShape(t *testing.T) {
 	settings := result["settings"].(map[string]any)
 	for _, key := range []string{
 		"language", "core_backend_mode", "auto_ping_after_connect",
-		"auto_update_subscriptions", "data_dir", "config_path",
+		"auto_update_subscriptions", "data_dir", "config_path", "logs_dir",
 	} {
 		if _, present := settings[key]; !present {
 			t.Errorf("settings is missing %q", key)

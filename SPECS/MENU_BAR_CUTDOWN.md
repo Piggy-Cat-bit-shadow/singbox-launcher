@@ -195,3 +195,131 @@ protocol correctly (verified by running it).
   exists. The proxy and core command surface is untouched.
 - Not yet done: the SwiftUI menu-bar app (Phase 2+), CI/packaging cutover,
   docs rewrite. The repo currently has **no runnable GUI**.
+
+---
+
+# KEEP FEATURE ENTRY AUDIT (verified against code, not intent)
+
+Every row below was checked by reading the sources. "Entry exists" means an
+interactive SwiftUI primitive is present — not that a feature was planned.
+
+Method columns were produced by grepping `Method*` constants in
+`backend/protocol/protocol.go` and the dispatch switch in
+`backend/service/server.go`. Control columns come from grepping
+`Button(` / `Toggle(` / `Picker(` / `actionRow(` across the Swift views.
+
+## Backend surface — complete inventory
+
+Implemented and dispatched: `handshake`, `get_app_snapshot`, `subscribe`,
+`start_core`, `stop_core`, `shutdown`. **Six methods. That is all of them.**
+
+## Swift surface — complete inventory
+
+Every interactive control in the shipped app:
+
+| # | Control | File | Calls |
+|---|---|---|---|
+| 1 | Start / Stop | `HomeView.swift` | `start_core` / `stop_core` |
+| 2 | Restart (backend) | `HomeView.swift` | restart the helper process |
+| 3 | Quit | `HomeView.swift` | `shutdown` + terminate |
+| 4 | Reveal Config | `HomeView.swift` | `NSWorkspace` |
+| 5 | Core Mode row | `HomeView.swift` | navigate to CoreModeView |
+| 6 | More row | `HomeView.swift` | navigate to MoreView |
+| 7 | Open Config / Folder / Logs | `MoreView.swift` | `NSWorkspace` |
+| 8 | Launch at Login | `MoreView.swift` | `SMAppService` |
+| 9 | Appearance | `MoreView.swift` | `UserDefaults` |
+| 10 | About row | `MoreView.swift` | navigate to AboutView |
+
+## Feature coverage
+
+| Feature | Backend method | SwiftUI entry | Location | Status |
+|---|---|---|---|---|
+| Core start | `start_core` | Start button | Home | **COVERED** |
+| Core stop | `stop_core` | Stop button | Home | **COVERED** |
+| Core state + version | `get_app_snapshot` | status line, version | Home | **COVERED** |
+| Core restart | — | — | — | **MISSING BOTH** |
+| Core mode (read) | `get_app_snapshot` | Core Mode row shows mode | Home | **PARTIAL** |
+| Core mode (switch) | — | — | — | **MISSING BOTH** |
+| Config path | `get_app_snapshot` | Reveal Config | Home | **COVERED** |
+| Config folder | `get_app_snapshot` | Open Config Folder | More | **COVERED** |
+| Config reload | — | — | — | **MISSING BOTH** |
+| Logs | — (path derived in Swift) | Open Logs | More | **PARTIAL — hardcoded path** |
+| Proxy groups | — | — | — | **MISSING BOTH** |
+| Proxy list | — | — | — | **MISSING BOTH** |
+| Proxy switch | — | — | — | **MISSING BOTH** |
+| Latency test | — | — | — | **MISSING BOTH** |
+| Update subscriptions | — | — | — | **MISSING BOTH** |
+| Auto ping after connect | — | — | — | **MISSING BOTH** |
+| Auto update subscriptions | — | — | — | **MISSING BOTH** |
+| Traffic rate | — | — | — | **MISSING BOTH** |
+| Launch at Login | frontend-only | Toggle | More | **COVERED** |
+| Appearance | frontend-only | Picker | More | **COVERED** |
+| About | frontend-only | About row | More | **COVERED** |
+| Quit | `shutdown` | Quit button | Home | **COVERED** |
+
+## Report
+
+```
+Total KEEP features:            22
+With a visible entry:            9   (41%)
+Missing entry:                  13
+Backend methods without entry:   0   (every method has an entry)
+Dead Swift entries:              0   (every control reaches code)
+KEEP features missing BOTH sides: 10
+```
+
+## What this actually says
+
+The SPEC's §118 reverse audit (backend methods with no UI entry) returns
+**zero**: all six methods are reachable. That is the good news, and it is only
+good because the backend is small.
+
+The real gap is the opposite direction, and it is the one that matters:
+**ten KEEP features have neither a method nor an entry.** They are not
+"implemented but hidden" — they do not exist in either half yet.
+
+The §129 cutover rule ("only remove Fyne when missing entry = 0") therefore
+**cannot be met**, because the Fyne path is already deleted — it was removed in
+`8bc50113` as an explicit owner decision before this audit existed. The
+consequence is now concrete rather than theoretical: **the shipped app cannot
+select a proxy, cannot update subscriptions, and cannot reload config.** Those
+are daily-use features, not polish.
+
+Two smaller findings worth recording:
+
+- **Open Logs hardcodes the log directory** in Swift
+  (`~/Library/Logs/singbox-launcher`) instead of asking the backend. It works
+  today only because that path happens to be correct; it will silently break
+  if the layout changes. This is exactly the "backend returns paths" rule the
+  cutdown audit set.
+- **Core Mode is a read-only display.** The row implies a choice but the view
+  cannot change anything, which is the "looks clickable, does nothing"
+  pattern §114 forbids.
+
+## Honest status
+
+The architecture is done and verified; the product is roughly 40% migrated by
+feature count. Calling this "cutover complete" would be false.
+
+---
+
+# Entry audit — follow-up fixes applied
+
+Two defects the audit found were fixed in the same wave:
+
+1. **Open Logs no longer hardcodes the path.** `SettingsState` gained a
+   `logs_dir` field, populated from the resolved layout, and the view reads it
+   instead of constructing `~/Library/Logs/...` in Swift. The button is
+   disabled when the backend reports no path. This restores the cutdown rule
+   that the backend reports locations and the frontend only opens them.
+
+2. **Core Mode no longer pretends to be a choice.** It had a checkmark list
+   that looked selectable but had no `set_core_mode` behind it. The rows are
+   now plain content, the active mode is labelled "Active" rather than with a
+   checkmark, and the footer states that changing the mode is not available.
+   Honest about the gap instead of simulating the control.
+
+Still open and not addressed: the ten KEEP features with no backend method and
+no entry (restart core, mode switching, config reload, proxy groups/list/
+switch/latency, subscriptions update, auto-ping, auto-update, traffic rate).
+They are the remaining migration work, not polish.

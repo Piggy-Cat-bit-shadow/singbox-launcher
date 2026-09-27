@@ -158,6 +158,7 @@ func (b *Backend) settingsState() protocol.SettingsState {
 		AutoUpdateSubscriptions: !st.SubscriptionAutoUpdateDisabled,
 		DataDir:                 string(b.ac.FileService.Layout.Data),
 		ConfigPath:              b.ac.FileService.ConfigPath,
+		LogsDir:                 string(b.ac.FileService.Layout.Logs),
 	}
 }
 

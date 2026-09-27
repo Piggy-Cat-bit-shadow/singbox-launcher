@@ -117,6 +117,7 @@ struct SettingsState: Decodable {
     let auto_update_subscriptions: Bool
     let data_dir: String
     let config_path: String
+    let logs_dir: String
 }
 
 // MARK: - Snapshot

@@ -1,8 +1,10 @@
-// CoreModeView — choose how the core is run (classic child process vs daemon).
+// CoreModeView — shows how the core is run (classic child process vs daemon).
 //
-// Read-only for now: the backend reports the active mode in the snapshot, and
-// switching it is a core-lifecycle operation that belongs with the rest of the
-// runtime work rather than being faked here.
+// Display-only. Switching is not implemented: the backend exposes no
+// set_core_mode method, and offering a control that cannot act would be the
+// "looks clickable, does nothing" pattern the cutdown audit forbids. The rows
+// are therefore plain, non-interactive content with an explicit note, rather
+// than a picker that silently discards the choice.
 
 import SwiftUI
 
@@ -22,14 +24,14 @@ struct CoreModeView: View {
                         }
                         Spacer()
                         if mode.id == activeID {
-                            Image(systemName: "checkmark")
-                                .foregroundStyle(.tint)
+                            Text("Active")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .contentShape(Rectangle())
                 }
             } footer: {
-                Text("The mode is stored with your settings and applied on the next core start.")
+                Text("Changing the mode is not available yet.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

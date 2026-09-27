@@ -25,10 +25,14 @@ struct MoreView: View {
                     }
                 }
                 actionRow("Open Logs", systemImage: "text.alignleft") {
-                    if let logs = Self.logsDirectory() {
-                        NSWorkspace.shared.open(logs)
+                    // The backend reports the log directory; Swift must not
+                    // guess it, or the button silently points nowhere when the
+                    // layout changes.
+                    if let logs = model.settings?.logs_dir, !logs.isEmpty {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: logs))
                     }
                 }
+                .disabled(model.settings?.logs_dir.isEmpty ?? true)
             }
 
             Section("Startup") {
@@ -71,12 +75,6 @@ struct MoreView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    /// Logs live beside the data directory, matching the Go layout.
-    private static func logsDirectory() -> URL? {
-        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
-        return base?.appendingPathComponent("Logs/singbox-launcher")
     }
 
 }

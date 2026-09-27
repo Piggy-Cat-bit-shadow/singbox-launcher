@@ -196,6 +196,10 @@ type SettingsState struct {
 	DataDir string `json:"data_dir"`
 	// ConfigPath is the resolved config.json path.
 	ConfigPath string `json:"config_path"`
+	// LogsDir is the resolved log directory. The frontend opens files and
+	// folders itself; the backend only reports where they are, so the path
+	// never has to be duplicated in Swift.
+	LogsDir string `json:"logs_dir"`
 }
 
 // Core state values used by CoreState.State.
