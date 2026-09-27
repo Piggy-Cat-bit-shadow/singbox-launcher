@@ -3,9 +3,6 @@
   "Local": {
     "value": "Локально"
   },
-  "🌐 Remote": {
-    "value": "🌐 Удалённые"
-  },
   "🖥️ Servers": {
     "value": "🖥️ Серверы"
   },
@@ -214,15 +211,6 @@
   },
   "No config built for %s yet. Press Configure on its row, set it up and press Save — that writes the config this button sends.": {
     "value": "Для %s ещё не собран конфиг. Нажмите «Настроить» в её строке, настройте и нажмите Save — это запишет тот файл, который отправляет эта кнопка."
-  },
-  "🔍 Diagnostics": {
-    "value": "🔍 Диагностика"
-  },
-  "❓ Help": {
-    "value": "❓ Справка"
-  },
-  "⚙️ Settings": {
-    "value": "⚙️ Настройки"
   },
   "Settings": {
     "value": "Настройки"
@@ -4810,5 +4798,41 @@
   },
   "The VPN stops when the launcher exits.": {
     "value": "VPN останавливается вместе с выходом из лаунчера."
+  },
+  "Connected": {
+    "value": "Подключено"
+  },
+  "Disconnected": {
+    "value": "Отключено"
+  },
+  "Diagnostics": {
+    "value": "Диагностика"
+  },
+  "Help": {
+    "value": "Справка"
+  },
+  "Machines": {
+    "value": "Машины"
+  },
+  "Proxies": {
+    "value": "Прокси"
+  },
+  "Remote": {
+    "value": "Удалённые"
+  },
+  "Your local sing-box instance": {
+    "value": "Ваш локальный экземпляр sing-box"
+  },
+  "Manage the sing-box cores on your other machines": {
+    "value": "Управление ядрами sing-box на других ваших машинах"
+  },
+  "Launcher preferences, subscriptions and data": {
+    "value": "Настройки лаунчера, подписки и данные"
+  },
+  "Logs, maintenance and network checks": {
+    "value": "Логи, обслуживание и проверки сети"
+  },
+  "About this build and where to find us": {
+    "value": "О сборке и где нас найти"
   }
 }

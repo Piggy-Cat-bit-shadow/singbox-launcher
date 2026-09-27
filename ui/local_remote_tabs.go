@@ -6,6 +6,8 @@ import (
 
 	"singbox-launcher/core"
 	"singbox-launcher/core/services"
+	"singbox-launcher/internal/locale"
+	"singbox-launcher/ui/components"
 	"singbox-launcher/ui/design"
 )
 
@@ -120,7 +122,19 @@ func CreateLocalTab(ac *core.AppController, notice fyne.CanvasObject) (fyne.Canv
 		left,
 		withColumnWidth(CreateCoreDashboardTab(ac), rightColumnWidth),
 	)
-	return withMinimalLeftColumn(split), panel
+	// SPEC 144: страница получает шапку с заголовком и подзаголовком. Раньше
+	// заголовок несла вкладка таб-стрипа, и внутри страницы его не было —
+	// при переходе на сайдбар без шапки страница выглядела бы безымянной.
+	return pageWithHeader(locale.T("Local"), locale.T("Your local sing-box instance"), withMinimalLeftColumn(split)), panel
+}
+
+// pageWithHeader оборачивает содержимое страницы в шапку (SPEC 144).
+//
+// Шапка фиксированной высоты, тело занимает остаток. Так у всех страниц
+// одинаковый вертикальный ритм и заголовок не «плавает» при смене раздела.
+func pageWithHeader(title, subtitle string, body fyne.CanvasObject) fyne.CanvasObject {
+	header := design.NewPageHeader(title, subtitle, nil)
+	return container.NewBorder(header.Object(), nil, nil, nil, body)
 }
 
 // withColumnWidth фиксирует минимальную ширину колонки, не трогая высоту:
@@ -143,7 +157,9 @@ func CreateRemoteTab(ac *core.AppController) (fyne.CanvasObject, *ProxyListPanel
 	// когда слоты принадлежат другой вкладке, нельзя.
 	machines := CreateMachineListPanel(ac, proxyPanel)
 	split := container.NewHSplit(proxyPanel.Content, withColumnWidth(machines, rightColumnWidth))
-	return withMinimalLeftColumn(split), proxyPanel
+	return pageWithHeader(locale.T("Remote"),
+		locale.T("Manage the sing-box cores on your other machines"),
+		withMinimalLeftColumn(split)), proxyPanel
 }
 
 // MinWindowSize — нижняя граница размера главного окна (SPEC 144).
@@ -197,4 +213,58 @@ func (b *minSizeBox) MinSize(objects []fyne.CanvasObject) fyne.Size {
 // границу MinWindowSize.
 func WithMinWindowSize(content fyne.CanvasObject) fyne.CanvasObject {
 	return container.New(&minSizeBox{min: MinWindowSize}, content)
+}
+
+// pageWithHeaderScroll — страница с шапкой, тело которой прокручивается.
+//
+// Шапка вынесена ИЗ области прокрутки: заголовок страницы должен оставаться
+// на месте, пока пользователь листает длинные настройки. Иначе при возврате
+// на страницу он оказывается в середине содержимого и не понимает, где он.
+//
+// Внутренний gutter (components.WrapInScrollWithGutter) сохранён: он
+// резервирует полосу под scrollbar, чтобы та не рисовалась поверх текста.
+func pageWithHeaderScroll(title, subtitle string, body fyne.CanvasObject) fyne.CanvasObject {
+	header := design.NewPageHeader(title, subtitle, nil)
+	scrolled := components.WrapInScrollWithGutter(
+		container.New(&contentPadding{}, body))
+	return container.NewBorder(header.Object(), nil, nil, nil, scrolled)
+}
+
+// contentPadding — поля тела страницы (SPEC 144).
+//
+// Отдельный layout вместо container.NewPadded: тема даёт свои отступы, и
+// вложенные Padded складывались бы, давая 40+ вместо задуманных 24.
+// Здесь поля заданы ровно один раз и из дизайн-токенов.
+type contentPadding struct{}
+
+// Layout размещает содержимое с полями страницы.
+func (contentPadding) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	w := size.Width - 2*design.ContentPaddingH
+	h := size.Height - 2*design.ContentPaddingV
+	if w < 0 {
+		w = 0
+	}
+	if h < 0 {
+		h = 0
+	}
+	for _, o := range objects {
+		o.Move(fyne.NewPos(design.ContentPaddingH, design.ContentPaddingV))
+		o.Resize(fyne.NewSize(w, h))
+	}
+}
+
+// MinSize возвращает минимум содержимого плюс поля.
+func (contentPadding) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var min fyne.Size
+	for _, o := range objects {
+		if m := o.MinSize(); m.Width > min.Width || m.Height > min.Height {
+			if m.Width > min.Width {
+				min.Width = m.Width
+			}
+			if m.Height > min.Height {
+				min.Height = m.Height
+			}
+		}
+	}
+	return fyne.NewSize(min.Width+2*design.ContentPaddingH, min.Height+2*design.ContentPaddingV)
 }

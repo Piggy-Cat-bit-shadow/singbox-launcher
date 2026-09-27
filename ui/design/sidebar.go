@@ -27,6 +27,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/fynewidget"
 	"singbox-launcher/ui/icons"
 )
@@ -257,8 +258,12 @@ func (s *Sidebar) MinSize() fyne.Size {
 }
 
 // sidebarIdentityLabel — название приложения в шапке колонки.
+//
+// Имя берётся из constants.AppDisplayName, а не пишется строкой: это имя
+// продукта (оно же в бандле и заголовке окна), и оно не локализуется —
+// поэтому через locale.T оно не идёт.
 func sidebarIdentityLabel() fyne.CanvasObject {
-	l := widget.NewLabel("JiejieBox")
+	l := widget.NewLabel(constants.AppDisplayName)
 	l.TextStyle = fyne.TextStyle{Bold: true}
 	return l
 }

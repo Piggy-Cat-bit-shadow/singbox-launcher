@@ -101,9 +101,16 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// ненадобностью.
 	settingsContent, refreshSettings := BuildSettingsContent(controller)
 	app.refreshSettings = refreshSettings
-	settingsPage := components.WrapInScrollWithGutter(container.NewPadded(settingsContent))
-	diagnosticsPage := components.WrapInScrollWithGutter(container.NewPadded(CreateDiagnosticsTab(controller)))
-	helpPage := components.WrapInScrollWithGutter(container.NewPadded(CreateHelpTab(controller)))
+	// Каждая страница получает шапку с заголовком и подзаголовком
+	// (SPEC 144): раньше заголовок нёс таб-стрип, и внутри страницы его не
+	// было. Тело страницы прокручивается, шапка остаётся на месте — иначе
+	// заголовок уезжал бы вместе с длинным содержимым.
+	settingsPage := pageWithHeaderScroll(locale.T("Settings"),
+		locale.T("Launcher preferences, subscriptions and data"), settingsContent)
+	diagnosticsPage := pageWithHeaderScroll(locale.T("Diagnostics"),
+		locale.T("Logs, maintenance and network checks"), CreateDiagnosticsTab(controller))
+	helpPage := pageWithHeaderScroll(locale.T("Help"),
+		locale.T("About this build and where to find us"), CreateHelpTab(controller))
 
 	app.pages = map[SectionID]fyne.CanvasObject{
 		SectionLocal:       localContent,
