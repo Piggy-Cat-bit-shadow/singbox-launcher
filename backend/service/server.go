@@ -76,7 +76,11 @@ func (s *Server) Serve(in io.Reader) {
 			continue
 		}
 		resp := s.handle(req)
-		s.write(resp)
+		// A zero ID means the handler already wrote its own response (the
+		// shutdown ACK). Every other path sets the ID from the request.
+		if resp.ID != "" {
+			s.write(resp)
+		}
 	}
 	if err := sc.Err(); err != nil {
 		debuglog.WarnLog("backend ipc: read failed: %v", err)
@@ -86,6 +90,12 @@ func (s *Server) Serve(in io.Reader) {
 // handle dispatches one request. It never panics out: a failure in a handler
 // is converted into a structured error so the frontend shows a message
 // instead of losing the backend.
+// handle resolves one request.
+//
+// It returns the response for Serve to write, except for the shutdown ACK:
+// that one must be flushed before a teardown which may exit the process, so the
+// handler writes it itself and returns a zero-ID response as the signal that
+// there is nothing left to send.
 func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -329,9 +339,20 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		return protocol.Response{ID: req.ID, Result: status}
 
 	case protocol.MethodShutdown:
-		// Acknowledge before tearing down so the client is not left waiting.
+		// The ACK must reach the client BEFORE teardown can exit the process.
+		//
+		// Teardown ends in GracefulExit, which terminates the process. Starting
+		// it in a goroutine while the read loop still has to write the response
+		// leaves those two racing: if the exit wins, the ACK is never flushed
+		// and the client waits for a reply that can no longer arrive.
+		//
+		// Writing here, on the read-loop goroutine, and only then releasing
+		// teardown, makes the order explicit rather than dependent on
+		// scheduling.
+		s.write(protocol.Response{ID: req.ID, Result: map[string]any{"shutting_down": true}})
 		go s.backend.Shutdown()
-		return protocol.Response{ID: req.ID, Result: map[string]any{"shutting_down": true}}
+		// Zero ID: Serve must not write this one again.
+		return protocol.Response{}
 	}
 
 	return protocol.Response{ID: req.ID, Error: &protocol.Error{

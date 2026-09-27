@@ -542,3 +542,40 @@ func TestShutdownOnZeroValueBackend(t *testing.T) {
 		t.Error("IsShuttingDown still false after Shutdown")
 	}
 }
+
+// TestShutdownAckIsWrittenBeforeTeardown — the ACK must be on the wire before
+// teardown begins, because teardown ends in a process exit.
+//
+// The old shape returned the response for Serve to write while a goroutine
+// started Shutdown: if the exit won, the ACK was never flushed and the client
+// waited for a reply that could no longer arrive. The handler therefore writes
+// it itself and returns a zero-ID response as "nothing left to send".
+func TestShutdownAckIsWrittenBeforeTeardown(t *testing.T) {
+	b := backendWithConfig(t)
+	var buf bytes.Buffer
+	srv := NewServer(b, &buf)
+
+	resp := srv.handle(protocol.Request{ID: "9", Method: protocol.MethodShutdown})
+
+	// The handler must not hand a second copy back to Serve.
+	if resp.ID != "" {
+		t.Errorf("shutdown returned a response with id %q; Serve would write it twice", resp.ID)
+	}
+
+	// And the ACK must already be in the stream.
+	line := strings.TrimSpace(buf.String())
+	if line == "" {
+		t.Fatal("no ACK was written before teardown")
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("ACK is not JSON: %v (%q)", err, line)
+	}
+	if m["id"] != "9" {
+		t.Errorf("ACK id = %v, want 9", m["id"])
+	}
+	result, _ := m["result"].(map[string]any)
+	if result["shutting_down"] != true {
+		t.Errorf("ACK result = %v, want shutting_down:true", m["result"])
+	}
+}
