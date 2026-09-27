@@ -112,3 +112,7 @@ SPECS/118-F-N-STATE_V7/etalon/v6mig/outbounds.actual.json
 
 # Одноразовые локальные пробы (например, AEWP UID-проба) — не часть репозитория.
 .probe/
+
+# Артефакты упаковки macOS-клиента (SPEC 144) — build outputs, не исходники.
+JiejieBox.app/
+dist/

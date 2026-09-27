@@ -719,7 +719,9 @@ func main() {
 
 	// Повышенный экземпляр виден по заголовку (SPEC 139 §3): TUN и очистки
 	// в нём работают, а автозапуск и Portable недоступны.
-	windowTitle := "Singbox Launcher"
+	// Имя окна — собственное (SPEC 144): рядом может стоять оригинальный
+	// Singbox Launcher, и окна не должны выглядеть одинаково.
+	windowTitle := constants.AppDisplayName
 	if runtime.GOOS == "windows" && platform.IsElevated() {
 		windowTitle += " (" + locale.T("Administrator") + ")"
 	}

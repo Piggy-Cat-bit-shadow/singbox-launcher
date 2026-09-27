@@ -86,6 +86,12 @@ const (
 	PortableMarkerFileName = "portable.txt"
 	// DataDirAppName — имя каталога приложения в платформенных корнях
 	// ($XDG_DATA_HOME, ~/Library/Application Support, %LOCALAPPDATA%).
+	//
+	// Остаётся именем апстрима НАМЕРЕННО: этот клиент — та же программа для
+	// того же пользователя, и его данные (config.json, bin/sing-box с
+	// кастомным ядром, bin/wizard_states, state.json) уже лежат здесь.
+	// Переименование каталога означало бы «потерять» настройки и ядро при
+	// первом запуске, а миграция — лишний риск для живого прокси.
 	DataDirAppName = "singbox-launcher"
 	// EnvDataDir и EnvLogDir переопределяют DataDir и LogDir независимо
 	// друг от друга (Flatpak-обёртки, пакеты, CI, отладка).
@@ -98,6 +104,22 @@ const (
 	// MigratedFromMarkerFileName — маркер в DataDir после миграции данных из
 	// старой раскладки (SPEC 135 §3.4).
 	MigratedFromMarkerFileName = ".migrated_from"
+)
+
+// Собственная личность сборки (SPEC 144): отдельные имя, домен и Bundle ID,
+// чтобы этот клиент стоял рядом с оригиналом и не делил с ним ни файл
+// приложения, ни записи LaunchServices, ни настройки.
+//
+// Данные при этом ОБЩИЕ (DataDirAppName) — см. комментарий выше.
+const (
+	// AppDisplayName — имя приложения для Finder, Dock и .app.
+	AppDisplayName = "JiejieBox"
+	// AppBundleID — CFBundleIdentifier и домен ad-hoc подписи.
+	AppBundleID = "com.piggycat.jiejiebox"
+	// AppBundleName — имя каталога .app и исполняемого файла внутри него.
+	AppBundleName = "JiejieBox"
+	// AppBinaryName — имя бинаря в Contents/MacOS.
+	AppBinaryName = "JiejieBox"
 )
 
 // Config targets (SPEC 097) — для какой машины лаунчер готовит config.json.
