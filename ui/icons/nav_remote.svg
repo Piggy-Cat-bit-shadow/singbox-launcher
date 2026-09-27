@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-  <path d="M4 4h7v6H4V4zm0 10h7v6H4v-6zm9-10h7v6h-7V4zm0 10h7v6h-7v-6z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.2" y="4.4" width="7.6" height="6" rx="1.6"/>
+  <rect x="13.2" y="4.4" width="7.6" height="6" rx="1.6"/>
+  <rect x="3.2" y="13.6" width="7.6" height="6" rx="1.6"/>
+  <rect x="13.2" y="13.6" width="7.6" height="6" rx="1.6"/>
 </svg>

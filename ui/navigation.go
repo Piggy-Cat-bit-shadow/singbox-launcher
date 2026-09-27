@@ -42,6 +42,52 @@ const (
 	SectionHelp SectionID = "help"
 )
 
+// RouteID — presentation-маршрут (SPEC 145).
+//
+// **Зачем отдельный тип.** Раздел (`SectionID`) — это бизнес-домен: он решает,
+// с каким ядром идёт разговор (Local/Remote), и смена домена влечёт
+// переключение scope, транспорта и владельца слотов UIService. Маршрут — это
+// только то, что видит пользователь в навигации.
+//
+// Разделение позволяет показывать Home / Proxies / Traffic как три разных
+// пункта, оставаясь внутри одного домена: переключение между ними НЕ
+// переисполняет побочные эффекты домена (иначе — лишние запросы, мигание
+// списка и повторный опрос узлов на ровном месте).
+type RouteID string
+
+const (
+	// RouteHome — дашборд локального ядра.
+	RouteHome RouteID = "home"
+	// RouteProxies — список узлов локального ядра.
+	RouteProxies RouteID = "proxies"
+	// RouteTraffic — профилировщик трафика.
+	RouteTraffic RouteID = "traffic"
+	// RouteRemote — удалённые машины.
+	RouteRemote RouteID = "remote"
+	// RouteDiagnostics — логи и обслуживание.
+	RouteDiagnostics RouteID = "diagnostics"
+	// RouteSettings — настройки лаунчера.
+	RouteSettings RouteID = "settings"
+	// RouteAbout — о программе.
+	RouteAbout RouteID = "about"
+)
+
+// routeDomain возвращает бизнес-домен маршрута.
+//
+// Пустая строка означает «домен не меняется»: Diagnostics, Settings и About
+// не должны трогать ни scope, ни транспорт — они лишь показывают свою
+// страницу поверх текущего состояния.
+func routeDomain(r RouteID) SectionID {
+	switch r {
+	case RouteHome, RouteProxies, RouteTraffic:
+		return SectionLocal
+	case RouteRemote:
+		return SectionRemote
+	default:
+		return ""
+	}
+}
+
 // Подразделы внутри страниц.
 //
 // Каждый из них соответствует реальному блоку разметки соответствующей

@@ -48,14 +48,15 @@ type App struct {
 	// таб-стрип как основную навигацию, но исполняет ТУ ЖЕ логику выбора
 	// через selectSection.
 	sidebar *design.Sidebar
-	// pages — содержимое страниц по идентификатору раздела.
-	pages map[SectionID]fyne.CanvasObject
+	// pages — содержимое страниц по presentation-маршруту.
+	pages map[RouteID]fyne.CanvasObject
 	// contentHost — контейнер, в который подставляется активная страница.
 	// Один объект на все страницы: смена раздела не пересобирает дерево и не
 	// сбрасывает состояние виджетов внутри страниц.
 	contentHost *fyne.Container
-	// currentSection — активный раздел. Единственный источник истины для
-	// подсветки навигации; состояние ядра/машин здесь не хранится.
+	// currentSection — активный БИЗНЕС-домен (не маршрут). Нужен, чтобы
+	// переключение внутри домена не переисполняло побочные эффекты выбора
+	// раздела, а смена домена — исполняла их ровно один раз.
 	currentSection SectionID
 	// content — корень окна: сайдбар + contentHost (SPEC 144). Именно его
 	// возвращает GetContent; AppTabs в дерево не попадает.
@@ -96,6 +97,7 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// скрытым — до первого выключения места он не занимает.
 	localContent, localPanel := CreateLocalTab(controller, app.coreRejectedBar())
 	remoteContent, remotePanel := CreateRemoteTab(controller)
+	_ = remoteContent
 	app.localPanel, app.remotePanel = localPanel, remotePanel
 	// SPEC 100 §3.8: Debug API получает Connect/Disconnect вкладки Remote.
 	// Строго после создания вкладок — подписчики OnOverrideChanged уже стоят.
@@ -111,23 +113,30 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// ненадобностью.
 	settingsContent, refreshSettings := BuildSettingsContent(controller)
 	app.refreshSettings = refreshSettings
-	// Каждая страница получает шапку с заголовком и подзаголовком
-	// (SPEC 144): раньше заголовок нёс таб-стрип, и внутри страницы его не
-	// было. Тело страницы прокручивается, шапка остаётся на месте — иначе
-	// заголовок уезжал бы вместе с длинным содержимым.
+	// Страницы собраны заранее и живут в a.pages: переключение маршрута лишь
+	// подставляет нужную, не пересобирая дерево и не теряя состояние
+	// виджетов (позиция скролла, введённый текст).
+	helpPage := buildAboutPage(controller)
 	settingsPage := pageWithHeaderScroll(locale.T("Settings"),
 		locale.T("Launcher preferences, subscriptions and data"), settingsContent)
 	diagnosticsPage := pageWithHeaderScroll(locale.T("Diagnostics"),
 		locale.T("Logs, maintenance and network checks"), CreateDiagnosticsTab(controller))
-	helpPage := pageWithHeaderScroll(locale.T("Help"),
-		locale.T("About this build and where to find us"), CreateHelpTab(controller))
 
-	app.pages = map[SectionID]fyne.CanvasObject{
-		SectionLocal:       localContent,
-		SectionRemote:      remoteContent,
-		SectionDiagnostics: diagnosticsPage,
-		SectionSettings:    settingsPage,
-		SectionHelp:        helpPage,
+	// Home, Proxies и Traffic — новые presentation-страницы (SPEC 145).
+	// Proxies переиспользует ТОТ ЖЕ объект панели списка, что и раньше:
+	// его колбэки, виртуализация и состояние остаются нетронутыми.
+	homePage := NewHomePage(controller, controller)
+	proxiesPage := buildProxiesPage(localPanel)
+	trafficPage := buildTrafficPage(controller)
+
+	app.pages = map[RouteID]fyne.CanvasObject{
+		RouteHome:        homePage.CanvasObject(),
+		RouteProxies:     proxiesPage,
+		RouteTraffic:     trafficPage,
+		RouteRemote:      remoteContent,
+		RouteDiagnostics: diagnosticsPage,
+		RouteSettings:    settingsPage,
+		RouteAbout:       helpPage,
 	}
 
 	// Совместимость: часть кода и тестов обращается к AppTabs напрямую
@@ -144,10 +153,18 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 		container.NewTabItem(locale.T("Help"), helpPage),
 	)
 
+	// Дизайн-система не импортирует набор иконок напрямую (иконки — ресурс
+	// приложения). Связываем их один раз здесь: шеврон карточек и строк.
+	design.SetChevronResource(icons.ChevronRight)
+
+	// Home получает тот же путь навигации, что и сайдбар: клик по сводке
+	// ведёт на страницу через showRoute, а не через отдельную логику.
+	homePage.SetNavigate(app.navigateTo)
+
 	// Навигация: сайдбар — основная, и он исполняет ту же логику, что
 	// раньше исполнял OnSelected (selectSection в ui/navigation.go).
-	app.sidebar = design.NewSidebar(app.navigationEntries(), func(id design.SidebarItemID) {
-		app.navigateTo(SectionID(id))
+	app.sidebar = design.NewSidebar(app.navigationEntries(), func(id design.NavID) {
+		app.navigateTo(RouteID(id))
 	})
 	// AppTabs оставлен как программный путь и как страховка совместимости:
 	// его обработчик вызывает ровно тот же selectSection.
@@ -205,7 +222,13 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// логика. Subscribe идемпотентен (одна handler-регистрация на NewApp).
 	if controller.EventBus != nil {
 		controller.EventBus.Subscribe(events.VpnStateChanged, func(_ events.Event) {
-			fyne.Do(refreshCoreStatus)
+			fyne.Do(func() {
+				refreshCoreStatus()
+				// Home показывает состояние ядра: обновляем его вместе со
+				// статусом сайдбара, из того же события. Отдельного
+				// источника истины у страницы нет.
+				homePage.Refresh()
+			})
 		})
 
 		// Направление, добавленное в визарде, приезжает в config.json
@@ -262,10 +285,11 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// перезагрузка страницы.
 	app.contentHost = container.NewStack()
 	app.content = container.NewBorder(nil, nil, app.sidebar, nil, app.contentHost)
-	// Первая страница — Local. Побочные эффекты её выбора исполняет
-	// showSection ниже (ровно те же, что раньше исполнял OnSelected).
+	// Первая страница — Home (маршрут локального домена). Побочные эффекты
+	// выбора домена исполняет showRoute: ровно те же, что раньше исполнял
+	// OnSelected, и ровно один раз.
 	app.currentSection = ""
-	app.showSection(SectionLocal)
+	app.showRoute(RouteHome)
 
 	// Local открыта на старте, но её слоты UIService перетёр конструктор
 	// Remote (панели строятся обе, а слот один). Возвращаем владение той
@@ -359,89 +383,53 @@ func (a *App) registerShortcuts() {
 	})
 }
 
-// navigationEntries — структура навигации (SPEC 144).
+// navigationEntries — плоская структура навигации (SPEC 145).
 //
-// Подпункты выведены из РЕАЛЬНЫХ разделов страниц, а не придуманы ради
-// наполнения сайдбара: у каждой страницы ниже есть соответствующее
-// содержимое. Пункты верхнего уровня ведут на страницу целиком (её первый
-// подраздел), подпункты — на конкретную секцию внутри неё.
-func (a *App) navigationEntries() []design.SidebarEntry {
-	return []design.SidebarEntry{
-		{
-			ID:      design.SidebarItemID(SectionLocal),
-			Title:   locale.T("Local"),
-			Icon:    icons.NavLocal,
-			Section: locale.T("Core"),
-			Children: []design.SidebarEntry{
-				{ID: design.SidebarItemID(sectionLocalOverview), Title: locale.T("Overview")},
-				{ID: design.SidebarItemID(sectionLocalProxies), Title: locale.T("Proxies")},
-				{ID: design.SidebarItemID(sectionLocalTraffic), Title: locale.T("Traffic")},
-			},
-		},
-		{
-			ID:    design.SidebarItemID(SectionRemote),
-			Title: locale.T("Remote"),
-			Icon:  icons.NavRemote,
-			Children: []design.SidebarEntry{
-				{ID: design.SidebarItemID(sectionRemoteMachines), Title: locale.T("Machines")},
-				{ID: design.SidebarItemID(sectionRemoteProxies), Title: locale.T("Proxies")},
-			},
-		},
-		{
-			ID:    design.SidebarItemID(SectionDiagnostics),
-			Title: locale.T("Diagnostics"),
-			Icon:  icons.NavDiagnostics,
-		},
-		{
-			ID:    design.SidebarItemID(SectionSettings),
-			Title: locale.T("Settings"),
-			Icon:  icons.NavSettings,
-			Children: []design.SidebarEntry{
-				{ID: design.SidebarItemID(sectionSettingsConnection), Title: locale.T("Connection")},
-				{ID: design.SidebarItemID(sectionSettingsSubscriptions), Title: locale.T("Subscriptions")},
-				{ID: design.SidebarItemID(sectionSettingsLanguage), Title: locale.T("Language")},
-				{ID: design.SidebarItemID(sectionSettingsStorage), Title: locale.T("Storage")},
-			},
-		},
-		{
-			ID:    design.SidebarItemID(SectionHelp),
-			Title: locale.T("Help"),
-			Icon:  icons.NavHelp,
-		},
+// Раньше здесь было дерево: два родителя (Local/Remote) с постоянными
+// подпунктами. Визуально это читалось как админ-панель. Теперь один уровень
+// пунктов, сгруппированных заголовками, а детализация уехала в page-local
+// navigation (segmented control на самих страницах).
+//
+// Каждый пункт ведёт на реальный экран: Home/Proxies/Traffic — три
+// presentation-маршрута внутри локального домена.
+func (a *App) navigationEntries() []design.NavEntry {
+	return []design.NavEntry{
+		{ID: design.NavID(RouteHome), Title: locale.T("Home"), Icon: icons.NavHome, Section: locale.T("Home")},
+		{ID: design.NavID(RouteProxies), Title: locale.T("Proxies"), Icon: icons.NavLocal, Section: locale.T("Network")},
+		{ID: design.NavID(RouteRemote), Title: locale.T("Remote"), Icon: icons.NavRemote},
+		{ID: design.NavID(RouteTraffic), Title: locale.T("Traffic"), Icon: icons.NavTraffic},
+		{ID: design.NavID(RouteDiagnostics), Title: locale.T("Diagnostics"), Icon: icons.NavDiagnostics, Section: locale.T("Tools")},
+		{ID: design.NavID(RouteSettings), Title: locale.T("Settings"), Icon: icons.NavSettings},
+		{ID: design.NavID(RouteAbout), Title: locale.T("About"), Icon: icons.NavHelp, Pinned: true},
 	}
 }
 
 // navigateTo — переход по навигации.
 //
-// Подраздел живёт на той же странице, что и его родитель: отдельной
-// страницы у «Proxies» нет, есть блок внутри Local. Поэтому подраздел
-// открывает страницу-владельца, а сам остаётся подсвеченным в колонке.
-func (a *App) navigateTo(id SectionID) {
-	a.showSection(id)
+// Домен маршрута решает, нужно ли переисполнить побочные эффекты выбора
+// раздела: Home → Proxies → Traffic остаются в одном домене и не трогают
+// scope/транспорт повторно.
+func (a *App) navigateTo(r RouteID) {
+	a.showRoute(r)
 }
 
-// showSection переключает видимую страницу и исполняет побочные эффекты
-// выбора. Единственный путь смены раздела для сайдбара.
-func (a *App) showSection(id SectionID) {
-	pageID := sectionPage(id)
-	page, ok := a.pages[pageID]
+// showRoute переключает видимую страницу.
+func (a *App) showRoute(r RouteID) {
+	page, ok := a.pages[r]
 	if !ok {
 		return
 	}
-	// Побочные эффекты исполняются по СТРАНИЦЕ: переход Local → Local.Proxies
-	// не должен заново снимать транспорт и перезагружать список — это стоило
-	// бы лишнего запроса и мигания списка.
-	firstVisit := a.currentSection != pageID
-	a.currentSection = pageID
-	if firstVisit {
-		a.selectSection(pageID)
+	domain := routeDomain(r)
+	if domain != "" && a.currentSection != domain {
+		a.currentSection = domain
+		a.selectSection(domain)
 	}
 	if a.contentHost != nil {
 		a.contentHost.Objects = []fyne.CanvasObject{page}
 		a.contentHost.Refresh()
 	}
 	if a.sidebar != nil {
-		a.sidebar.SetSelected(design.SidebarItemID(id))
+		a.sidebar.SetSelected(design.NavID(r))
 	}
 }
 

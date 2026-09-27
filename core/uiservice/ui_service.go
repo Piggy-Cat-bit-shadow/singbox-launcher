@@ -11,10 +11,8 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
 )
 
@@ -173,15 +171,18 @@ func NewUIService(appIconData, greyIconData, greenIconData, redIconData []byte,
 	ui.Application = app.NewWithID("com.singbox.launcher")
 	ui.Application.SetIcon(ui.AppIconData)
 
-	// Set theme based on constants
-	switch constants.AppTheme {
-	case "dark":
-		ui.Application.Settings().SetTheme(theme.DarkTheme())
-	case "light":
-		ui.Application.Settings().SetTheme(theme.LightTheme())
-	default:
-		ui.Application.Settings().SetTheme(theme.DefaultTheme())
-	}
+	// Set theme based on constants (variant only).
+	//
+	// SPEC 145 note: the palette now comes from the fork's own theme, which
+	// is installed from main() (ui/design.Theme). It cannot be installed
+	// here: this package is L2 and must not import ui/ (L7) — core never
+	// depends on ui, and that direction is what keeps the business layer
+	// buildable and testable without Fyne. The old
+	// theme.DarkTheme()/LightTheme()/DefaultTheme() calls were choosing a
+	// *variant*; with AppTheme == "default" that came down to following the
+	// system, which the application theme does as well. Leaving a stock
+	// SetTheme here would instead overwrite the application theme on every
+	// startup, so the call is removed rather than left as a no-op.
 
 	// Initialize callbacks with default no-op handlers
 	ui.RefreshAPIFunc = func() { debuglog.DebugLog("RefreshAPIFunc handler is not set yet.") }

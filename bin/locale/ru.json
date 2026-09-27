@@ -4781,9 +4781,6 @@
   "Help": {
     "value": "Справка"
   },
-  "Machines": {
-    "value": "Машины"
-  },
   "Proxies": {
     "value": "Прокси"
   },
@@ -4849,5 +4846,59 @@
   },
   "The daemon is not answering. Check that the service is running.": {
     "value": "Демон не отвечает. Проверьте, что служба запущена."
+  },
+  "Home": {
+    "value": "Главная"
+  },
+  "Tools": {
+    "value": "Инструменты"
+  },
+  "Backend": {
+    "value": "Бэкенд"
+  },
+  "Classic process": {
+    "value": "Классический процесс"
+  },
+  "System daemon": {
+    "value": "Системная служба"
+  },
+  "Configuration": {
+    "value": "Конфигурация"
+  },
+  "Local sing-box core": {
+    "value": "Локальное ядро sing-box"
+  },
+  "Manage other machines": {
+    "value": "Управление другими машинами"
+  },
+  "Nodes of the local core": {
+    "value": "Узлы локального ядра"
+  },
+  "Nodes of your local sing-box core": {
+    "value": "Узлы вашего локального ядра sing-box"
+  },
+  "Not installed": {
+    "value": "Не установлено"
+  },
+  "Unknown": {
+    "value": "Неизвестно"
+  },
+  "Profiler": {
+    "value": "Профилировщик"
+  },
+  "Recording": {
+    "value": "Запись"
+  },
+  "Idle": {
+    "value": "Простой"
+  },
+  "Open Traffic Profiler": {
+    "value": "Открыть профилировщик трафика"
+  },
+  "Per-connection breakdown, sessions and history.": {
+    "value": "Разбивка по соединениям, сессии и история."
+  },
+  "Live traffic of the local core": {
+    "value": "Трафик локального ядра в реальном времени"
   }
 }

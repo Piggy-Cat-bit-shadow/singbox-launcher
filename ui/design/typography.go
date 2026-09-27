@@ -26,17 +26,17 @@ import (
 
 // PageTitle — заголовок страницы в шапке ("Local", "Settings").
 func PageTitle(text string) *canvas.Text {
-	t := canvas.NewText(text, theme.ForegroundColor())
+	t := canvas.NewText(text, TextPrimary())
 	t.TextStyle = fyne.TextStyle{Bold: true}
-	t.TextSize = theme.TextSize() * 1.5
+	t.TextSize = theme.TextSize() * 1.35
 	t.Alignment = fyne.TextAlignLeading
 	return t
 }
 
 // PageSubtitle — пояснение под заголовком страницы.
 func PageSubtitle(text string) *canvas.Text {
-	t := canvas.NewText(text, theme.Color(theme.ColorNameForeground))
-	t.TextSize = theme.TextSize() * 0.92
+	t := canvas.NewText(text, TextSecondary())
+	t.TextSize = theme.TextSize() * 0.95
 	t.Alignment = fyne.TextAlignLeading
 	// Подзаголовок приглушён относительно основного текста: он поясняет
 	// заголовок, а не спорит с ним за внимание.
@@ -83,11 +83,10 @@ func CaptionWrap(text string) *widget.Label {
 	return l
 }
 
-// mutedForeground — приглушённый цвет текста текущей темы.
+// mutedForeground — приглушённый цвет текста.
 //
-// В Fyne нет отдельного semantic-цвета «вторичный текст»: есть foreground и
-// disabled. Смешиваем foreground с фоном — так приглушение работает и в
-// светлой, и в тёмной теме, в отличие от жёстко заданной серой константы.
+// Пришёл на смену смешению foreground/background из SPEC 144: палитра теперь
+// задаёт вторичный текст явно, и он одинаково читается в обеих темах.
 func mutedForeground() color.Color {
-	return blend(theme.ForegroundColor(), theme.Color(theme.ColorNameBackground), 0.62)
+	return TextSecondary()
 }

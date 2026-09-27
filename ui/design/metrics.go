@@ -22,11 +22,12 @@ package design
 
 import "fyne.io/fyne/v2"
 
-// Шкала отступов — четвёртый ритм (4/8/12/16/20/24).
+// Шкала отступов — четвёртый ритм.
 //
-// Ровно шесть ступеней: этого хватает всем экранам лаунчера, а короткий
-// список не даёт повода изобретать «13» или «19» на месте. Если значение не
-// подходит — скорее всего неверно выбран уровень, а не шкала.
+// Ступеней девять, а не шесть: современная десктопная вёрстка отличается от
+// плотной админки именно количеством «воздуха», и для внешних полей страницы
+// нужны значения за пределами 24. Короткий список не даёт повода изобретать
+// «13» или «19» на месте: если значение не подходит — неверно выбран уровень.
 const (
 	SpaceXS  float32 = 4
 	SpaceS   float32 = 8
@@ -34,6 +35,9 @@ const (
 	SpaceL   float32 = 16
 	SpaceXL  float32 = 20
 	Space2XL float32 = 24
+	Space3XL float32 = 32
+	Space4XL float32 = 40
+	Space5XL float32 = 48
 )
 
 // Международные блоки: расстояние между смысловыми секциями страницы.
@@ -48,14 +52,19 @@ const (
 // больше радиус, но потолок невысок — иначе интерфейс читается как
 // мобильное приложение, растянутое на десктоп.
 const (
-	// RadiusControl — мелкие элементы: бейджи-плашки, чипы, мелкие кнопки.
-	RadiusControl float32 = 6
-	// RadiusButton — кнопки, поля ввода, подсветка выбранного пункта.
-	RadiusButton float32 = 8
+	// RadiusControl — мелкие элементы: бейджи-плашки, чипы.
+	RadiusControl float32 = 8
+	// RadiusButton — кнопки и поля ввода.
+	RadiusButton float32 = 10
+	// RadiusNav — подсветка выбранного пункта навигации. Заметно больше
+	// кнопки: это «pill», а не строка таблицы.
+	RadiusNav float32 = 12
 	// RadiusCard — карточки и секции — основной контейнер контента.
-	RadiusCard float32 = 12
-	// RadiusDialog — модальные окна и поповеры.
-	RadiusDialog float32 = 14
+	RadiusCard float32 = 16
+	// RadiusHero — крупная карточка Home: чуть мягче обычной.
+	RadiusHero float32 = 18
+	// RadiusDialog — модальные окна.
+	RadiusDialog float32 = 16
 )
 
 // Геометрия сайдбара.
@@ -66,49 +75,50 @@ const (
 // обрезает «Diagnostics» и длинные русские подписи.
 const (
 	// SidebarWidth — полная ширина навигационной колонки.
-	SidebarWidth float32 = 208
+	SidebarWidth float32 = 224
 	// SidebarPadding — внутренние отступы сайдбара по горизонтали.
-	SidebarPadding float32 = SpaceM
-	// SidebarIdentityHeight — высота блока с именем приложения сверху.
-	SidebarIdentityHeight float32 = 56
+	SidebarPadding float32 = 14
+	// SidebarIdentityHeight — высота блока с именем приложения.
+	SidebarIdentityHeight float32 = 68
 	// SidebarTopGap — отступ от верха окна до первого пункта.
 	SidebarTopGap float32 = SpaceS
-	// NavItemHeight — высота пункта первого уровня.
-	NavItemHeight float32 = 42
-	// NavSubItemHeight — высота подпункта: заметно ниже родителя, чтобы
-	// иерархия читалась без дополнительных украшений.
-	NavSubItemHeight float32 = 36
-	// NavIconSize — размер иконки первого уровня.
+	// NavItemHeight — высота пункта навигации.
+	NavItemHeight float32 = 46
+	// NavIconSize — размер иконки пункта.
 	NavIconSize float32 = 20
-	// NavSubIconSize — размер иконки подпункта.
-	NavSubIconSize float32 = 16
 	// NavIconGap — зазор между иконкой и текстом.
-	NavIconGap float32 = SpaceS + 1
-	// NavSubIndent — отступ подпункта от левого края сайдбара. Складывается
-	// с SidebarPadding, давая визуальный сдвиг вложенности.
-	NavSubIndent float32 = Space2XL + 2
-	// NavItemGap — вертикальный зазор между пунктами одного уровня.
+	NavIconGap float32 = SpaceM
+	// NavItemGap — вертикальный зазор между пунктами.
 	NavItemGap float32 = 2
-	// NavSelectedIndicator — ширина акцентной полосы у выбранного пункта.
-	NavSelectedIndicator float32 = 3
+	// NavSectionGap — зазор перед заголовком группы.
+	NavSectionGap float32 = SpaceL
+	// NavSectionLabelHeight — высота заголовка группы.
+	NavSectionLabelHeight float32 = 24
 )
 
 // Геометрия контентной области.
 const (
 	// ContentPaddingH — горизонтальные поля страницы.
-	ContentPaddingH float32 = Space2XL
+	ContentPaddingH float32 = Space4XL
 	// ContentPaddingV — вертикальные поля страницы.
-	ContentPaddingV float32 = SpaceXL
-	// PageHeaderHeight — высота шапки страницы (заголовок + подзаголовок).
-	PageHeaderHeight float32 = 64
+	ContentPaddingV float32 = Space3XL
+	// PageHeaderHeight — высота шапки страницы.
+	PageHeaderHeight float32 = 72
 	// CardPadding — внутренние отступы карточки.
-	CardPadding float32 = SpaceL
+	CardPadding float32 = SpaceXL
 	// CardGap — зазор между карточками в колонке.
-	CardGap float32 = SpaceM
-	// RowHeight — высота строки списка-настройки.
-	RowHeight float32 = 40
-	// ToolbarHeight — высота панели инструментов над списком.
+	CardGap float32 = SpaceL
+	// RowHeight — минимальная высота строки настроек.
+	RowHeight float32 = 48
+	// RowMinHeight — высота строки карточки с двумя строками текста.
+	RowMinHeight float32 = 52
+	// ToolbarHeight — высота панели инструментов.
 	ToolbarHeight float32 = 44
+	// MaxContentWidth — предел ширины контентной колонки. Карточка шириной
+	// 1400 выглядит сломанной; на широком окне контент центрируется.
+	MaxContentWidth float32 = 860
+	// SegmentedHeight — высота сегментированного переключателя.
+	SegmentedHeight float32 = 34
 )
 
 // Размеры окна.
@@ -120,15 +130,15 @@ const (
 // колонки контента.
 const (
 	// DefaultWindowWidth / Height — стартовый размер главного окна.
-	DefaultWindowWidth  float32 = 1180
-	DefaultWindowHeight float32 = 760
+	DefaultWindowWidth  float32 = 1220
+	DefaultWindowHeight float32 = 800
 
 	// MinWindowWidth / Height — нижняя граница. Ниже сайдбар + две колонки
 	// перестают помещаться, и вместо деградации получается каша из
 	// обрезанных подписей. 960 проверено на самой длинной локализации
 	// (русской) и на узких подписях кнопок.
-	MinWindowWidth  float32 = 960
-	MinWindowHeight float32 = 640
+	MinWindowWidth  float32 = 1000
+	MinWindowHeight float32 = 680
 )
 
 // Доли колонок на страницах Local и Remote.

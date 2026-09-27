@@ -16,7 +16,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 )
 
 // PageHeader — шапка страницы: заголовок, подзаголовок и место под статус
@@ -98,43 +97,6 @@ func NewSectionCard(title, description string, body fyne.CanvasObject) *SectionC
 
 // Object возвращает объект карточки.
 func (c *SectionCard) Object() fyne.CanvasObject { return c.object }
-
-// StatusBadge — компактный статусный бейдж: точка-индикатор и подпись.
-//
-// Один компонент на все статусы приложения (Connected, Offline, Running,
-// Updating, Error), чтобы одна и та же идея не выглядела по-разному на
-// разных экранах.
-type StatusBadge struct {
-	object fyne.CanvasObject
-	dot    *canvas.Circle
-	label  *widget.Label
-	level  StatusLevel
-}
-
-// NewStatusBadge создаёт бейдж с заданным уровнем.
-func NewStatusBadge(text string, level StatusLevel) *StatusBadge {
-	b := &StatusBadge{level: level}
-	b.dot = canvas.NewCircle(StatusColor(level))
-	dotBox := container.New(&fixedSizeBox{w: 8, h: 8}, b.dot)
-	b.label = widget.NewLabel(text)
-	b.label.TextStyle = fyne.TextStyle{Bold: true}
-	b.object = container.NewHBox(container.NewCenter(dotBox), b.label)
-	return b
-}
-
-// Object возвращает объект бейджа.
-func (b *StatusBadge) Object() fyne.CanvasObject { return b.object }
-
-// Set обновляет текст и уровень бейджа. Переиспользует существующие
-// объекты — новых при обновлении статуса не создаётся.
-func (b *StatusBadge) Set(text string, level StatusLevel) {
-	b.level = level
-	if b.label.Text != text {
-		b.label.SetText(text)
-	}
-	b.dot.FillColor = StatusColor(level)
-	b.dot.Refresh()
-}
 
 // fixedSizeBox — фиксированный бокс: точка-индикатор должна иметь стабильный
 // размер независимо от метрик шрифта, иначе бейдж «дышит» при смене темы.

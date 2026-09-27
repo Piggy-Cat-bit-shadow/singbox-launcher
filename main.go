@@ -27,6 +27,7 @@ import (
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
 	"singbox-launcher/ui"
+	"singbox-launcher/ui/design"
 )
 
 // Embedded resources (icons for the system tray)
@@ -742,6 +743,20 @@ func main() {
 	}
 	controller.UIService.MainWindow = controller.UIService.Application.NewWindow(windowTitle) // Create the main application window
 	controller.UIService.MainWindow.SetIcon(controller.UIService.AppIconData)
+
+	// Устанавливаем тему приложения (SPEC 145).
+	//
+	// Именно здесь, а не в core/uiservice: тема живёт в ui/design (L7), а
+	// core (L2) не должен зависеть от ui — это направление зависимостей и
+	// делает бизнес-слой собираемым без Fyne. main() — композиционный
+	// корень, поэтому установка темы принадлежит ему.
+	//
+	// Тема задаёт палитру (light/dark) и радиусы всех стандартных контролов
+	// Fyne. Пока она не установлена, интерфейс остаётся в дефолтных цветах
+	// Fyne независимо от вёрстки.
+	if controller.UIService != nil && controller.UIService.Application != nil {
+		controller.UIService.Application.Settings().SetTheme(design.NewTheme())
+	}
 
 	// Create App structure to manage UI
 	app := ui.NewApp(controller.UIService.MainWindow, controller)

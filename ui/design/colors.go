@@ -1,17 +1,14 @@
-// File colors.go — semantic-цвета поверх темы Fyne (SPEC 144).
+// File colors.go — доступ к семантическим цветам (SPEC 145).
 //
-// **Зачем слой поверх темы, а не своя палитра.** Тема Fyne уже даёт
-// light/dark и корректно реагирует на смену системной темы. Своя палитра
-// означала бы, что при переключении темы часть интерфейса остаётся в старых
-// цветах: ровно тот дефект, которого избегаем.
+// Раньше (SPEC 144) цвета выводились смешением цветов дефолтной темы Fyne.
+// Теперь источник — палитра (`palette.go`), а этот файл лишь даёт удобный
+// доступ к ролям для компонентов.
 //
-// Поэтому здесь нет ни одного «красивого» hex-значения. Есть только
-// семантические роли, каждая из которых выводится из цвета темы — либо
-// напрямую, либо смешением. Смена темы автоматически перекрашивает всё.
-//
-// **Обновление при смене темы.** Цвета вычисляются в момент вызова, поэтому
-// виджет, который их использует, обязан перечитать их в Refresh(). Для
-// canvas-объектов это делается присваиванием FillColor/Color в Refresh.
+// **Правило жизненного цикла.** Функции читают ТЕКУЩИЙ вариант темы при
+// каждом вызове и возвращают значение. Компонент обязан вызывать их в
+// `Refresh()`, а не кэшировать результат в поле: иначе при переключении
+// light/dark пользовательские canvas-объекты останутся в старом цвете, пока
+// стандартные виджеты уже перекрасятся.
 //
 // go1.20-совместимо (Win7-джоба): без slices/maps/min/max/clear.
 package design
@@ -20,84 +17,75 @@ import (
 	"image/color"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/theme"
 )
 
-// colorRGBA — рабочий тип для смешения; canvas-объекты принимают его как
-// color.Color. Отдельный алиас не нужен, но объявлен, чтобы подпись
-// blend() не выглядела как «магия» в местах вызова.
-type colorRGBA = color.NRGBA
-
-// variant — текущий вариант темы. Читается каждый раз заново: значение
-// меняется при переключении light/dark, кэшировать его нельзя.
-func variant() fyne.ThemeVariant {
-	return fyne.CurrentApp().Settings().ThemeVariant()
+// currentPalette — палитра активного варианта темы.
+func currentPalette() Palette {
+	return PaletteFor(currentVariant())
 }
 
-// Background — фон окна (самый нижний слой).
-func Background() color.Color {
-	return theme.Color(theme.ColorNameBackground)
+// currentVariant — вариант темы приложения. Читается каждый раз: значение
+// меняется при переключении системной темы, кэшировать нельзя. nil-приложение
+// (модульные тесты без Fyne) даёт светлую палитру вместо паники.
+func currentVariant() fyne.ThemeVariant {
+	app := fyne.CurrentApp()
+	if app == nil {
+		return themeVariantLight
+	}
+	return app.Settings().ThemeVariant()
 }
 
-// Surface — поверхность карточки. Чуть отличается от фона: на этом различии
-// и держится разделение слоёв, без теней.
-func Surface() color.Color {
-	return theme.Color(theme.ColorNameOverlayBackground)
-}
+// Background — фон окна.
+func Background() color.Color { return currentPalette().Background }
 
-// SurfaceHover — фон строки под курсором.
-func SurfaceHover() color.Color {
-	return blend(theme.Color(theme.ColorNameBackground), theme.Color(theme.ColorNamePrimary), 0.06)
-}
+// SidebarSurface — фон навигационной колонки (отличается от Background).
+func SidebarSurface() color.Color { return currentPalette().Sidebar }
 
-// SurfaceSelected — фон выбранного пункта навигации или строки списка.
-func SurfaceSelected() color.Color {
-	return blend(theme.Color(theme.ColorNameBackground), theme.Color(theme.ColorNamePrimary), 0.16)
-}
+// Surface — поверхность карточек.
+func Surface() color.Color { return currentPalette().Surface }
 
-// Border — обычная граница: тонкая, низкоконтрастная. Ровно настолько,
-// чтобы обозначить край поверхности, но не рисовать сетку.
-func Border() color.Color {
-	return blend(theme.Color(theme.ColorNameForeground), theme.Color(theme.ColorNameBackground), 0.82)
-}
+// SurfaceAlt — второстепенная поверхность: поля ввода, вложенные блоки.
+func SurfaceAlt() color.Color { return currentPalette().SurfaceAlt }
 
-// BorderStrong — граница для акцентных элементов и разделителей, которым
-// нужно быть заметнее обычных.
-func BorderStrong() color.Color {
-	return theme.Color(theme.ColorNameInputBorder)
-}
+// SurfaceHover — фон под курсором.
+func SurfaceHover() color.Color { return currentPalette().SurfaceHover }
+
+// SurfaceSelected — мягкая заливка выбранного пункта.
+func SurfaceSelected() color.Color { return currentPalette().SurfaceSelected }
+
+// Border — обычная граница.
+func Border() color.Color { return currentPalette().Border }
+
+// BorderStrong — граница полей ввода.
+func BorderStrong() color.Color { return currentPalette().BorderStrong }
 
 // TextPrimary — основной текст.
-func TextPrimary() color.Color {
-	return theme.ForegroundColor()
-}
+func TextPrimary() color.Color { return currentPalette().TextPrimary }
 
-// TextSecondary — вторичный текст: описания, метаданные.
-func TextSecondary() color.Color {
-	return mutedForeground()
-}
+// TextSecondary — описания и подписи.
+func TextSecondary() color.Color { return currentPalette().TextSecondary }
 
-// TextMuted — самый тихий текст: подписи под контролами, единицы измерения.
-func TextMuted() color.Color {
-	return blend(theme.ForegroundColor(), theme.Color(theme.ColorNameBackground), 0.45)
-}
+// TextMuted — самый тихий текст.
+func TextMuted() color.Color { return currentPalette().TextMuted }
 
-// Accent — акцентный цвет: выбранный пункт, активное состояние.
-func Accent() color.Color {
-	return theme.Color(theme.ColorNamePrimary)
-}
+// Accent — акцентный цвет.
+func Accent() color.Color { return currentPalette().Primary }
 
-// Success / Warning / Danger — статусные роли.
-//
-// В Fyne нет отдельных semantic-цветов для success/danger, поэтому берём
-// то, что тема уже использует по смыслу: Success — цвет успеха, Warning —
-// предупреждения, Danger — ошибки. Так статусные бейджи совпадают по цвету с
-// системными диалогами и не выбиваются из темы.
-func Success() color.Color { return theme.Color(theme.ColorNameSuccess) }
-func Warning() color.Color { return theme.Color(theme.ColorNameWarning) }
-func Danger() color.Color  { return theme.Color(theme.ColorNameError) }
+// AccentHover — акцент под курсором.
+func AccentHover() color.Color { return currentPalette().PrimaryHover }
 
-// StatusColor — цвет статусного бейджа по уровню важности.
+// OnAccent — текст на акцентной заливке.
+func OnAccent() color.Color { return currentPalette().OnPrimary }
+
+// Success / Warning / Danger — статусы.
+func Success() color.Color { return currentPalette().Success }
+func Warning() color.Color { return currentPalette().Warning }
+func Danger() color.Color  { return currentPalette().Danger }
+
+// Shadow — почти прозрачная подложка под карточками.
+func Shadow() color.Color { return currentPalette().Shadow }
+
+// StatusColor — цвет статусного бейджа по уровню.
 func StatusColor(level StatusLevel) color.Color {
 	switch level {
 	case StatusSuccess:
@@ -119,7 +107,7 @@ type StatusLevel int
 const (
 	// StatusNeutral — нет выраженного состояния.
 	StatusNeutral StatusLevel = iota
-	// StatusInfo — информационное состояние (выбрано, в процессе).
+	// StatusInfo — информационное состояние.
 	StatusInfo
 	// StatusSuccess — успех (подключено, работает).
 	StatusSuccess
@@ -129,22 +117,22 @@ const (
 	StatusDanger
 )
 
-// blend смешивает fg поверх bg с долей fgWeight (0 — только bg, 1 — только fg).
+// LatencyColor — цвет индикатора задержки по её значению в миллисекундах.
 //
-// Смешение нужно потому, что Fyne не даёт полупрозрачных слоёв поверх
-// произвольного фона: alpha в NRGBA работает только если под ним уже что-то
-// нарисовано. Непрозрачный результат предсказуем на любой платформе.
-func blend(fg, bg color.Color, fgWeight float64) color.Color {
-	if fgWeight < 0 {
-		fgWeight = 0
+// Пороги — визуальные, не бизнес-правила: они не влияют ни на выбор узла,
+// ни на что-либо в core. Отрицательное значение означает «нет измерения»
+// (таймаут или узел не проверялся).
+func LatencyColor(ms int) color.Color {
+	switch {
+	case ms < 0:
+		return TextMuted()
+	case ms < 100:
+		return Success()
+	case ms < 250:
+		return TextSecondary()
+	case ms < 500:
+		return Warning()
+	default:
+		return Danger()
 	}
-	if fgWeight > 1 {
-		fgWeight = 1
-	}
-	fr, fg2, fb, fa := fg.RGBA()
-	br, bg2, bb, ba := bg.RGBA()
-	mix := func(f, b uint32) uint8 {
-		return uint8((float64(f)*fgWeight+float64(b)*(1-fgWeight))/257) & 0xff
-	}
-	return color.NRGBA{R: mix(fr, br), G: mix(fg2, bg2), B: mix(fb, bb), A: mix(fa, ba)}
 }

@@ -59,6 +59,15 @@ var Link fyne.Resource = theme.NewThemedResource(&fyne.StaticResource{
 // All of these are themed (currentColor): they follow the active theme and
 // need no per-variant variants.
 //
+//go:embed nav_home.svg
+var navHomeSVG []byte
+
+//go:embed nav_proxies.svg
+var navProxiesSVG []byte
+
+//go:embed nav_traffic.svg
+var navTrafficSVG []byte
+
 //go:embed nav_local.svg
 var navLocalSVG []byte
 
@@ -86,6 +95,15 @@ func themed(name string, raw []byte) fyne.Resource {
 
 // NavLocal — local sing-box instance (map pin).
 var NavLocal = themed("nav_local.svg", navLocalSVG)
+
+// NavHome — dashboard (house).
+var NavHome = themed("nav_home.svg", navHomeSVG)
+
+// NavProxies — node list (radiating node).
+var NavProxies = themed("nav_proxies.svg", navProxiesSVG)
+
+// NavTraffic — traffic profiler (bar chart).
+var NavTraffic = themed("nav_traffic.svg", navTrafficSVG)
 
 // NavRemote — remote machines (grid).
 var NavRemote = themed("nav_remote.svg", navRemoteSVG)
