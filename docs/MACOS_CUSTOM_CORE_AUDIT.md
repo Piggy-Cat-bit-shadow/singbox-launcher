@@ -43,8 +43,8 @@ for the core — this section narrows *where* the work is, and does not cancel i
 Paths checked (all size `75783858`):
 
 ```text
-/Applications/singbox-launcher.app/Contents/MacOS/bin/sing-box   501c9b5e…  (jie:staff)
-~/Library/Application Support/singbox-launcher/bin/sing-box      501c9b5e…  (jie:staff)
+/Applications/singbox-launcher.app/Contents/MacOS/bin/sing-box   501c9b5e…  (launcher user)
+~/Library/Application Support/singbox-launcher/bin/sing-box      501c9b5e…  (launcher user)
 /Library/PrivilegedHelperTools/sing-box-lxd                      501c9b5e…  (root:wheel)
 ```
 

@@ -177,7 +177,7 @@ rm -rf /Applications/JiejieBox.app
 | Запуск GUI | приложение стартует, окно и трей поднимаются |
 | Своё ядро | признаёт ядро прошлой сессии: `adopting this launcher's own core`, диалога убийства нет |
 | Clash API | `/version` → 200 с секретом, **401** без секрета |
-| Список узлов | `Successfully loaded 5 proxies for group '🌍 国外流量'` |
+| Список узлов | `Successfully loaded N proxies for group '<ваша группа>'` |
 | Версия ядра | API отвечает `sing-box 1.15.0-jiejie-masquerade.5` (кастомное) |
 | Root TUN | `/bin/sh -pc` пишет в root-owned `/Library/Logs/sing-box-lxd`; создан utun |
 | Трафик через TUN | публичный IPv4 получен через туннель |

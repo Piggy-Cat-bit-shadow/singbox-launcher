@@ -57,11 +57,11 @@ content.
 ```text
 Mode: system
 Program: /Applications/singbox-launcher.app/Contents/MacOS
-Data: /Users/jie/Library/Application Support/singbox-launcher
-Logs: /Users/jie/Library/Logs/singbox-launcher
-Core: /Users/jie/Library/Application Support/singbox-launcher/bin/sing-box (version: (none), source: data)
+Data: ~/Library/Application Support/singbox-launcher
+Logs: ~/Library/Logs/singbox-launcher
+Core: ~/Library/Application Support/singbox-launcher/bin/sing-box (version: (none), source: data)
 Shadowed core: /Applications/singbox-launcher.app/Contents/MacOS/bin/sing-box
-Template: /Users/jie/Library/Application Support/singbox-launcher/bin/wizard_template.json (source: (none))
+Template: ~/Library/Application Support/singbox-launcher/bin/wizard_template.json (source: (none))
 ```
 
 This is the shadowing described in the audit, confirmed on the live installation:

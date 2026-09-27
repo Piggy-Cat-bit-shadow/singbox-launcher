@@ -116,3 +116,37 @@ SPECS/118-F-N-STATE_V7/etalon/v6mig/outbounds.actual.json
 # Артефакты упаковки macOS-клиента (SPEC 144) — build outputs, не исходники.
 JiejieBox.app/
 dist/
+
+# --- Privacy hardening (local additions) ---
+# Real runtime state of a configured client. These live outside the repo in
+# ~/Library/Application Support/singbox-launcher, but a stray copy inside the
+# checkout must never be committed: they contain node addresses, credentials
+# and a live Clash API secret.
+bin/state.json
+bin/state.json.*
+bin/settings.json
+bin/cache.db
+bin/singbox.pid
+bin/gl-state.json
+bin/*.backup-*
+bin/rule-sets/
+
+# Subscription sources and any exported/imported node lists. The user's real
+# subscription files must not enter the repository or CI artifacts.
+*.subscription
+subscription.json
+subscriptions.json
+sub.txt
+subs.txt
+*.sub
+nodes.json
+proxies.json
+clash.yaml
+clash.yml
+
+# Local artifacts produced by this session's packaging/probing.
+JiejieBox.app/
+dist/
+BUILD_INFO.txt
+.gocache/
+.probe/
