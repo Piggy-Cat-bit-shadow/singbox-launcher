@@ -124,3 +124,47 @@ git push origin archive/<sanitized-branch>-<date>
 - Do not rename `DataDirAppName` without a migration plan.
 - Do not commit `config.json`, `state.json`, `cache.db`, subscription files or
   any node list; `.gitignore` covers them, and they contain credentials.
+
+## Known-failing golangci-lint (upstream defect, not this fork)
+
+The fork's `golangci-lint` job is red, and it is red for reasons that come from
+upstream, not from anything changed here.
+
+Measured on 2026-09-27 against `main` (`a636bfc`): 13 `errcheck` and 3 `unused`
+findings, in these files only —
+
+```text
+core/autostart.go               (5 × fmt.Fprint* unchecked)
+core/purge.go                   (5 × fmt.Fprint* unchecked)
+core/daemon_manager_darwin.go   (1 × f.Close unchecked)
+core/daemon_service_state.go    (1 × f.Close unchecked)
+internal/paths/copytree.go      (1 × in.Close unchecked)
+internal/paths/migrate_test.go  (1 × os.Chmod unchecked)
+core/config/subscription/body_read.go          (splitAndTrim unused)
+core/config/subscription/xray_protocols.go     (xrayNodeFromOutbound unused)
+core/config/subscription/singbox_import_e2e_test.go (entryNodes unused)
+```
+
+Every one of those files is byte-identical to upstream — `git diff` against the
+upstream baseline is empty for all of them. Upstream's own lint job fails on
+its own branches with the same findings (`gh run view 36027458093` shows
+`core/purge.go`, `copytree.go`, `migrate_test.go` and `daemon_service_state.go`
+failing on Linux, macOS and Windows); the last upstream lint success is on
+`develop` at 2026-09-23, before those findings were introduced.
+
+Deliberately **not** fixed here. Rewriting ~16 call sites across eight upstream
+files is a large change unrelated to the macOS client work this fork exists
+for, and `errcheck` on `fmt.Fprint*` in CLI-style helpers is not a real defect
+in a GUI launcher. Touching them would also make every future upstream merge
+conflict in files this fork has no reason to own.
+
+If the lint job is wanted green, the honest options are:
+
+1. wait for upstream to fix it, since it is their finding;
+2. add a narrow exclusion in `.golangci.yaml` for those specific paths with a
+   comment pointing at this section — an explicit, reviewable waiver rather
+   than a silent one.
+
+Until then: **`golangci-lint` is NOT a gate for this fork.** `go vet`,
+`go test ./...`, `-race`, the l10n and paths guards, and `go mod tidy`
+cleanliness all run in CI and all pass.
