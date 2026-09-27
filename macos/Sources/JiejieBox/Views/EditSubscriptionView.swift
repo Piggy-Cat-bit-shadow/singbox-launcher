@@ -35,6 +35,11 @@ struct EditSubscriptionView: View {
             if model.subscriptions.isEmpty { await model.loadSubscriptions() }
             primeFields()
         }
+        // The record can arrive after the first render (the list may still be
+        // loading when this screen opens), and a form seeded from nothing would
+        // show empty fields whose Save appears to do nothing. Re-seed once the
+        // record exists, and only while the user has not typed into them.
+        .onChange(of: model.subscriptions.count) { _, _ in primeFields() }
     }
 
     // MARK: - Content
@@ -73,7 +78,9 @@ struct EditSubscriptionView: View {
             }
 
             MenuSection("Actions") {
-                MenuRow("Save Changes", systemImage: "checkmark") {
+                MenuRow("Save Changes",
+                        subtitle: hasEdits ? nil : "Nothing to save yet.",
+                        systemImage: "checkmark") {
                     Task {
                         let ok = await model.updateSubscription(
                             id: sub.id,
@@ -82,7 +89,7 @@ struct EditSubscriptionView: View {
                         if ok { model.goBack() }
                     }
                 }
-                .disabled(model.pending != nil)
+                .disabled(model.pending != nil || !hasEdits)
 
                 MenuRow(sub.enabled ? "Disable" : "Enable",
                         systemImage: sub.enabled ? "pause.circle" : "play.circle") {
@@ -126,10 +133,21 @@ struct EditSubscriptionView: View {
     }
 
     /// Seed the editable fields from the current record, once.
+    ///
+    /// Only fills a field the user has not typed into, so a late-arriving
+    /// reload cannot overwrite an edit in progress.
     private func primeFields() {
         guard let sub else { return }
         if nameField.text.isEmpty { nameField.text = sub.name }
         if urlField.text.isEmpty { urlField.text = sub.url }
+    }
+
+    /// True when a field differs from the stored record.
+    private var hasEdits: Bool {
+        guard let sub else { return false }
+        let name = nameField.text.trimmingCharacters(in: .whitespaces)
+        let url = urlField.text.trimmingCharacters(in: .whitespaces)
+        return (name != sub.name && !name.isEmpty) || (url != sub.url && !url.isEmpty)
     }
 }
 

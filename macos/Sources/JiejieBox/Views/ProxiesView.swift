@@ -230,7 +230,14 @@ struct ProxiesView: View {
                  : "Start the core to list and switch proxies.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            // An explanation with no action is a dead end: offer the retry, so
+            // a slow-starting Clash API can be picked up without leaving.
+            MenuRow("Try Again", systemImage: "arrow.clockwise") {
+                Task { await model.loadGroups() }
+            }
+            .disabled(model.pending != nil)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
+        .padding(.top, 4)
     }
 }

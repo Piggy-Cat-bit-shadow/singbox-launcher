@@ -703,10 +703,18 @@ final class AppModel {
         switch event.event {
         case BackendEventName.coreStateChanged:
             if let status = event.decode(CoreStatus.self) {
+                let wasRunning = core?.state == .running
                 core = status
                 // A stopped core has no speed; keeping the last sample would
                 // show traffic that is not flowing.
                 if status.state != .running { traffic = nil }
+
+                // The proxy list only exists while the core is up. Without this
+                // the Proxies screen would keep saying "start the core" after
+                // the user did exactly that, because nothing else reloads it.
+                if status.state == .running && !wasRunning {
+                    await loadGroups()
+                }
             }
         case BackendEventName.trafficRate:
             if let rate = event.decode(TrafficRate.self) {
