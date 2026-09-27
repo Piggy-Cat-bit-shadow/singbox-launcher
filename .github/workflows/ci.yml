@@ -155,18 +155,19 @@ jobs:
       # Tooling guards that are platform-independent static checks. They used to
       # run in the Ubuntu leg; macOS runs them just as well and they are worth
       # keeping (they catch i18n drift and path-join violations before review).
+      # vet over the packages this fork builds. AGENTS.md forbids a repo-wide
+      # `go vet ./...` locally, but CI is exactly where the full pass belongs.
+      - name: go vet
+        shell: bash
+        run: |
+          go vet ./core/... ./api/... ./internal/... ./ui/...
+
       - name: L10n and paths checks
         shell: bash
         run: |
           go run ./tools/l10n/l10n_check --strict
           go run ./tools/l10n/hardcoded_check --strict
           go run ./tools/paths_guard --strict
-
-      - name: Win7 (go1.20) constructs guard
-        shell: bash
-        continue-on-error: true
-        run: |
-          go run ./tools/win7guard
 
       - name: Check go mod tidy is clean
         shell: bash

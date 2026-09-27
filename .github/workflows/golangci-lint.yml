@@ -16,10 +16,16 @@ jobs:
     name: golangci-lint (macOS)
     runs-on: macos-latest
     steps:
-      - name: Checkout PR Code
+      # Event-safe checkout. On workflow_dispatch there is no pull_request
+      # payload, so `github.event.pull_request.head.sha` is empty and checkout
+      # would silently fall back to the repository default branch — a manual
+      # lint run would then check a branch nobody asked about. The expression
+      # below pins the PR head when a PR triggered the run and takes the
+      # dispatched ref otherwise.
+      - name: Checkout code
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Setup Go
