@@ -311,17 +311,71 @@ if [ "$DO_INSTALL" = true ]; then
     echo ""
     echo "=== Installing to /Applications ==="
     DEST_APP="/Applications/$APP_NAME.app"
-    if [ -d "$DEST_APP" ]; then
-        echo "Existing $DEST_APP found — replacing the executable only."
-        osascript -e "tell application \"$DEST_APP\" to quit" >/dev/null 2>&1 || true
-        sleep 2
-        cp "$APP_NAME.app/Contents/MacOS/$BINARY_NAME" "$DEST_APP/Contents/MacOS/$BINARY_NAME"
-        chmod +x "$DEST_APP/Contents/MacOS/$BINARY_NAME"
-        cp "$APP_NAME.app/Contents/Info.plist" "$DEST_APP/Contents/Info.plist"
-        codesign --force --sign - --identifier "$APP_BUNDLE_ID" "$DEST_APP"
-    else
-        echo "No existing install — copying the full bundle."
-        cp -R "$APP_NAME.app" /Applications/
+    SRC_APP="$(pwd)/$APP_NAME.app"
+
+    # Установка = замена ВСЕГО bundle, а не только исполняемого файла.
+    # Раньше копировались лишь бинарь и Info.plist: если менялись иконка,
+    # Resources, локализация или встроенный helper, в /Applications
+    # оставались файлы прошлой версии — смесь двух сборок.
+    #
+    # Порядок безопасный: сначала новый bundle проверяется и подписывается,
+    # затем копируется во временное место РЯДОМ с целью (тот же том, поэтому
+    # переименование атомарно), и только потом подменяет установленный.
+    # Провал на любом шаге оставляет прежнюю установку рабочей.
+
+    echo "Verifying the new bundle before touching the installed one..."
+    if ! codesign --verify "$SRC_APP" 2>/dev/null; then
+        echo "ERROR: the freshly built bundle does not verify; nothing was installed." >&2
+        exit 1
     fi
-    codesign --verify "$DEST_APP" && echo "Installed and verified: $DEST_APP"
+    for f in "$SRC_APP/Contents/Info.plist" "$SRC_APP/Contents/MacOS/$BINARY_NAME"; do
+        if [ ! -e "$f" ]; then
+            echo "ERROR: the new bundle is incomplete ($f is missing); nothing was installed." >&2
+            exit 1
+        fi
+    done
+
+    # Приложение не должно работать во время подмены: macOS держит открытый
+    # образ, и подмена под запущенным процессом даёт «Code Signature Invalid».
+    if [ -d "$DEST_APP" ]; then
+        echo "Quitting the running app (if any)..."
+        osascript -e "tell application \"$APP_NAME\"" -e "quit" -e "end tell" >/dev/null 2>&1 || true
+        sleep 2
+    fi
+
+    STAGE="$(mktemp -d /Applications/.jiejiebox-install.XXXXXX)"
+    register_tmp "$STAGE"
+    echo "Staging to $STAGE ..."
+    ditto "$SRC_APP" "$STAGE/$APP_NAME.app"
+    if ! codesign --verify "$STAGE/$APP_NAME.app" 2>/dev/null; then
+        echo "ERROR: the staged copy failed verification; the installed app is untouched." >&2
+        exit 1
+    fi
+
+    if [ -d "$DEST_APP" ]; then
+        # Старая версия уезжает в сторону, а не удаляется: если что-то пойдёт
+        # не так, её можно вернуть.
+        BACKUP="/Applications/.$APP_NAME.previous.$$"
+        mv "$DEST_APP" "$BACKUP"
+        if mv "$STAGE/$APP_NAME.app" "$DEST_APP"; then
+            rm -rf "$BACKUP"
+            echo "Replaced the full bundle."
+        else
+            echo "ERROR: swap failed; restoring the previous installation." >&2
+            mv "$BACKUP" "$DEST_APP"
+            exit 1
+        fi
+    else
+        echo "No existing install — installing the full bundle."
+        mv "$STAGE/$APP_NAME.app" "$DEST_APP"
+    fi
+    rmdir "$STAGE" 2>/dev/null || true
+
+    if codesign --verify "$DEST_APP" 2>/dev/null; then
+        echo "Installed and verified: $DEST_APP"
+        echo "Open it with: open \"$DEST_APP\""
+    else
+        echo "WARNING: the installed bundle does not verify; re-run this script." >&2
+        exit 1
+    fi
 fi
