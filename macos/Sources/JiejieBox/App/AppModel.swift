@@ -352,9 +352,12 @@ final class AppModel {
             return
         }
 
-        let task = Task { [weak self] in
+        // Explicit type parameters and an explicit `Void` body: a bare
+        // `Task { ... return () }` is ambiguous against
+        // `Task.init(name:priority:operation:)` on newer toolchains, where the
+        // trailing value makes the overload resolution fail outright.
+        let task = Task<Void, Never> { [weak self] in
             await self?.performStart()
-            return ()
         }
         bootstrap = task
         await task.value
