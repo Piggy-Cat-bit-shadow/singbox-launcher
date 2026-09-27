@@ -196,7 +196,7 @@ struct HomeView: View {
         // A failure from the last action. Cleared by the user or by the next
         // success — never on a timer, because an error the user never read is
         // an error that did not happen.
-        if let error = model.lastError {
+        if let error = model.lastError, !error.isEmpty {
             errorBanner(error)
         }
     }
@@ -208,7 +208,7 @@ struct HomeView: View {
         if let status = model.transientStatus, !status.isEmpty {
             Banner(kind: .info, message: status) {
                 Button {
-                    model.setTransientStatus("")
+                    model.clearTransientStatus()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }

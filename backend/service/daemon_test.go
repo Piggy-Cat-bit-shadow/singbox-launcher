@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"singbox-launcher/backend/protocol"
@@ -224,5 +225,67 @@ func TestServerDispatchesDaemonMethods(t *testing.T) {
 		if resp.Error != nil && resp.Error.Code == "unknown_method" {
 			t.Errorf("%s is not dispatched by the server", method)
 		}
+	}
+}
+
+// TestDaemonRepairProducesAPairingInvite — the "Pair Service" UI step calls
+// this, so its contract is what makes the pairing flow linear.
+//
+// A first-time user with a running but unpaired service must be able to reach
+// pairing from the Daemon screen. That works only if repair yields an invite
+// command and points at pairing as the follow-up.
+func TestDaemonRepairProducesAPairingInvite(t *testing.T) {
+	b := backendWithConfig(t)
+
+	result, err := b.DaemonRepair()
+	if err != nil {
+		t.Fatalf("DaemonRepair: %v", err)
+	}
+
+	// The operation name is what the UI branches on to reveal "Continue to
+	// Pair", so it is part of the contract rather than an internal label.
+	if result.Operation != "fresh_invite" {
+		t.Errorf("operation = %q, want %q", result.Operation, "fresh_invite")
+	}
+	if result.FollowUp != "pair" {
+		t.Errorf("follow_up = %q, want %q", result.FollowUp, "pair")
+	}
+	if !result.NeedsAdmin {
+		t.Error("producing an invite needs administrator rights and should say so")
+	}
+
+	// When the core supports the daemon, the command must be real. The exact
+	// path is deliberately not asserted: it varies by install.
+	if result.Available {
+		if !strings.Contains(result.Command, "lxd client add") {
+			t.Errorf("command %q does not look like a pairing-invite command", result.Command)
+		}
+		if !strings.Contains(result.Command, "--name") {
+			t.Errorf("command %q does not name the client", result.Command)
+		}
+		if result.Message == "" {
+			t.Error("an available command has no guidance for the user")
+		}
+	}
+}
+
+// TestDaemonRepairMatchesInstallFollowUp — install and repair must agree on the
+// step after them, or the guided sequence would point in two directions.
+func TestDaemonRepairMatchesInstallFollowUp(t *testing.T) {
+	b := backendWithConfig(t)
+
+	install, err := b.DaemonInstall()
+	if err != nil {
+		t.Fatalf("DaemonInstall: %v", err)
+	}
+	repair, err := b.DaemonRepair()
+	if err != nil {
+		t.Fatalf("DaemonRepair: %v", err)
+	}
+
+	if install.FollowUp != repair.FollowUp {
+		t.Errorf("install follow_up = %q but repair follow_up = %q; "+
+			"the guided sequence would be inconsistent",
+			install.FollowUp, repair.FollowUp)
 	}
 }

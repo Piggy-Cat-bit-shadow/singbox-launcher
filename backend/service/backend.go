@@ -43,6 +43,25 @@ type Backend struct {
 	// with the core.
 	traffic     *TrafficSampler
 	trafficOnce sync.Once
+
+	// shutdownOnce makes Shutdown exactly-once; shutdownStarted lets a caller
+	// observe that teardown has begun.
+	shutdownOnce    sync.Once
+	shutdownStarted chan struct{}
+	shutdownInit    sync.Once
+}
+
+// shutdownSignal lazily creates the channel Shutdown closes.
+//
+// Lazily, because Backend is also constructed directly in tests as a zero
+// value, and a nil channel would make IsShuttingDown report the wrong answer.
+func (b *Backend) shutdownSignal() chan struct{} {
+	b.shutdownInit.Do(func() {
+		if b.shutdownStarted == nil {
+			b.shutdownStarted = make(chan struct{})
+		}
+	})
+	return b.shutdownStarted
 }
 
 // Traffic returns the process-wide speed sampler.
@@ -378,20 +397,53 @@ func (b *Backend) StopCore() error {
 
 // Shutdown releases backend resources. The core stop policy is unchanged:
 // the same graceful-exit semantics the Fyne build used.
+// Shutdown releases backend resources and asks the core to follow its exit
+// policy. The core stop decision is unchanged from the Fyne build: classic
+// stops the child process, daemon leaves the service running unless
+// stop-on-exit is configured.
+//
+// Exactly-once, because there are two legitimate triggers and both are
+// expected in a normal quit:
+//
+//  1. the `shutdown` IPC method, so the client gets an ACK first; and
+//  2. stdin reaching EOF, which is the safety net for a frontend that died
+//     without asking — it must not leave an orphan helper holding the core.
+//
+// A quit that sends `shutdown` and then closes the pipe hits BOTH. Without this
+// guard the teardown would run twice: the shutting_down event emitted twice,
+// the core watch cancelled twice, the traffic sampler stopped twice, and
+// GracefulExit entered twice. GracefulExit happens to be idempotent internally,
+// but relying on that would mean every future side effect added here must also
+// be — a fragile invariant. The guard makes it true by construction.
 func (b *Backend) Shutdown() {
-	if b.ac == nil {
-		return
+	signal := b.shutdownSignal()
+	b.shutdownOnce.Do(func() {
+		defer close(signal)
+		if b.ac == nil {
+			return
+		}
+		debuglog.InfoLog("backend: shutdown requested")
+		if b.cancelCoreWatch != nil {
+			b.cancelCoreWatch()
+			b.cancelCoreWatch = nil
+		}
+		if b.traffic != nil {
+			b.traffic.Stop()
+		}
+		b.emit(protocol.EventShuttingDown, nil)
+		b.ac.GracefulExit()
+	})
+}
+
+// IsShuttingDown reports whether Shutdown has begun, so a caller can avoid
+// starting work the teardown is about to cancel.
+func (b *Backend) IsShuttingDown() bool {
+	select {
+	case <-b.shutdownSignal():
+		return true
+	default:
+		return false
 	}
-	debuglog.InfoLog("backend: shutdown requested")
-	if b.cancelCoreWatch != nil {
-		b.cancelCoreWatch()
-		b.cancelCoreWatch = nil
-	}
-	if b.traffic != nil {
-		b.traffic.Stop()
-	}
-	b.emit(protocol.EventShuttingDown, nil)
-	b.ac.GracefulExit()
 }
 
 // RestartCore restarts the core through the existing kill-and-let-the-watcher

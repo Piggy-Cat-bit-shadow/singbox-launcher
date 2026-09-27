@@ -97,6 +97,15 @@ struct DaemonView: View {
             if let error = status.error, !error.isEmpty {
                 DetailLine(label: "Error", value: error, tone: .error)
             }
+
+            // Available in EVERY state, including ready and active. Viewing
+            // status is not a privilege that activation should gate: a user
+            // whose VPN is running through the daemon may still want to check
+            // the service, the endpoint or the version.
+            MenuRow("Refresh Status", systemImage: "arrow.clockwise") {
+                Task { await model.loadDaemonStatus() }
+            }
+            .disabled(model.pending != nil)
         }
     }
 
@@ -155,12 +164,25 @@ struct DaemonView: View {
             }
             .disabled(model.pending != nil)
         case .pair:
-            MenuRow("Pair Service",
-                    subtitle: "Pairs this app with the running service.",
-                    systemImage: "link") {
-                model.path.append(.daemonPair)
+            // Two phases, so a first-time user is never dropped into an empty
+            // form. Phase 1 produces the invite command; phase 2 is offered
+            // only once that command exists.
+            if model.pairingInviteReady {
+                MenuRow("Continue to Pair",
+                        subtitle: "Paste the invite printed by Terminal.",
+                        systemImage: "arrow.right",
+                        showsChevron: true) {
+                    model.path.append(.daemonPair)
+                }
+                .disabled(model.pending != nil)
+            } else {
+                MenuRow("Pair Service",
+                        subtitle: "Create a one-time invite, then pair this app.",
+                        systemImage: "link") {
+                    Task { await model.prepareDaemonPairing() }
+                }
+                .disabled(model.pending != nil)
             }
-            .disabled(model.pending != nil)
         case .wait:
             DetailLine(label: "Service", value: "Not answering yet")
             Text("The service is installed and paired but not responding. "
@@ -244,25 +266,63 @@ struct DaemonView: View {
     @ViewBuilder
     private func dangerSection(_ status: DaemonStatus) -> some View {
         MenuSection("Advanced") {
+            // Re-pairing is safe while active: it only produces a NEW invite
+            // and does not touch the existing pairing until one is redeemed.
             MenuRow("Re-pair",
-                    subtitle: "Get a fresh invite from the service.",
+                    subtitle: "Create a new one-time invite for this app.",
                     systemImage: "arrow.triangle.2.circlepath") {
                 Task { await model.daemonSetup(.repair) }
             }
             .disabled(model.pending != nil)
 
-            if status.paired {
-                MenuRow("Forget Pairing", systemImage: "link.badge.plus", role: .destructive) {
-                    Task { await model.unpairDaemon() }
-                }
-                .disabled(model.pending != nil)
+            // Removing the pairing or the service underneath a live daemon VPN
+            // tears down the control channel the running core depends on. This
+            // is a real constraint from the daemon's design, not caution, so
+            // the rows explain it rather than silently refusing.
+            if let blocked = destructiveBlockedReason(status) {
+                Text(blocked)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Metrics.rowPaddingH)
+                    .padding(.vertical, 2)
             }
 
-            MenuRow("Remove Service", systemImage: "trash", role: .destructive) {
+            if status.paired {
+                MenuRow("Forget Pairing",
+                        subtitle: destructiveSubtitle(status, "Removes this app's pairing."),
+                        systemImage: "link.badge.plus",
+                        role: .destructive) {
+                    Task { await model.unpairDaemon() }
+                }
+                .disabled(model.pending != nil || destructiveBlocked(status))
+            }
+
+            MenuRow("Remove Service",
+                    subtitle: destructiveSubtitle(status, "Removes the system service."),
+                    systemImage: "trash",
+                    role: .destructive) {
                 Task { await model.daemonSetup(.uninstall) }
             }
-            .disabled(model.pending != nil)
+            .disabled(model.pending != nil || destructiveBlocked(status))
         }
+    }
+
+    /// True when a destructive daemon action would break a live connection.
+    ///
+    /// Only while the daemon is BOTH the active engine and actually carrying
+    /// traffic: an installed-but-unused service can be removed freely.
+    private func destructiveBlocked(_ status: DaemonStatus) -> Bool {
+        status.active_mode && model.core?.state == .running
+    }
+
+    private func destructiveBlockedReason(_ status: DaemonStatus) -> String? {
+        guard destructiveBlocked(status) else { return nil }
+        return "Stop the VPN from Home before removing the pairing or the service."
+    }
+
+    private func destructiveSubtitle(_ status: DaemonStatus, _ normal: String) -> String {
+        destructiveBlocked(status) ? "Stop the VPN first." : normal
     }
 
     // MARK: - Command output
@@ -298,6 +358,18 @@ struct DaemonView: View {
                 }
                 MenuRow("Open in Terminal", systemImage: "terminal") {
                     openInTerminal(cmd.command, model: model)
+                }
+                // The step that actually completes pairing. Offered right here
+                // rather than only on the Setup row, so the sequence reads as
+                // one continuous path: run the command, then paste what it
+                // prints.
+                if cmd.operation == "fresh_invite" {
+                    MenuRow("Continue to Pair",
+                            subtitle: "Paste the invite printed by Terminal.",
+                            systemImage: "arrow.right",
+                            showsChevron: true) {
+                        model.path.append(.daemonPair)
+                    }
                 }
                 MenuRow("Refresh Status", systemImage: "arrow.clockwise") {
                     Task {

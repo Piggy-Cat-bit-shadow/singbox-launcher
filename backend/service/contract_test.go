@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"singbox-launcher/backend/protocol"
@@ -457,4 +458,87 @@ func goMethods(t *testing.T) []string {
 		out = append(out, m[1])
 	}
 	return out
+}
+
+// TestShutdownIsExactlyOnce — a normal quit triggers teardown TWICE.
+//
+// The client sends the `shutdown` method (so it gets an ACK first) and then
+// closes the pipe, and main also calls Shutdown when Serve returns. Both are
+// legitimate: the method is the explicit path, EOF is the safety net for a
+// frontend that died without asking.
+//
+// Without a guard the teardown runs twice — the shutting_down event emitted
+// twice, the core watch cancelled twice, the sampler stopped twice. Counting
+// the emitted events is the observable proof.
+func TestShutdownIsExactlyOnce(t *testing.T) {
+	// A real controller: Shutdown is a no-op on a zero-value Backend because
+	// there is nothing to tear down, and this test is about the teardown path.
+	b := backendWithConfig(t)
+
+	var shuttingDown int
+	unsub := b.Subscribe(func(ev protocol.Event) {
+		if ev.Event == protocol.EventShuttingDown {
+			shuttingDown++
+		}
+	})
+	defer unsub()
+
+	// Simulate the real quit sequence: the method path, then EOF.
+	b.Shutdown()
+	b.Shutdown()
+	b.Shutdown()
+
+	if shuttingDown != 1 {
+		t.Errorf("shutting_down emitted %d times, want exactly 1", shuttingDown)
+	}
+	if !b.IsShuttingDown() {
+		t.Error("IsShuttingDown should report true once teardown has begun")
+	}
+}
+
+// TestShutdownConcurrentIsExactlyOnce — the two triggers can race, because the
+// method path runs in a goroutine while EOF is observed on the read loop.
+func TestShutdownConcurrentIsExactlyOnce(t *testing.T) {
+	b := backendWithConfig(t)
+
+	var mu sync.Mutex
+	shuttingDown := 0
+	unsub := b.Subscribe(func(ev protocol.Event) {
+		if ev.Event == protocol.EventShuttingDown {
+			mu.Lock()
+			shuttingDown++
+			mu.Unlock()
+		}
+	})
+	defer unsub()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.Shutdown()
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if shuttingDown != 1 {
+		t.Errorf("concurrent Shutdown emitted shutting_down %d times, want exactly 1", shuttingDown)
+	}
+}
+
+// TestShutdownOnZeroValueBackend — Backend is constructed directly in tests, so
+// Shutdown and IsShuttingDown must work without New() having run.
+func TestShutdownOnZeroValueBackend(t *testing.T) {
+	b := &Backend{}
+	if b.IsShuttingDown() {
+		t.Error("a fresh backend reports shutting down")
+	}
+	b.Shutdown()
+	b.Shutdown()
+	if !b.IsShuttingDown() {
+		t.Error("IsShuttingDown still false after Shutdown")
+	}
 }

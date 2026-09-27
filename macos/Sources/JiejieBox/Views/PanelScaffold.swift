@@ -137,18 +137,32 @@ struct QuitButton: View {
         Button {
             Task { await model.quit() }
         } label: {
-            Text("Quit")
-                .font(.caption.weight(.medium))
+            // Quitting is a multi-step teardown that can take a moment, so the
+            // control shows progress instead of looking inert — and is disabled
+            // meanwhile, so five impatient clicks cannot start five teardowns.
+            if model.isQuitting {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text("Quitting…")
+                        .font(.caption.weight(.medium))
+                }
                 .padding(.horizontal, 8)
                 .frame(height: 22)
-                .contentShape(Rectangle())
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(hover.isHovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
-                )
+            } else {
+                Text("Quit")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                    .contentShape(Rectangle())
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(hover.isHovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+                    )
+            }
         }
         .buttonStyle(MenuRowButtonStyle())
         .onHover { hover.isHovering = $0 }
+        .disabled(model.isQuitting)
         .help("Quit JiejieBox")
         .accessibilityLabel("Quit JiejieBox")
     }

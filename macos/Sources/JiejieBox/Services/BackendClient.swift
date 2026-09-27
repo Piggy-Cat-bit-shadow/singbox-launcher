@@ -181,9 +181,25 @@ actor BackendClient {
     /// core stop/keep decision lives. Killing the helper immediately after the
     /// command would truncate that teardown and could leave the core in an
     /// inconsistent state.
+    ///
+    /// Phased on purpose. The backend has two teardown triggers — the
+    /// `shutdown` method and stdin reaching EOF — and firing both at once races
+    /// the ACK against the EOF path. Each phase starts only after the previous
+    /// one has demonstrably failed:
+    ///
+    ///   1. send `shutdown`, wait for the ACK
+    ///   2. wait for the process to exit on its own (the normal path)
+    ///   3. only then close stdin, the fallback for a wedged backend
+    ///   4. wait briefly again
+    ///   5. only then terminate the helper
+    ///
+    /// Always returns: a backend that already died, or one that refuses to
+    /// exit, must never prevent the app from quitting.
     func shutdownGracefully() async {
         terminationIntent = .requested
-        // Best effort: the backend may already be gone.
+
+        // Phase 1: ask, and let the backend acknowledge. The ACK means the
+        // request was accepted, not that teardown has finished.
         try? await requestShutdown()
 
         guard let proc = process else {
@@ -191,28 +207,64 @@ actor BackendClient {
             return
         }
 
-        // Closing stdin is the backend's second signal: its read loop ends and
-        // it runs the same graceful path.
-        if let stdinHandle {
-            try? stdinHandle.close()
-            self.stdinHandle = nil
-        }
-
-        // Wait for the process to leave on its own before forcing anything.
+        // Phase 2: let it leave on its own. This is the normal path, and the
+        // core teardown gets its full budget here.
         for _ in 0..<50 where proc.isRunning {   // up to ~5 s
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+
+        // Phase 3: still here — it did not honour the request, so close stdin.
+        // EOF is the safety net for a frontend that vanished, not the mechanism
+        // a normal quit relies on, so it is only reached after phase 2 failed.
+        if proc.isRunning, let stdinHandle {
+            log.warning("backend did not exit after shutdown; closing stdin")
+            try? stdinHandle.close()
+            self.stdinHandle = nil
+
+            // Phase 4: the EOF path gets its own budget rather than being
+            // assumed instantaneous.
+            for _ in 0..<20 where proc.isRunning {   // up to ~2 s
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+
+        // Phase 5: last resort. Terminating mid-teardown can leave the core
+        // inconsistent, so it is logged as the anomaly it is.
         if proc.isRunning {
-            log.warning("backend did not exit after shutdown; terminating")
+            log.error("backend still running after shutdown and stdin close; terminating")
             proc.terminate()
         }
         await cleanupAfterExit()
     }
 
+    /// Release every handle and callback the process owned.
+    ///
+    /// Must be complete: a stale `stdinHandle` lets a later write go to a
+    /// closed pipe, leftover continuations leave callers awaiting a process
+    /// that is gone, and a retained `onTermination` callback would fire for the
+    /// NEXT process and report a spurious crash. Incomplete cleanup is how a
+    /// restart ends up with two event streams.
     private func cleanupAfterExit() async {
         readTask?.cancel()
         readTask = nil
+
+        if let stdinHandle {
+            try? stdinHandle.close()
+        }
+        stdinHandle = nil
+
+        // Fail anything still waiting rather than leaving it suspended.
+        let waiting = pending
+        pending.removeAll()
+        for (_, cont) in waiting {
+            cont.resume(throwing: BackendClientError.backendUnavailable)
+        }
+
+        for (_, cont) in eventContinuations { cont.finish() }
+        eventContinuations.removeAll()
+
         process = nil
+        onTermination = nil
         log.info("backend stopped")
     }
 

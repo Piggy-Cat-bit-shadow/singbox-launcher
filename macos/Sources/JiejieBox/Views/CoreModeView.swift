@@ -54,32 +54,38 @@ struct CoreModeView: View {
 
     // MARK: - Rows
 
+    /// Classic: a plain engine choice, activated directly.
+    ///
+    /// Disabled only when it cannot be acted on — already active, or the core
+    /// is not in a state where switching is safe — and the footer explains why.
     private var classicRow: some View {
         MenuRow("Classic",
                 subtitle: "sing-box runs as a child of JiejieBox.",
                 action: {
-                    guard model.coreModeLabel != "Classic" else { return }
+                    guard !classicActive else { return }
                     Task { await model.activateClassicMode() }
                 },
-                trailing: { activeBadge(model.coreModeLabel == "Classic") })
-            .disabled(!model.canSwitchCoreMode || model.coreModeLabel == "Classic")
+                trailing: { activeBadge(classicActive) })
+            .disabled(!model.canSwitchCoreMode || classicActive)
     }
 
-    /// The daemon row opens the Daemon screen unless the engine is ready and
-    /// inactive, in which case it activates directly.
+    /// Daemon: ALWAYS a doorway to the Daemon screen.
+    ///
+    /// It deliberately does not activate on click. Selecting an engine and
+    /// managing a system service are different jobs, and one row that sometimes
+    /// switches mode and sometimes opens a page is confusing — worse, gating
+    /// the row on "may I switch engines" made it unreachable in exactly the
+    /// state where the user most needs it: daemon active with the VPN running.
+    ///
+    /// Viewing status and changing mode are separate permissions. This row only
+    /// ever navigates, so it is never disabled, and it always shows a chevron
+    /// so it reads as a destination rather than as inert text.
     private var daemonRow: some View {
         MenuRow("Daemon",
                 subtitle: daemonSubtitle,
-                showsChevron: !daemonActive && !daemonReady,
-                action: {
-                    if daemonActive || !daemonReady {
-                        model.path.append(.daemon)
-                    } else {
-                        Task { await model.activateDaemonMode() }
-                    }
-                },
+                showsChevron: true,
+                action: { model.path.append(.daemon) },
                 trailing: { activeBadge(daemonActive) })
-            .disabled(!model.canSwitchCoreMode || daemonActive)
     }
 
     @ViewBuilder
@@ -93,7 +99,12 @@ struct CoreModeView: View {
 
     // MARK: - Daemon state
 
+    /// Active engine, from RUNTIME state (`core.backend`), not the saved
+    /// preference. The two can diverge when a switch succeeded but persisting
+    /// it did not, and calling the saved value "Active" would misdescribe what
+    /// is actually running.
     private var daemonActive: Bool { model.coreModeLabel == "Daemon" }
+    private var classicActive: Bool { model.coreModeLabel == "Classic" }
 
     private var daemonReady: Bool { model.daemon?.ready == true }
 
@@ -107,7 +118,9 @@ struct CoreModeView: View {
             return "Not available in this build."
         }
         if daemonActive {
-            return "Running as a system service."
+            return status.ready
+                ? "Active. Click for service details."
+                : "Active, but the service needs attention. Click for details."
         }
         // A core without `lxd` cannot host the service at all, and saying
         // "setup required" would send the user to a screen that cannot help.

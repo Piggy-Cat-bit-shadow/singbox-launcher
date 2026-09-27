@@ -52,7 +52,7 @@ struct SubscriptionsView: View {
                     }
                 }
 
-                if let status = model.transientStatus {
+                if let status = model.transientStatus, !status.isEmpty {
                     Text(status)
                         .font(.caption)
                         .foregroundStyle(.secondary)

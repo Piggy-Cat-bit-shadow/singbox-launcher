@@ -12,6 +12,7 @@
 // compile here. @Observable is also the modern approach and gives views
 // field-level dependency tracking for free.
 
+import AppKit
 import Foundation
 import Observation
 import ServiceManagement
@@ -84,6 +85,9 @@ final class AppModel {
     private(set) var transientStatus: String?
     /// Task that clears `transientStatus`, cancelled and restarted per message.
     private var transientTask: Task<Void, Never>?
+    /// Identifies the message the current `transientTask` belongs to, so a
+    /// superseded timer cannot clear a newer message.
+    private var transientToken: UUID?
 
     // MARK: - Proxy state
 
@@ -358,11 +362,28 @@ final class AppModel {
     /// running in daemon mode with keep-running enabled). Only after that is
     /// the helper process torn down, and it gets a grace period to finish.
     func quit() async {
+        // A second click while quitting must not start a second teardown.
+        guard !isQuitting else { return }
+        isQuitting = true
+        clearTransientStatus()
+
         eventTask?.cancel()
         eventTask = nil
+
+        // Best effort by design: shutdownGracefully never throws, so a backend
+        // that already died cannot block the quit.
         await client.shutdownGracefully()
+
         connection = .idle
+        // Actually leave. Without this the helper exits but the menu-bar app
+        // stays alive with no backend, which is the worst of both states: the
+        // icon remains, and every control in it is inert.
+        NSApplication.shared.terminate(nil)
     }
+
+    /// True from the moment Quit is pressed until the app exits. Drives the
+    /// button's disabled state so the UI cannot start a second teardown.
+    private(set) var isQuitting: Bool = false
 
     /// Stop the connection without asking the backend to exit.
     func stop() async {
@@ -619,12 +640,45 @@ final class AppModel {
         }
     }
 
+    /// Begin pairing: produce the one-time invite command.
+    ///
+    /// "Pair Service" used to jump straight to an empty paste box, while the
+    /// command that actually produces an invite was hidden under
+    /// Advanced → Re-pair. A first-time user following the screen was sent to a
+    /// form with nothing to paste and no hint of where the invite comes from.
+    ///
+    /// This is the same backend call Re-pair uses (`DaemonRepair` →
+    /// `lxd client add`), surfaced where the user needs it. It stays on the
+    /// Daemon screen so the command, its Copy/Open-in-Terminal actions and the
+    /// "Continue to Pair" step are all visible together.
+    ///
+    /// Returns true when a usable command was produced.
+    @discardableResult
+    func prepareDaemonPairing() async -> Bool {
+        await daemonSetup(.repair)
+        return pairingInviteReady
+    }
+
+    /// True when the last daemon command was a usable fresh invite.
+    ///
+    /// Derived from the backend's own result rather than a separate flag, so
+    /// there is no second source of truth that could disagree with what was
+    /// actually produced.
+    var pairingInviteReady: Bool {
+        daemonCommand?.operation == "fresh_invite" && daemonCommand?.available == true
+    }
+
     func pairDaemon(invite: String) async -> Bool {
         var paired = false
         await withPending(.pairingDaemon, success: nil) {
             self.daemon = try await self.client.pairDaemon(invite: invite)
             paired = self.daemon?.paired ?? false
-            if paired { self.showTransient("Daemon paired.") }
+            if paired {
+                self.showTransient("Daemon paired.")
+                // The invite is spent; leaving the command on screen would
+                // invite the user to paste it again, which cannot work.
+                self.daemonCommand = nil
+            }
         }
         return paired
     }
@@ -695,7 +749,7 @@ final class AppModel {
         if result.ok {
             showTransient(result.message.isEmpty ? success : result.message)
         } else {
-            lastError = result.message
+            setError(result.message)
         }
         if !result.core_skips.isEmpty {
             // Node skips accompany the summary rather than replacing it.
@@ -738,9 +792,19 @@ final class AppModel {
         }
     }
 
+    /// Report a failure.
+    ///
+    /// Blank text is ignored rather than stored, for the same reason the
+    /// transient setter normalises: `""` is not a message, and storing it would
+    /// render a banner with an icon and a dismiss button around nothing.
+    func setError(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastError = trimmed.isEmpty ? nil : trimmed
+    }
+
     func clearError() { lastError = nil }
 
-    /// Show a success line that clears itself.
+    /// Show a success line that clears itself after a few seconds.
     ///
     /// Centralised so every caller gets the same lifetime and a new message
     /// replaces the old one instead of stacking. Success and error are
@@ -748,25 +812,56 @@ final class AppModel {
     /// persists until the user dismisses it or a later action succeeds — an
     /// error that vanished on a timer is an error the user may never read.
     func showTransient(_ text: String, seconds: Double = 3.0) {
-        guard !text.isEmpty else { return }
-        transientStatus = text
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            clearTransientStatus()
+            return
+        }
+        transientStatus = trimmed
+
+        // Each message gets its own timer, and a new message cancels the
+        // previous one. The token check is the actual guard against the race:
+        // without it, message A's timer could fire after message B replaced it
+        // and clear B, so a message would vanish early for no visible reason.
         transientTask?.cancel()
+        let token = UUID()
+        transientToken = token
         transientTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.transientStatus = nil
+            await MainActor.run {
+                guard let self, self.transientToken == token else { return }
+                self.transientStatus = nil
+                self.transientTask = nil
+            }
         }
     }
 
     /// Replace the transient line from a view.
+    ///
+    /// Empty input is treated as a clear rather than stored: `""` is not a
+    /// message, and storing it would render a banner with no text but with its
+    /// icon and dismiss button — visible chrome reserving height for nothing.
+    /// Normalising here means no caller can reintroduce that state.
     func setTransientStatus(_ text: String) {
-        if text.isEmpty {
-            transientTask?.cancel()
-            transientTask = nil
-            transientStatus = nil
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            clearTransientStatus()
         } else {
-            showTransient(text)
+            showTransient(trimmed)
         }
+    }
+
+    /// Remove the transient message.
+    ///
+    /// The one supported way to clear it. `nil` is the single representation of
+    /// "no message"; there is deliberately no empty-string form, because that
+    /// sentinel is what previously left an invisible-but-present banner
+    /// occupying layout.
+    func clearTransientStatus() {
+        transientTask?.cancel()
+        transientTask = nil
+        transientStatus = nil
     }
 
     /// Drop the last setup command, so a stale command is not shown next to
@@ -942,6 +1037,16 @@ final class AppModel {
         case BackendEventName.proxySelectionChanged:
             if !selectedGroup.isEmpty {
                 await loadProxies(group: selectedGroup)
+            }
+        case BackendEventName.shuttingDown:
+            // The backend announced it is exiting. Handled rather than
+            // ignored so the event is not dead protocol: it is how we learn
+            // that a backend we did NOT ask to stop is going away anyway (the
+            // EOF path, or a quit initiated from elsewhere). Recording intent
+            // here keeps the process-exit callback from reporting a crash for
+            // a shutdown the backend announced in advance.
+            if !isQuitting {
+                lastError = "The backend is shutting down."
             }
         default:
             break
