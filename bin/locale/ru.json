@@ -644,9 +644,6 @@
   "Later": {
     "value": "Позже"
   },
-  "IP Check Services:": {
-    "value": "Сервисы проверки IP:"
-  },
   "Open in browser": {
     "value": "Открыть в браузере"
   },
@@ -4900,5 +4897,44 @@
   },
   "Live traffic of the local core": {
     "value": "Трафик локального ядра в реальном времени"
+  },
+  "Machines": {
+    "value": "Машины"
+  },
+  "Files": {
+    "value": "Файлы"
+  },
+  "Network checks": {
+    "value": "Проверки сети"
+  },
+  "Renderer": {
+    "value": "Рендеринг"
+  },
+  "Dangerous actions": {
+    "value": "Опасные действия"
+  },
+  "Debug API": {
+    "value": "Отладочный API"
+  },
+  "Inspect what the launcher and the core are doing.": {
+    "value": "Что делают лаунчер и ядро."
+  },
+  "Where the launcher keeps its data.": {
+    "value": "Где лаунчер хранит данные."
+  },
+  "Verify how traffic leaves this machine.": {
+    "value": "Как трафик покидает эту машину."
+  },
+  "These stop the core immediately and may interrupt your connection.": {
+    "value": "Эти действия немедленно останавливают ядро и могут прервать соединение."
+  },
+  "Switch between hardware OpenGL and the Mesa3D software renderer.": {
+    "value": "Переключение между аппаратным OpenGL и программным рендерером Mesa3D."
+  },
+  "How the launcher brings the core up.": {
+    "value": "Как лаунчер поднимает ядро."
+  },
+  "How subscription data is fetched and identified.": {
+    "value": "Как загружаются и идентифицируются подписки."
   }
 }

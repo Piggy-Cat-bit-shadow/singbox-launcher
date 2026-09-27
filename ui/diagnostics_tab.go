@@ -23,6 +23,7 @@ import (
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
+	"singbox-launcher/ui/design"
 )
 
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
@@ -379,35 +380,59 @@ func CreateDiagnosticsTab(ac *core.AppController) fyne.CanvasObject {
 	// есть что переключать; на остальных платформах nil и в VBox не попадает.
 	mesaBtn := buildMesaToggleButton(ac)
 
-	// Layout: 3 строки (per user request).
-	//   Row 1: Log window (full width — самое частое действие при дебаге)
-	//   Row 2: Logs folder | Config folder (file-system explorer пара)
-	//   Row 3: Kill Sing-Box (full width, destructive — отдельная строка)
+	// SPEC 145: действия сгруппированы по смыслу в карточки, а не вывалены
+	// вперемешку списком кнопок. Сами кнопки и их колбэки не изменились —
+	// меняется только то, как они разложены и названы.
 	//
-	// Debug API toggle переехал в Settings tab — это launcher-wide setting,
-	// не диагностика (живёт между запусками, не относится к ad-hoc проверкам).
-	logWindowRow := openLogWindowButton
-	foldersRow := container.NewGridWithColumns(2, openLogsFolderButton, openConfigFolderButton)
-	killRow := killSingBoxButton
-
-	rows := []fyne.CanvasObject{
-		widget.NewLabel(" "),
-		logWindowRow,
-		foldersRow,
-		cleanRuleSetsButton,
-		killRow,
-		trafficProfilerBtn,
-	}
-	if mesaBtn != nil {
-		rows = append(rows, mesaBtn)
-	}
-	rows = append(rows,
-		widget.NewLabel(locale.T("IP Check Services:")),
-		stunRow,
-		ipServicesRow,
+	// Разрушительное действие (Kill Sing-Box) вынесено в отдельную карточку
+	// внизу: в общем списке оно не отличалось от безобидных «открыть папку».
+	//
+	// Debug API toggle живёт в Settings: это настройка лаунчера, а не
+	// разовая диагностика.
+	logsCard := design.NewCard(
+		locale.T("Logs"),
+		locale.T("Inspect what the launcher and the core are doing."),
+		nil,
+		container.NewVBox(openLogWindowButton, vSpacerD(), openLogsFolderButton),
 	)
-	return container.NewVBox(rows...)
+	filesCard := design.NewCard(
+		locale.T("Files"),
+		locale.T("Where the launcher keeps its data."),
+		nil,
+		container.NewVBox(openConfigFolderButton, vSpacerD(), cleanRuleSetsButton),
+	)
+	networkCard := design.NewCard(
+		locale.T("Network checks"),
+		locale.T("Verify how traffic leaves this machine."),
+		nil,
+		container.NewVBox(stunRow, vSpacerD(), ipServicesRow),
+	)
+	trafficCard := design.NewCard(
+		locale.T("Traffic Profiler"),
+		locale.T("Per-connection breakdown, sessions and history."),
+		nil,
+		trafficProfilerBtn,
+	)
+
+	items := []fyne.CanvasObject{logsCard.Object(), filesCard.Object(), networkCard.Object(), trafficCard.Object()}
+	if mesaBtn != nil {
+		items = append(items, design.NewCard(
+			locale.T("Renderer"),
+			locale.T("Switch between hardware OpenGL and the Mesa3D software renderer."),
+			nil, mesaBtn).Object())
+	}
+
+	// Опасное — отдельной карточкой с явной пометкой, а не в общем потоке.
+	items = append(items, design.NewCard(
+		locale.T("Dangerous actions"),
+		locale.T("These stop the core immediately and may interrupt your connection."),
+		nil, killSingBoxButton).Object())
+
+	return container.NewVBox(items...)
 }
+
+// vSpacerD — небольшой вертикальный зазор между контролами внутри карточки.
+func vSpacerD() fyne.CanvasObject { return design.SpacerV(design.SpaceS) }
 
 // buildMesaToggleButton — единственная кнопка управления Mesa3D в UI
 // (SPEC 125 §2.6). Её роль — переключение, когда окно уже есть;

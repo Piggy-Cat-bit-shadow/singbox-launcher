@@ -25,6 +25,7 @@ import (
 	"singbox-launcher/internal/debuglog"
 	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
+	"singbox-launcher/ui/design"
 )
 
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
@@ -58,7 +59,7 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 	binDir := ac.FileService.Layout.Data.Bin()
 
 	// ---- Subscriptions section ---------------------------------------------
-	subsTitle := widget.NewLabelWithStyle(locale.T("Subscriptions"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	// Заголовок раздела теперь несёт карточка (SPEC 145).
 
 	autoUpdateCheck := widget.NewCheck(locale.T("Auto-update subscriptions"), nil)
 	autoUpdateCheck.SetChecked(ac.StateService.IsAutoUpdateEnabled())
@@ -177,7 +178,7 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 	subDefaultsBlock := buildSubscriptionDefaultsBlock(binDir)
 
 	// ---- Language section --------------------------------------------------
-	langTitle := widget.NewLabelWithStyle(locale.T("Language"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	// Заголовок раздела теперь несёт карточка (SPEC 145).
 	langLabel := widget.NewLabel(locale.T("Language:"))
 	langSelect := widget.NewSelect(locale.LangDisplayNames(), nil)
 	langSelect.Selected = locale.LangDisplayName(locale.GetLang())
@@ -236,7 +237,7 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 	langRow := container.NewBorder(nil, nil, langLabel, downloadLocalesBtn, langSelect)
 
 	// ---- Subscription identification (SPEC 061 Phase 4) -------------------
-	subIDTitle := widget.NewLabelWithStyle(locale.T("Subscription identification"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	// Заголовок раздела теперь несёт карточка (SPEC 145).
 	subIDBlock := buildSubscriptionIdentificationBlock(ac, binDir)
 
 	// ---- Debug API (переехал из Diagnostics tab) ---------------------------
@@ -266,27 +267,23 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 		connBlock.Add(buildElevateOnStartBlock(binDir))
 	}
 
-	// Language first so the two subscription sections (Subscriptions +
-	// Subscription identification) sit together instead of being split by the
-	// Language block.
+	// SPEC 145: разделы собраны в карточки вместо простыни, разделённой
+	// горизонтальными линиями. Содержимое блоков и их колбэки не изменились:
+	// меняется группировка и то, что у каждого раздела есть заголовок.
+	//
+	// Порядок сохранён прежним: Language, Connection, Subscriptions (вместе с
+	// идентификацией — они об одном), Debug API, Storage.
 	content := container.NewVBox(
-		langTitle,
-		langRow,
-		widget.NewSeparator(),
-		connBlock,
-		widget.NewSeparator(),
-		subsTitle,
-		autoUpdateCheck,
-		uaRow,
-		uaHint,
-		subDefaultsBlock,
-		widget.NewSeparator(),
-		subIDTitle,
-		subIDBlock,
-		widget.NewSeparator(),
-		debugAPIBlock,
-		widget.NewSeparator(),
-		storageBlock,
+		design.NewCard(locale.T("Language"), "", nil, langRow).Object(),
+		design.NewCard(locale.T("Connection"),
+			locale.T("How the launcher brings the core up."), nil, connBlock).Object(),
+		design.NewCard(locale.T("Subscriptions"),
+			locale.T("How subscription data is fetched and identified."), nil,
+			container.NewVBox(autoUpdateCheck, uaRow, uaHint, subDefaultsBlock,
+				design.SpacerV(design.SpaceM), subIDBlock)).Object(),
+		design.NewCard(locale.T("Debug API"), "", nil, debugAPIBlock).Object(),
+		design.NewCard(locale.T("Storage"),
+			locale.T("Where the launcher keeps its data."), nil, storageBlock).Object(),
 	)
 	return content, refresh
 }
