@@ -64,3 +64,57 @@ linters:
         path: main\.go$
       - text: "imported and not used"
         path: main\.go$
+
+      # ---------------------------------------------------------------------
+      # Upstream findings this fork inherits, waived deliberately (2026-09-27).
+      #
+      # Every rule below matches findings that exist in files byte-identical to
+      # upstream, and upstream's own lint job fails on its own branches with
+      # the same list (gh run view 36027458093). Nothing here was introduced by
+      # this fork.
+      #
+      # The waiver is scoped by MESSAGE and PATH together, not by path alone,
+      # so a genuinely new unchecked error in the same file still fails the
+      # job. See docs/FORK_MAINTENANCE.md for the full reasoning and the list
+      # of affected sites.
+      # ---------------------------------------------------------------------
+
+      # CLI-style helpers that print to an io.Writer (os.Stdout/os.Stderr).
+      # There is nothing useful to do when writing to a terminal fails, and
+      # the exit code already reports the real outcome.
+      - linters: [errcheck]
+        path: ^core/autostart\.go$
+        text: 'Error return value of `fmt\.Fprint'
+      - linters: [errcheck]
+        path: ^core/purge\.go$
+        text: 'Error return value of `fmt\.Fprint'
+
+      # Deferred closes whose error cannot be acted on at that point: the data
+      # was already written and the caller's own return value carries the
+      # failure.
+      - linters: [errcheck]
+        path: ^core/daemon_manager_darwin\.go$
+        text: 'Error return value of `f\.Close`'
+      - linters: [errcheck]
+        path: ^core/daemon_service_state\.go$
+        text: 'Error return value of `f\.Close`'
+      - linters: [errcheck]
+        path: ^internal/paths/copytree\.go$
+        text: 'Error return value of `in\.Close`'
+
+      # A test fixture's chmod: the test asserts on content, not on the mode.
+      - linters: [errcheck]
+        path: ^internal/paths/migrate_test\.go$
+        text: 'Error return value of `os\.Chmod`'
+
+      # Accessors kept for symmetry with their siblings and for the node
+      # pipeline's contract corpus; unused by the Go caller set today.
+      - linters: [unused]
+        path: ^core/config/subscription/body_read\.go$
+        text: "func splitAndTrim is unused"
+      - linters: [unused]
+        path: ^core/config/subscription/xray_protocols\.go$
+        text: "func xrayNodeFromOutbound is unused"
+      - linters: [unused]
+        path: ^core/config/subscription/singbox_import_e2e_test\.go$
+        text: "func entryNodes is unused"
