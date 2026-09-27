@@ -3,6 +3,8 @@ package core
 import (
 	"regexp"
 	"strings"
+
+	"singbox-launcher/internal/locale"
 )
 
 // exit_reason.go — SPEC 143: классификация причины завершения ядра.
@@ -132,30 +134,25 @@ func lastLines(text string, n int) string {
 	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
-// Длинные тексты локализации (ключ = английский текст, SPEC 111). Каждый
-// называет конкретное действие пользователя, а не «произошла ошибка»:
-// детерминированную причину повтор не исправит, её надо устранить.
-const (
-	exitReasonConfigInvalidText = "The core rejected its configuration, so restarting cannot help. The launcher has stopped auto-restart. Open the config, fix the reported field, save, then start again."
-	exitReasonPermissionText    = "The core did not have the privileges it needs (TUN requires root). Restarting cannot help while the privileges are missing. Check that the root-owned core copy matches the current core, then start again."
-	exitReasonPortInUseText     = "A local port the core needs is already in use, so restarting would fail the same way. The launcher has stopped auto-restart. Free the port (another proxy client may hold it) or change the port in the config, then start again."
-	exitReasonMissingText       = "A local file or folder the core needs is missing. Restarting cannot help. Check the paths in the config and the launcher's data folder, then start again."
-	exitReasonAPIText           = "The core's own API did not come up or rejected the launcher's credentials. Restarting cannot help. Check the Clash API settings (address and secret) and apply them."
-)
-
 // deterministicExitText — текст для пользователя по причине.
+//
+// Ключ передаётся в locale.T ЛИТЕРАЛОМ в каждой ветке: статический
+// проверяльщик локализации (tools/l10n/l10n_check) видит только литеральные
+// ключи, а ключ, собранный в переменной, он считает неиспользуемой записью
+// каталога и валит прогон с --strict. Поэтому строки живут прямо здесь, а не
+// в константах, которые передавались бы в locale.T переменной.
 func deterministicExitText(r exitReason) string {
 	switch r {
 	case exitReasonConfigInvalid:
-		return exitReasonConfigInvalidText
+		return locale.T("The core rejected its configuration, so restarting cannot help. The launcher has stopped auto-restart. Open the config, fix the reported field, save, then start again.")
 	case exitReasonPermission:
-		return exitReasonPermissionText
+		return locale.T("The core did not have the privileges it needs (TUN requires root). Restarting cannot help while the privileges are missing. Check that the root-owned core copy matches the current core, then start again.")
 	case exitReasonPortInUse:
-		return exitReasonPortInUseText
+		return locale.T("A local port the core needs is already in use, so restarting would fail the same way. The launcher has stopped auto-restart. Free the port (another proxy client may hold it) or change the port in the config, then start again.")
 	case exitReasonMissingResource:
-		return exitReasonMissingText
+		return locale.T("A local file or folder the core needs is missing. Restarting cannot help. Check the paths in the config and the launcher's data folder, then start again.")
 	case exitReasonAPIUnavailable:
-		return exitReasonAPIText
+		return locale.T("The core's own API did not come up or rejected the launcher's credentials. Restarting cannot help. Check the Clash API settings (address and secret) and apply them.")
 	}
 	return ""
 }
