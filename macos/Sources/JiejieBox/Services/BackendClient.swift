@@ -151,7 +151,49 @@ actor BackendClient {
         }
     }
 
-    /// Stop the helper: ask politely, then terminate.
+    /// Ask the backend to exit, then wait for it to do so.
+    ///
+    /// Distinct from `shutdown()`: this sends the `shutdown` command and gives
+    /// the backend time to run its own graceful exit — which is where the
+    /// core stop/keep decision lives. Killing the helper immediately after the
+    /// command would truncate that teardown and could leave the core in an
+    /// inconsistent state.
+    func shutdownGracefully() async {
+        // Best effort: the backend may already be gone.
+        try? await requestShutdown()
+
+        guard let proc = process else {
+            await cleanupAfterExit()
+            return
+        }
+
+        // Closing stdin is the backend's second signal: its read loop ends and
+        // it runs the same graceful path.
+        if let stdinHandle {
+            try? stdinHandle.close()
+            self.stdinHandle = nil
+        }
+
+        // Wait for the process to leave on its own before forcing anything.
+        for _ in 0..<50 where proc.isRunning {   // up to ~5 s
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if proc.isRunning {
+            log.warning("backend did not exit after shutdown; terminating")
+            proc.terminate()
+        }
+        await cleanupAfterExit()
+    }
+
+    private func cleanupAfterExit() async {
+        readTask?.cancel()
+        readTask = nil
+        process = nil
+        log.info("backend stopped")
+    }
+
+    /// Stop the helper without asking the backend to exit (used when the
+    /// connection is being torn down for a restart).
     func shutdown() async {
         readTask?.cancel()
         readTask = nil
@@ -241,14 +283,25 @@ actor BackendClient {
     }
 
     /// Send a request that returns no useful payload.
-    func call(_ method: String) async throws {
-        _ = try await rawRequest(method)
+    func call(_ method: String, params: [String: JSONValue]? = nil) async throws {
+        _ = try await rawRequest(method, params: params)
     }
 
-    private func rawRequest(_ method: String) async throws -> Data {
+    /// Send a request and decode its result, with parameters.
+    func request<T: Decodable>(_ method: String, params: [String: JSONValue], as type: T.Type) async throws -> T {
+        let data = try await rawRequest(method, params: params)
+        let envelope = try JSONDecoder().decode(ResponseEnvelope<T>.self, from: data)
+        if let error = envelope.error { throw error }
+        guard let result = envelope.result else {
+            throw BackendClientError.decodingFailed("neither result nor error in response")
+        }
+        return result
+    }
+
+    private func rawRequest(_ method: String, params: [String: JSONValue]? = nil) async throws -> Data {
         nextRequestID += 1
         let id = String(nextRequestID)
-        let request = BackendRequest(id: id, method: method)
+        let request = BackendRequest(id: id, method: method, params: params)
 
         return try await withCheckedThrowingContinuation { cont in
             pending[id] = cont
@@ -299,7 +352,70 @@ actor BackendClient {
 
     func startCore() async throws { try await call(BackendMethod.startCore) }
     func stopCore() async throws { try await call(BackendMethod.stopCore) }
+    func restartCore() async throws { try await call(BackendMethod.restartCore) }
     func requestShutdown() async throws { try await call(BackendMethod.shutdown) }
+
+    /// Switch the core engine. Returns the refreshed snapshot on success.
+    func setCoreMode(_ mode: String) async throws -> AppSnapshot {
+        try await request(BackendMethod.setCoreMode,
+                          params: ["mode": .string(mode)],
+                          as: AppSnapshot.self)
+    }
+
+    /// Toggle a persisted setting. Returns the settings the backend stored, so
+    /// the UI reflects what was written rather than what was clicked.
+    func setAutoPing(_ enabled: Bool) async throws -> SettingsState {
+        try await request(BackendMethod.setAutoPing,
+                          params: ["enabled": .bool(enabled)],
+                          as: SettingsState.self)
+    }
+
+    func setAutoUpdateSubscriptions(_ enabled: Bool) async throws -> SettingsState {
+        try await request(BackendMethod.setAutoUpdate,
+                          params: ["enabled": .bool(enabled)],
+                          as: SettingsState.self)
+    }
+
+    // MARK: - Proxies
+
+    func proxyGroups() async throws -> ProxyList {
+        try await request(BackendMethod.getProxyGroups, as: ProxyList.self)
+    }
+
+    /// List the nodes of a group. An empty group means "the config default".
+    func proxies(group: String) async throws -> ProxyList {
+        try await request(BackendMethod.getProxies,
+                          params: ["group": .string(group)],
+                          as: ProxyList.self)
+    }
+
+    func switchProxy(group: String, name: String) async throws -> ProxyList {
+        try await request(BackendMethod.switchProxy,
+                          params: ["group": .string(group), "name": .string(name)],
+                          as: ProxyList.self)
+    }
+
+    func testProxy(group: String, name: String) async throws -> ProxyList {
+        try await request(BackendMethod.testProxy,
+                          params: ["group": .string(group), "name": .string(name)],
+                          as: ProxyList.self)
+    }
+
+    func testProxyGroup(_ group: String) async throws -> ProxyList {
+        try await request(BackendMethod.testProxyGroup,
+                          params: ["group": .string(group)],
+                          as: ProxyList.self)
+    }
+
+    // MARK: - Maintenance
+
+    func reloadConfig() async throws -> MaintenanceResult {
+        try await request(BackendMethod.reloadConfig, as: MaintenanceResult.self)
+    }
+
+    func updateSubscriptions() async throws -> MaintenanceResult {
+        try await request(BackendMethod.updateSubscriptions, as: MaintenanceResult.self)
+    }
 }
 
 // MARK: - FileHandle line reading

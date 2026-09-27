@@ -3,10 +3,15 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"singbox-launcher/backend/protocol"
+	"singbox-launcher/core"
+	"singbox-launcher/internal/constants"
+	"singbox-launcher/internal/paths"
 )
 
 // TestHandshakeShape pins the handshake contract.
@@ -250,5 +255,129 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 
 	if count != 1 {
 		t.Fatalf("received %d events after unsubscribe, want 1", count)
+	}
+}
+
+// TestRunningStateTransitionEmitsCoreState — a running-state change the
+// frontend did NOT ask for must still reach it.
+//
+// This is the difference between a command-driven UI and a state-driven one:
+// a core that exits on its own, is killed externally or is restarted by the
+// supervisor never passes through start_core/stop_core, so emitting only after
+// a command would leave the menu bar showing "Running" forever. The backend
+// subscribes to RunningState's real transitions instead; this test drives the
+// transition directly, with no command involved.
+func TestRunningStateTransitionEmitsCoreState(t *testing.T) {
+	b := &Backend{}
+
+	var got []protocol.Event
+	unsub := b.Subscribe(func(ev protocol.Event) { got = append(got, ev) })
+	defer unsub()
+
+	// watchCoreState is what New() calls; with no controller it is a no-op,
+	// so the transition is exercised through the same path the app uses.
+	b.EmitCoreState()
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Event != protocol.EventCoreStateChanged {
+		t.Fatalf("event = %q, want %q", got[0].Event, protocol.EventCoreStateChanged)
+	}
+
+	// A second emit for the same state must still be delivered: the frontend
+	// de-duplicates by snapshot_seq, not by payload equality, and suppressing
+	// repeats here would hide a genuine reconnect.
+	b.EmitCoreState()
+	if len(got) != 2 {
+		t.Fatalf("got %d events after the second emit, want 2", len(got))
+	}
+	if got[1].Seq <= got[0].Seq {
+		t.Errorf("seq did not advance: %d then %d", got[0].Seq, got[1].Seq)
+	}
+}
+
+// TestWatchCoreStateIsSafeWithoutController — the subscription must not panic
+// when construction failed or the plugin has no bus.
+func TestWatchCoreStateIsSafeWithoutController(t *testing.T) {
+	b := &Backend{}
+	b.watchCoreState() // must not panic
+	if b.cancelCoreWatch != nil {
+		t.Error("cancelCoreWatch should stay nil when there is no controller")
+	}
+	// Shutdown must also tolerate the nil cancel function.
+	b.Shutdown()
+}
+
+// TestRealRunningStateTransitionReachesSubscribers — the end-to-end version of
+// the test above, against a real AppController and a throwaway data dir.
+//
+// The unit test proves the envelope; this one proves the wiring. It is the
+// check that would catch watchCoreState silently attaching to nothing (a nil
+// bus, a renamed event kind, a subscription registered after the first
+// transition), which is exactly the failure mode that would leave the menu bar
+// frozen on "Running" after the core dies.
+//
+// It never touches the user's real data directory and never starts sing-box:
+// it only flips the in-memory running flag.
+func TestRealRunningStateTransitionReachesSubscribers(t *testing.T) {
+	dir := t.TempDir()
+	layout, err := paths.Resolve(filepath.Join(dir, "jiejiebox-backend"),
+		func(key string) string {
+			if key == constants.EnvDataDir {
+				return filepath.Join(dir, "data")
+			}
+			return ""
+		}, "darwin", func(string) bool { return true })
+	if err != nil {
+		t.Skipf("cannot resolve a temp layout: %v", err)
+	}
+	if err := os.MkdirAll(layout.Data.Bin(), 0o755); err != nil {
+		t.Fatalf("cannot create the temp data dir: %v", err)
+	}
+
+	ac, err := core.NewAppController(layout, nil, nil, nil, nil)
+	if err != nil {
+		t.Skipf("cannot build a controller in this environment: %v", err)
+	}
+
+	b := &Backend{ac: ac}
+	var got []protocol.Event
+	unsub := b.Subscribe(func(ev protocol.Event) { got = append(got, ev) })
+	defer unsub()
+
+	b.watchCoreState()
+	if b.cancelCoreWatch == nil {
+		t.Fatal("watchCoreState did not attach to the event bus")
+	}
+
+	// The transition a crash, an external kill or the supervisor would cause.
+	ac.RunningState.Set(true)
+	if len(got) == 0 {
+		t.Fatal("a real running-state transition did not reach subscribers")
+	}
+	if got[0].Event != protocol.EventCoreStateChanged {
+		t.Fatalf("event = %q, want %q", got[0].Event, protocol.EventCoreStateChanged)
+	}
+
+	// A repeated Set is a no-op inside RunningState, so it must not emit
+	// again — otherwise the frontend would be spammed by every poll.
+	before := len(got)
+	ac.RunningState.Set(true)
+	if len(got) != before {
+		t.Errorf("a no-op Set emitted %d extra event(s)", len(got)-before)
+	}
+
+	// Stopping must emit too, so the menu bar reflects the core going away.
+	ac.RunningState.Set(false)
+	if len(got) <= before {
+		t.Error("the stop transition did not emit")
+	}
+
+	// After Shutdown the subscription is detached.
+	b.Shutdown()
+	after := len(got)
+	ac.RunningState.Set(true)
+	if len(got) != after {
+		t.Errorf("received %d event(s) after Shutdown", len(got)-after)
 	}
 }

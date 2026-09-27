@@ -112,6 +112,51 @@ Four layers that together define the product:
 3. Click **Wizard** → paste your subscription URL on the **Sources** tab → step through Directions / Rules / DNS / Settings / Files → **Save**.
 4. Back on **Local** → **Start**. Servers are in the same tab's left column; monitor traffic via the **Traffic Profiler** button in Diagnostics.
 
+> **On macOS this is a menu bar app**, not a windowed one — see below.
+
+## macOS: JiejieBox menu bar app
+
+The macOS build is **JiejieBox**, a native menu bar controller. It has no Dock
+icon and no main window: click the menu bar icon for status, Start/Stop, live
+speed, and everything else.
+
+It is a two-process design — a SwiftUI frontend and a headless Go backend
+speaking JSON over stdio:
+
+```
+JiejieBox.app/Contents/MacOS/JiejieBox            SwiftUI menu bar frontend
+JiejieBox.app/Contents/Helpers/jiejiebox-backend  Go backend (no GUI toolkit)
+```
+
+The Fyne desktop UI is **not** part of the macOS build: the backend is compiled
+with `-tags headless`, and CI fails if `fyne.io/` appears anywhere in its
+dependency graph. There is no runtime choice between two frontends.
+
+**What the menu bar covers:** core start/stop/restart, core engine mode
+(classic/daemon), proxy groups with node switching and latency tests, config
+reload, subscription updates, auto-ping and auto-update toggles, a live up/down
+speed readout, log/config access, and Launch at Login.
+
+**What it deliberately omits:** Remote Machines, the visual configurator, the
+full Traffic Profiler, and the diagnostics GUI. Those remain available on the
+Windows/Linux builds; the menu bar links to the config file instead of embedding
+an editor. `SPECS/MENU_BAR_CUTDOWN.md` records every removal and its reason.
+
+Your existing data is untouched — the app reads the same
+`~/Library/Application Support/singbox-launcher` directory as before, so
+config.json, subscriptions and custom cores keep working.
+
+Build it with:
+
+```bash
+./build/build_macos_app.sh        # SwiftUI frontend
+./build/package_macos.sh arm64    # + Go helper → .zip/.dmg
+```
+
+Full documentation: **[docs/MACOS_MENU_BAR.md](docs/MACOS_MENU_BAR.md)** (app
+guide, build notes, manual acceptance matrix) and
+**[docs/BACKEND_PROTOCOL.md](docs/BACKEND_PROTOCOL.md)** (the IPC contract).
+
 ### Command-line flags
 
 ```bash
@@ -121,6 +166,9 @@ singbox-launcher -start -tray   # combined — headless autostart scenario
 ```
 
 Useful for OS-level autostart (`LaunchAgents` / `Task Scheduler` / `systemd --user`) and for running the launcher as a background service that drives sing-box without showing a window.
+
+> These flags apply to the Windows/Linux Fyne builds. The macOS menu bar app uses
+> **Launch at Login** in the More screen instead.
 
 ## Feature tour
 
@@ -400,6 +448,9 @@ To run GUI tests locally, set `TEST_PACKAGE` manually inside the script or invok
 ## Documentation
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full project architecture map.
+- **[docs/MACOS_MENU_BAR.md](docs/MACOS_MENU_BAR.md)** — the JiejieBox macOS menu bar app: screens, build, toolchain constraints, acceptance matrix.
+- **[docs/BACKEND_PROTOCOL.md](docs/BACKEND_PROTOCOL.md)** — the JSON IPC contract between the SwiftUI frontend and the Go backend.
+- **[SPECS/MENU_BAR_CUTDOWN.md](SPECS/MENU_BAR_CUTDOWN.md)** — what the menu bar keeps, what it drops, and what landed from the merge.
 - **[SPECS/CONSTITUTION.md](SPECS/CONSTITUTION.md)** — architectural invariants.
 - **[SPECS/](SPECS/)** — 90+ feature specs (HWID protocol, traffic profiler, debug API, preset bundles, state-as-template-diff, atomic writes, typed event bus, daemon core engine, remote machines, …).
 - **[docs/API.md](docs/API.md)** — Debug API reference with a curl cookbook.

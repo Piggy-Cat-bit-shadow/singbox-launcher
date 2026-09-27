@@ -122,6 +122,88 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		}
 		return protocol.Response{ID: req.ID, Result: s.backend.coreState()}
 
+	case protocol.MethodRestartCore:
+		if err := s.backend.RestartCore(); err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: s.backend.coreState()}
+
+	case protocol.MethodSetCoreMode:
+		mode, _ := req.Params["mode"].(string)
+		if err := s.backend.SetCoreMode(mode); err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: s.backend.Snapshot()}
+
+	case protocol.MethodSetAutoPing:
+		enabled, _ := req.Params["enabled"].(bool)
+		if err := s.backend.SetAutoPing(enabled); err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: s.backend.settingsState()}
+
+	case protocol.MethodSetAutoUpdate:
+		enabled, _ := req.Params["enabled"].(bool)
+		if err := s.backend.SetAutoUpdateSubscriptions(enabled); err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: s.backend.settingsState()}
+
+	case protocol.MethodGetProxyGroups:
+		list, err := s.backend.ProxyGroups()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: list}
+
+	case protocol.MethodGetProxies:
+		group, _ := req.Params["group"].(string)
+		list, err := s.backend.Proxies(group)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: list}
+
+	case protocol.MethodSwitchProxy:
+		group, _ := req.Params["group"].(string)
+		name, _ := req.Params["name"].(string)
+		list, err := s.backend.SwitchProxy(group, name)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: list}
+
+	case protocol.MethodTestProxy:
+		group, _ := req.Params["group"].(string)
+		name, _ := req.Params["name"].(string)
+		list, err := s.backend.TestProxy(group, name)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: list}
+
+	case protocol.MethodTestProxyGroup:
+		group, _ := req.Params["group"].(string)
+		list, err := s.backend.TestProxyGroup(group)
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: list}
+
+	case protocol.MethodReloadConfig:
+		result, err := s.backend.ReloadConfig()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
+	case protocol.MethodUpdateSubscriptions:
+		result, err := s.backend.UpdateSubscriptions()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
 	case protocol.MethodShutdown:
 		// Acknowledge before tearing down so the client is not left waiting.
 		go s.backend.Shutdown()

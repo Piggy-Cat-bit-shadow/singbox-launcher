@@ -323,3 +323,161 @@ Still open and not addressed: the ten KEEP features with no backend method and
 no entry (restart core, mode switching, config reload, proxy groups/list/
 switch/latency, subscriptions update, auto-ping, auto-update, traffic rate).
 They are the remaining migration work, not polish.
+
+---
+
+# KEEP FEATURE ENTRY AUDIT — FINAL (post-implementation)
+
+This section supersedes the audit above, which was measured when the backend
+still had six methods and the SwiftUI app had ten controls. That snapshot is
+kept for the record; the numbers below are the ones that describe the shipped
+product.
+
+Measured by grep against the sources, not by intent:
+
+- methods: `Method*` constants in `backend/protocol/protocol.go`
+- dispatch: `protocol.Method*` cases in `backend/service/server.go`
+- client: `BackendMethod.*` call sites in `Services/BackendClient.swift`
+- entries: `model.*` call sites in `Sources/JiejieBox/Views/*.swift`
+
+## Backend surface — 17 methods, all dispatched
+
+`handshake`, `get_app_snapshot`, `subscribe`, `start_core`, `stop_core`,
+`restart_core`, `shutdown`, `set_core_mode`, `set_auto_ping`,
+`set_auto_update_subscriptions`, `get_proxy_groups`, `get_proxies`,
+`switch_proxy`, `test_proxy`, `test_proxy_group`, `reload_config`,
+`update_subscriptions`.
+
+Every one appears in the server dispatch switch and is called from the Swift
+client. There is no method implemented but unreachable, and no client call to a
+method the server does not handle.
+
+## Event surface — 9 events, all decoded
+
+`handshake_ready`, `core_state_changed`, `settings_changed`,
+`proxies_changed`, `proxy_selection_changed`, `traffic_rate`, `log_line`,
+`error`, `shutting_down`.
+
+## Feature coverage
+
+| Feature | Backend method | SwiftUI entry | Location | Status |
+|---|---|---|---|---|
+| Core start | `start_core` | Start button | Home | COVERED |
+| Core stop | `stop_core` | Stop button | Home | COVERED |
+| Core restart | `restart_core` | Restart Core row | More | COVERED |
+| Core state + version | `get_app_snapshot` / `core_state_changed` | status line, version | Home | COVERED |
+| Core mode (read) | `get_app_snapshot` | Core Mode row + Core Details | Home | COVERED |
+| Core mode (switch) | `set_core_mode` | Mode picker (disabled while running) | Core Mode | COVERED |
+| Config path | `get_app_snapshot` | Reveal Config, Open Config | Home, More | COVERED |
+| Config folder | `get_app_snapshot` | Open Config Folder | More | COVERED |
+| Config reload | `reload_config` | Reload Config row | More | COVERED |
+| Logs | `get_app_snapshot` (`logs_dir`) | Open Logs | More | COVERED |
+| Proxy groups | `get_proxy_groups` | Group menu | Proxies | COVERED |
+| Proxy list | `get_proxies` | Node list + search | Proxies | COVERED |
+| Proxy switch | `switch_proxy` | Node row (full-width hit target) | Proxies | COVERED |
+| Latency test (one) | `test_proxy` | Latency button per row | Proxies | COVERED |
+| Latency test (group) | `test_proxy_group` | Test All | Proxies | COVERED |
+| Update subscriptions | `update_subscriptions` | Update Subscriptions row | More | COVERED |
+| Auto ping after connect | `set_auto_ping` | Toggle row | More | COVERED |
+| Auto update subscriptions | `set_auto_update_subscriptions` | Toggle row | More | COVERED |
+| Traffic rate | `traffic_rate` event | Live ↓/↑ readout | Home | COVERED |
+| Launch at Login | frontend-only (`SMAppService`) | Toggle row | More | COVERED |
+| About | frontend-only | About row | More | COVERED |
+| Quit | `shutdown` | Quit button | Home footer | COVERED |
+
+## Report
+
+```
+Total KEEP features:             22
+With a visible entry:            22   (100%)
+Missing entry:                    0
+Backend methods without entry:    0
+Dead Swift entries:               0
+KEEP features missing BOTH sides:  0
+```
+
+The §129 cutover rule ("only remove Fyne when missing entry = 0") is now
+satisfied on its own terms. The Fyne tree was in fact removed earlier, in
+`8bc50113`, as an explicit owner decision; the gap that removal opened is
+closed by the table above rather than by the rule being waived.
+
+## Deliberate deletions (KEEP → DELETE, with reason)
+
+Recorded so "zero missing" is a measurement rather than an omission:
+
+| Removed | Reason |
+|---|---|
+| Remote Machines (whole feature) | Owner decision: single-machine menu bar. `Capabilities.remote` is still reported by the backend, but no UI is offered; the capability flag exists for protocol honesty, not as a hidden entry. |
+| Configurator / Wizard GUI | Writing config.json is the backend's job; the menu bar links to the file and folder instead. |
+| Traffic Profiler (sessions, DNS chains, per-process) | Replaced by the lightweight `traffic_rate` readout. The full profiler needs a window, not a menu bar. |
+| Diagnostics GUI, log viewer | Logs are opened in the system viewer; no log parsing UI. |
+| Settings page, Help/About pages (Fyne) | Reduced to the rows in More + a single About view. |
+| Appearance picker | Frontend-only preference; still present as a preference, not as a "feature". |
+| Core-mode stop-switch-restart automation | Not deleted but deliberately *not* implemented: the core refuses to switch while running, so the UI disables the control and explains why. See the mode section below. |
+
+## Semantics that were recovered rather than invented
+
+- **Quit does not stop the core.** `shutdown` reaches `GracefulExit`, and the
+  backend decides: classic stops the process, daemon leaves it running unless
+  `DaemonStopVPNOnExit` is set. The SwiftUI footer calls `quit()`, which calls
+  `shutdownGracefully()` — it never calls `stop_core` first. This is the same
+  policy the Fyne build had, reached through the protocol instead of through a
+  Fyne callback.
+- **Core Mode refuses while running.** `SwitchBackendMode` returns "stop the VPN
+  before switching the core engine"; the backend maps it to `mode_locked` and
+  the UI disables the row and explains. The switch is a config change, not a
+  live migration.
+
+## Test coverage added in this wave
+
+`backend/service/contract_test.go` and `backend/service/proxies_test.go` pin
+the wire shapes by raw JSON key, because a rename would break the Swift client
+at runtime with no compile error on either side:
+
+- core-state events reach subscribers on a *real* `RunningState` transition,
+  with no command involved, and no-op transitions do not emit
+- proxy group discovery, default-group selection from `route.final`, and the
+  unavailable-vs-empty distinction while the core is stopped
+- switch/test refusal codes (`core_not_running`, `bad_request`) and that every
+  new method is dispatched rather than answering `unknown_method`
+- traffic sampler: core totals preferred over summed connections, counter-reset
+  reads as zero, first sample emits no rate, start/stop are idempotent
+
+All fixtures are temporary directories; none touch the user's data directory,
+and no test starts or kills sing-box.
+
+## Data-layout regression found and fixed in this wave
+
+Moving the Go half from `Contents/MacOS/` (the old Fyne app) to
+`Contents/Helpers/jiejiebox-backend` silently broke bundle detection:
+`paths.IsAppBundle` recognised only `<X>.app/Contents/MacOS/…`, so the helper
+no longer looked like part of a bundle. The consequence was severe and quiet —
+the helper would resolve its data directory to the bundle itself and report the
+user's existing `config.json`, subscriptions and custom core as **missing**.
+
+Measured before the fix, running the packaged helper:
+
+```
+data_dir:    .../JiejieBox.app/Contents/Helpers
+config_path: .../JiejieBox.app/Contents/Helpers/bin/config.json
+config_exists: false
+```
+
+And after, with the same packaged binary:
+
+```
+data_dir:    /Users/jie/Library/Application Support/singbox-launcher
+config_path: /Users/jie/Library/Application Support/singbox-launcher/bin/config.json
+config_exists: true
+core_version: 1.15.0-jiejie-masquerade.5
+logs_dir:    /Users/jie/Library/Logs/singbox-launcher
+```
+
+`IsAppBundle` now treats anything under `Contents/` as inside the bundle, which
+is the property the layout actually depends on. The three call sites (data
+directory, layout switch, purge) all benefit, and `TestIsAppBundle` covers the
+helper path plus the negative cases.
+
+This is worth recording because it is the class of bug the menu-bar rewrite
+invites: the Go half kept working, every test passed, and the failure would
+only have appeared when a real user's config was treated as absent.

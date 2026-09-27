@@ -350,7 +350,15 @@ func TestIsAppBundle(t *testing.T) {
 		{"/Applications/Lx.app/Contents/MacOS/singbox-launcher", "linux", false},
 		{"/Users/u/singbox-launcher/singbox-launcher", "darwin", false},
 		{"/Users/u/.app/Contents/MacOS/x", "darwin", false},
-		{"/Users/u/Lx.app/Contents/Resources/x", "darwin", false},
+		// Anything under Contents counts, not only Contents/MacOS: the
+		// JiejieBox helper lives in Contents/Helpers, and treating it as a
+		// loose binary would scatter user data inside the .app bundle.
+		{"/Applications/Lx.app/Contents/Resources/x", "darwin", true},
+		{"/Applications/JiejieBox.app/Contents/Helpers/jiejiebox-backend", "darwin", true},
+		// A path that merely mentions Contents without being inside a
+		// bundle is not one.
+		{"/Users/u/Contents/MacOS/x", "darwin", false},
+		{"/Users/u/Lx.app/Frameworks/x", "darwin", false},
 	}
 	for _, tc := range cases {
 		if got := IsAppBundle(tc.exe, tc.goos); got != tc.want {

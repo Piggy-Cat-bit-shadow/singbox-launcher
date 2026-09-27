@@ -22,9 +22,28 @@
 
 ## 1. Overview
 
-`singbox-launcher` is a cross-platform (Windows / macOS / Linux) desktop GUI that
-manages a sing-box VPN core. It is written
-in Go with [Fyne](https://fyne.io) for the UI. The launcher downloads and pins a
+`singbox-launcher` manages a sing-box VPN core. The **JiejieBox** macOS build is
+a native menu bar app: a SwiftUI frontend (`MenuBarExtra`, no Dock icon) driving
+a headless Go backend over JSON IPC. The Windows and Linux builds retain the
+Fyne desktop GUI.
+
+> **macOS frontend status.** The Fyne UI was removed for macOS. There is no
+> second frontend and no runtime UI-toolkit selection: the shipped macOS app is
+> the SwiftUI menu bar app, and the Go half is built with `-tags headless`, which
+> drops Fyne from the binary entirely (CI fails if `fyne.io/` appears in the
+> backend dependency graph). See **[MACOS_MENU_BAR.md](MACOS_MENU_BAR.md)** for
+> the app guide and **[BACKEND_PROTOCOL.md](BACKEND_PROTOCOL.md)** for the IPC
+> contract.
+
+```
+JiejieBox.app/Contents/MacOS/JiejieBox           SwiftUI frontend
+JiejieBox.app/Contents/Helpers/jiejiebox-backend Go backend, headless
+                    │
+                    ▼
+            sing-box core (classic child process, or daemon service)
+```
+
+The launcher downloads and pins a
 sing-box binary — specifically the [`sing-box-lx`](https://github.com/Leadaxe/sing-box-lx)
 fork (`constants.RequiredCoreVersion` — see `internal/constants/constants.go` for the current pin; built with the `with_xhttp` +
 `with_awg` build tags and fetched from the fork's GitHub Releases; the fork builds
@@ -41,13 +60,17 @@ parsed, generated into `config.json`, and round-tripped to share URIs) and
 and assembles a working `config.json` from a user-edited **state** plus a
 versioned **template**. A configuration **wizard** (the "configurator") lets users
 edit subscription sources, global outbounds, routing rules, and DNS, all preview-
-rendered against the same resolver pipeline the final build uses.
+rendered against the same resolver pipeline the final build uses. On macOS the
+wizard is reached through the Windows/Linux GUI or the Debug HTTP API; the menu
+bar app links to the config file instead of embedding a configurator.
 
 The runtime side launches and supervises the sing-box process (crash/restart state
 machine, power sleep/resume handling, phantom WinTun-adapter cleanup on Windows),
 talks to the running core through the Clash API (proxy list, switch, delay tests),
 exposes an optional inbound Debug HTTP API for introspection/automation, and runs a
-Traffic Profiler.
+Traffic Profiler. The menu bar app surfaces the subset a menu bar needs — proxy
+groups/list/switch/latency and a lightweight 1 Hz speed readout — rather than the
+full profiler.
 
 Since SPEC 096–099 the "running core" is no longer necessarily a child process on
 this machine. A `CoreBackend` seam makes two engines interchangeable — *classic*
@@ -84,6 +107,7 @@ The codebase is organized into **eight layers**. The cardinal rule:
 | **L5** | ui-presentation (configurator MVP) | `ui/configurator/presentation`, `ui/configurator/business`, `ui/configurator/models`, `ui/configurator/configurator.go`, `ui/configurator/utils` | MVP layers for the wizard: **presentation** (orchestration + `fyne.Do` dispatch), **business** (pure logic behind the `UIUpdater` interface — never imports Fyne), **models** (pure `WizardModel` + slot/order containers). `business → models → core-domain`; `presentation → business`; **business never imports presentation**. |
 | **L6** | ui-views (sidebar shell / dialogs / root) | `ui` (`app.go`, `navigation.go`, `home.go`, `pages.go` + `*_tab.go`), `ui/configurator/tabs`, `ui/configurator/dialogs`, `ui/configurator/outbounds_configurator`, `ui/traffic` | Fyne views: sidebar shell + content host (SPEC 144), pages (Local = proxy list + core dashboard, Remote = proxy list + machine list, then Settings / Diagnostics / Help), configurator tabs/dialogs, outbounds configurator, traffic profiler window, and the per-machine windows (add-machine, connection settings, host telemetry, resources, machine profiler). Routing is two-layered (SPEC 145): `RouteID` is the presentation route the sidebar selects, and `routeDomain` maps it to a business `SectionID`. Section switching goes through the single `App.selectSection` in `ui/navigation.go` (sidebar and the retained `AppTabs` both call it), which owns the scope → panel activation → transport → refresh order; it runs only when the domain changes, so moving between Home/Proxies/Traffic does not re-apply transport. Subscribes to EventBus / UIService callbacks; reads core-domain for rendering. |
 | **L7** | ui-widgets / assets | `internal/fynewidget`, `ui/design`, `ui/icons`, `ui/components` | Reusable, self-contained Fyne building blocks and assets: hover rows, check-with-content, hover forwarding, tooltips, scroll gutter, embedded SVG icons, and the design system (`ui/design` — the application `fyne.Theme` with light/dark palettes, metrics, typography, and the sidebar/page/card/control primitives; SPEC 145). Pure Fyne composition, with no dependency on `core` (the former `click_redirect.go` exception was removed — see §3, V1). |
+| **L8** | macOS backend / IPC adapter | `backend/protocol`, `backend/service`, `backend/cmd/jiejiebox-backend` | The headless macOS backend. `protocol` is the wire DTO + method/event constants (no logic); `service` wraps an `AppController` and projects its state onto that wire — core lifecycle, settings, proxies, config maintenance, traffic rate; `cmd` is the stdio entry point. Sits **above** L3 and, like every other frontend, owns no business state: it is a projection of `core`. Built with `-tags headless`, so the Fyne packages are never linked in. See [BACKEND_PROTOCOL.md](BACKEND_PROTOCOL.md). |
 
 ### Dependency diagram
 
@@ -205,30 +229,29 @@ bus.Publish(events.Event{Kind: events.ConfigBuilt, Payload: events.ConfigBuiltPa
 
 | Event | Payload | Publisher(s) | Subscriber(s) | Status |
 |-------|---------|--------------|---------------|--------|
-| **VpnStateChanged** | `VpnStateChangedPayload` | `core/controller.go:474` (on `RunningState.Set` running-bool transition) | `core/auto_update.go:71` (retry failed sources), `ui/app.go` (refresh the sidebar core-status footer via `fyne.Do`; SPEC 144 replaced the emoji tab icon) | **Wired** — but dual-delivered: also fanned out via the legacy `UpdateCoreStatusFunc` callback. |
+| **VpnStateChanged** | `VpnStateChangedPayload` | `core/controller.go` (on `RunningState.Set` running-bool transition) | `core/auto_update.go:71` (retry failed sources), `backend/service/backend.go` (**the menu bar backend**: republishes the core state to the SwiftUI frontend and starts/stops the traffic sampler) | **Wired on macOS** — the backend subscribes here rather than only emitting after a command, so the menu bar follows the core when it dies on its own. |
 | **ConfigBuilt** | `ConfigBuiltPayload{OK bool}` | `core/rebuild.go:188` (OK=false on check failure), `core/rebuild.go:221` (OK=true on successful write+validate) | **none** | **Dead-subscribe** — published, never consumed via the bus. Config-status UI is currently driven by the `UpdateConfigStatusFunc` callback instead. |
 | **StateChanged** | `StateChangedPayload` | `core/services/state_service.go:207` (dirty-marker mutations), `ui/configurator/presentation/presenter_save.go:174` (on Configurator Save) | **none** | **Dead-subscribe** — published, never consumed via the bus. |
 
-### 4.3 Legacy UIService callbacks (still in use)
+### 4.3 UI callbacks (Fyne builds only)
 
-In parallel with the bus, `core/uiservice` holds a set of callback fields the UI
-registers handlers on. These pre-date the EventBus and remain the primary mechanism
-for several signals:
+On Windows and Linux, `internal/uiport` holds the callback interface the Fyne UI
+implements; `core` calls it through a nil-safe accessor that falls back to a
+no-op implementation when no UI is attached. On macOS the headless backend
+implements the same port as a no-op, which is what lets `core` stay unchanged
+across frontends instead of growing conditionals.
 
 | Callback | Role | Migration direction |
 |----------|------|---------------------|
-| `UpdateCoreStatusFunc` | VPN-state UI refresh (Start/Stop/Restart button states) | Parallel to `VpnStateChanged`. Retire in favor of the bus subscription. |
-| `UpdateConfigStatusFunc` | Config-status label / Update-button gating / dirty markers | Replace with a `ConfigBuilt` subscription in the Core dashboard. |
-| `UpdateParserProgressFunc` / `ShowSubsResultFunc` | Multi-shot subscription progress + final toast | **Keep** — multi-shot progress; could become a typed progress event later (low priority). |
-| `RefreshAPIFunc` / `ResetAPIStateFunc` / `AutoPingAfterConnectFunc` | Clash-API refresh/reset/auto-ping wiring | **Keep** — out of scope for SPEC 070 event cleanup. |
+| `UpdateCoreStatus` | VPN-state refresh (Start/Stop/Restart button states) | The macOS backend subscribes to `VpnStateChanged` instead. |
+| `UpdateConfigStatus` | Config-status label / dirty markers | Replace with a `ConfigBuilt` subscription. |
+| `ReportParserProgress` / `ReportSubsResult` | Multi-shot subscription progress + final result | **Keep** — multi-shot progress; could become a typed event later (low priority). |
+| `RefreshProxyList` / `ResetAPIState` / `AutoPingAfterConnect` | Clash-API refresh/reset/auto-ping wiring | **Keep** — the menu bar drives proxies over IPC on top of the same services. |
 
 > **Migration direction (ADR-070-3).** The target is: `VpnStateChanged`,
 > `ConfigBuilt`, and `StateChanged` are delivered **exclusively** through the
-> EventBus, and `UpdateCoreStatusFunc`/`UpdateConfigStatusFunc` are removed. That
-> consolidation is **SPEC 047 phase 6 / SPEC 070 P5** and is **not yet done** — the
-> dual-wiring described above is the current reality. The publish calls for
-> `ConfigBuilt`/`StateChanged` are kept (not deleted) precisely so the subscribers
-> can be wired without re-plumbing publishers.
+> EventBus, and the callback port shrinks further. On macOS that consolidation is
+> done for `VpnStateChanged`; the Fyne builds still dual-wire it.
 
 ---
 

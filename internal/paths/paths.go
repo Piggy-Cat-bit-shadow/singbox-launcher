@@ -163,7 +163,15 @@ func ProbeWritable(dir string) bool {
 	return true
 }
 
-// IsAppBundle — бинарь лежит внутри macOS-бандла (<X>.app/Contents/MacOS/…).
+// IsAppBundle — бинарь лежит внутри macOS-бандла (<X>.app/Contents/<любой>/…).
+//
+// Проверяется именно «внутри Contents», а не конкретно Contents/MacOS:
+// исполняемый файл приложения живёт в Contents/MacOS, но headless-хелпер
+// JiejieBox лежит в Contents/Helpers — и для раскладки важно только то, что
+// бинарь внутри бандла. Иначе хелпер считал бы своим домом каталог бандла и
+// писал config.json внутрь .app: раскладка разошлась бы с приложением, а
+// данные пользователя — с общими (~/Library/Application Support), которые
+// SPEC 144 требует сохранять.
 func IsAppBundle(exe string, goos string) bool {
 	if goos != "darwin" {
 		return false
@@ -171,7 +179,7 @@ func IsAppBundle(exe string, goos string) bool {
 	parts := strings.Split(filepath.ToSlash(exe), "/")
 	for i := 0; i+2 < len(parts); i++ {
 		if len(parts[i]) > len(".app") && strings.HasSuffix(parts[i], ".app") &&
-			parts[i+1] == "Contents" && parts[i+2] == "MacOS" {
+			parts[i+1] == "Contents" {
 			return true
 		}
 	}

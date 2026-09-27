@@ -1,80 +1,109 @@
-// MoreView — the secondary actions and the few real settings.
+// MoreView — secondary actions and the few real settings.
 //
-// Everything here either opens a file/folder through NSWorkspace (a frontend
-// responsibility) or is a preference the backend owns.
+// Grouped by what the user is trying to do, not by implementation: files are
+// opened with NSWorkspace (a frontend job), while the automation toggles are
+// business settings the backend owns and persists.
 
 import SwiftUI
-import ServiceManagement
 
 struct MoreView: View {
     let model: AppModel
-    /// Launch-at-login state lives on the model so the view stays free of
-    /// SwiftUI property wrappers (unavailable in this toolchain).
 
     var body: some View {
-        Form {
-            Section("Files") {
-                actionRow("Open Config", systemImage: "doc") {
-                    if let path = model.settings?.config_path {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                    }
+        VStack(alignment: .leading, spacing: 10) {
+            MenuSection("Core") {
+                MenuRow("Restart Core", systemImage: "arrow.clockwise") {
+                    Task { await model.restartCore() }
                 }
-                actionRow("Open Config Folder", systemImage: "folder") {
-                    if let dir = model.settings?.data_dir {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: dir))
-                    }
+                if model.pending == .restarting {
+                    PendingRow("Restarting…")
                 }
-                actionRow("Open Logs", systemImage: "text.alignleft") {
-                    // The backend reports the log directory; Swift must not
-                    // guess it, or the button silently points nowhere when the
-                    // layout changes.
-                    if let logs = model.settings?.logs_dir, !logs.isEmpty {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: logs))
-                    }
-                }
-                .disabled(model.settings?.logs_dir.isEmpty ?? true)
             }
 
-            Section("Startup") {
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { model.launchAtLogin },
-                    set: { model.setLaunchAtLogin($0) }
-                ))
-            }
-
-            Section("Appearance") {
-                Picker("Appearance", selection: Binding(
-                    get: { model.appearance },
-                    set: { model.appearance = $0 }
-                )) {
-                    ForEach(AppModel.AppearancePreference.allCases) { pref in
-                        Text(pref.label).tag(pref)
-                    }
+            MenuSection("Automation") {
+                toggleRow("Auto Ping After Connect",
+                          isOn: model.settings?.auto_ping_after_connect ?? false,
+                          help: "Test proxies shortly after the core connects.") { value in
+                    Task { await model.setAutoPing(value) }
                 }
-                .pickerStyle(.segmented)
+                toggleRow("Auto Update Subscriptions",
+                          isOn: model.settings?.auto_update_subscriptions ?? false,
+                          help: "Refresh subscription data on a schedule.") { value in
+                    Task { await model.setAutoUpdateSubscriptions(value) }
+                }
+                toggleRow("Launch at Login",
+                          isOn: model.launchAtLogin,
+                          help: "Start JiejieBox when you sign in.") { value in
+                    model.setLaunchAtLogin(value)
+                }
             }
 
-            Section {
-                actionRow("About JiejieBox", systemImage: "info.circle") {
+            MenuSection("Configuration") {
+                MenuRow("Reload Config", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await model.reloadConfig() }
+                }
+                MenuRow("Update Subscriptions", systemImage: "arrow.down.circle") {
+                    Task { await model.updateSubscriptions() }
+                }
+                switch model.pending {
+                case .reloadingConfig: PendingRow("Rebuilding config.json…")
+                case .updatingSubscriptions: PendingRow("Updating subscriptions…")
+                default: EmptyView()
+                }
+            }
+
+            MenuSection("Files") {
+                MenuRow("Open Config", systemImage: "doc") { model.revealConfig() }
+                    .disabled(model.settings?.config_path.isEmpty ?? true)
+                MenuRow("Open Config Folder", systemImage: "folder") {
+                    model.openConfigFolder()
+                }
+                .disabled(model.settings?.data_dir.isEmpty ?? true)
+                MenuRow("Open Logs", systemImage: "text.alignleft") { model.openLogs() }
+                    .disabled(model.settings?.logs_dir.isEmpty ?? true)
+            }
+
+            MenuSection {
+                MenuRow("About JiejieBox", systemImage: "info.circle", showsChevron: true) {
                     model.path.append(.about)
                 }
             }
         }
-        .formStyle(.grouped)
+        .padding(.vertical, 8)
     }
 
-    private func actionRow(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack {
-                Label(title, systemImage: systemImage)
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
+    /// A settings toggle presented as a full-width row.
+    ///
+    /// Built from MenuRow plus a Switch so the whole row is the hit target and
+    /// the label belongs to the control, rather than a bare Switch the user
+    /// has to aim at precisely.
+    private func toggleRow(_ title: String, isOn: Bool, help: String,
+                           set: @escaping (Bool) -> Void) -> some View {
+        MenuRow(title, action: { set(!isOn) },
+                trailing: {
+                    Toggle("", isOn: Binding(get: { isOn }, set: set))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .allowsHitTesting(false)
+                })
+            .help(help)
+    }
+}
+
+/// A row showing that an operation is in flight.
+struct PendingRow: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.caption).foregroundStyle(.secondary)
+            Spacer()
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, Metrics.rowPaddingH)
+        .frame(minHeight: 24)
     }
-
 }

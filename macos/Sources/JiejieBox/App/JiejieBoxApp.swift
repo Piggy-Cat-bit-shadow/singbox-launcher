@@ -46,13 +46,17 @@ struct RootView: View {
             HomeView(model: model)
                 .navigationDestination(for: AppModel.Screen.self) { screen in
                     switch screen {
+                    case .coreDetails: CoreDetailsView(model: model)
                     case .coreMode: CoreModeView(model: model)
+                    case .proxies: ProxiesView(model: model)
                     case .more: MoreView(model: model)
                     case .about: AboutView(model: model)
                     }
                 }
         }
-        .frame(width: 348)
+        // ~400pt: enough for real information, still a menu-bar utility.
+        .frame(minWidth: Metrics.panelWidth, maxWidth: Metrics.panelWidth,
+               minHeight: 320, maxHeight: 640)
         .preferredColorScheme(model.appearance.colorScheme)
     }
 }

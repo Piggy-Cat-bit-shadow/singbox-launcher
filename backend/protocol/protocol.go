@@ -40,6 +40,28 @@ const (
 	MethodStopCore = "stop_core"
 	// MethodShutdown asks the backend to exit cleanly.
 	MethodShutdown = "shutdown"
+	// MethodRestartCore restarts the core, honouring the graceful-exit policy.
+	MethodRestartCore = "restart_core"
+	// MethodSetCoreMode switches between the classic and daemon engines.
+	MethodSetCoreMode = "set_core_mode"
+	// MethodSetAutoPing toggles the post-connect ping pass.
+	MethodSetAutoPing = "set_auto_ping"
+	// MethodSetAutoUpdate toggles automatic subscription updates.
+	MethodSetAutoUpdate = "set_auto_update_subscriptions"
+	// MethodGetProxyGroups lists the selector groups from the active config.
+	MethodGetProxyGroups = "get_proxy_groups"
+	// MethodGetProxies lists the proxies of one selector group.
+	MethodGetProxies = "get_proxies"
+	// MethodSwitchProxy selects a proxy inside a selector group.
+	MethodSwitchProxy = "switch_proxy"
+	// MethodTestProxy measures one proxy's latency.
+	MethodTestProxy = "test_proxy"
+	// MethodTestProxyGroup measures latency for every proxy in a group.
+	MethodTestProxyGroup = "test_proxy_group"
+	// MethodReloadConfig rebuilds config.json from the current state.
+	MethodReloadConfig = "reload_config"
+	// MethodUpdateSubscriptions refreshes all subscription nodes.
+	MethodUpdateSubscriptions = "update_subscriptions"
 )
 
 // Request is a single client-to-backend call.
@@ -48,7 +70,9 @@ type Request struct {
 	ID string `json:"id"`
 	// Method is one of the Method* constants.
 	Method string `json:"method"`
-	// Params carries method-specific arguments. Nil for no-argument methods.
+	// Params carries method-specific arguments as arbitrary JSON values, so a
+	// request can send strings, booleans, numbers or lists without the client
+	// stringifying everything.
 	Params map[string]any `json:"params,omitempty"`
 }
 
@@ -86,6 +110,14 @@ const (
 	EventError = "error"
 	// EventShuttingDown announces that the backend is exiting.
 	EventShuttingDown = "shutting_down"
+	// EventSettingsChanged reports that business settings changed.
+	EventSettingsChanged = "settings_changed"
+	// EventProxiesChanged reports that the proxy list was reloaded.
+	EventProxiesChanged = "proxies_changed"
+	// EventProxySelectionChanged reports that a group switched its node.
+	EventProxySelectionChanged = "proxy_selection_changed"
+	// EventTrafficRate carries a periodic up/down speed sample.
+	EventTrafficRate = "traffic_rate"
 )
 
 // Error is a structured failure. The frontend decides the user-facing
@@ -200,6 +232,78 @@ type SettingsState struct {
 	// folders itself; the backend only reports where they are, so the path
 	// never has to be duplicated in Swift.
 	LogsDir string `json:"logs_dir"`
+}
+
+// ProxyGroup is one selector group the user can switch.
+//
+// Groups come from the active config's selector outbounds, and Selected is the
+// tag the group has chosen right now, so the frontend renders the checkmark
+// from backend truth rather than from what it last clicked.
+type ProxyGroup struct {
+	// Name is the exact outbound tag (used for switch requests).
+	Name string `json:"name"`
+	// DisplayName is the human-facing label.
+	DisplayName string `json:"display_name"`
+	// Type is the outbound type reported by the core ("Selector", "URLTest").
+	Type string `json:"type,omitempty"`
+	// Selected is the tag currently in use, empty when unknown.
+	Selected string `json:"selected,omitempty"`
+	// SelectedDisplay is Selected, normalised for display.
+	SelectedDisplay string `json:"selected_display,omitempty"`
+	// Count is how many proxies the group contains, when known.
+	Count int `json:"count"`
+}
+
+// Proxy is one node inside a group.
+//
+// Delay is milliseconds, or -1 when it has never been measured: a missing
+// measurement is not the same as an unreachable node, and the UI shows the
+// difference instead of printing "0 ms".
+type Proxy struct {
+	// Name is the exact tag from the Clash API (used for switch/test).
+	Name string `json:"name"`
+	// DisplayName is the normalised label for the UI.
+	DisplayName string `json:"display_name"`
+	// Type is the proxy type reported by the core ("VLESS", "Selector", …).
+	Type string `json:"type,omitempty"`
+	// Delay is the last measured latency in ms; -1 means "not measured".
+	Delay int64 `json:"delay"`
+	// Group is the group this proxy was listed from, so a switch request
+	// always carries a consistent (group, name) pair.
+	Group string `json:"group"`
+	// Selected reports whether this proxy is the group's current choice.
+	Selected bool `json:"selected"`
+	// LastError is the last ping failure for this proxy, if any.
+	LastError string `json:"last_error,omitempty"`
+}
+
+// ProxyList is the reply to MethodGetProxies and MethodGetProxyGroups.
+type ProxyList struct {
+	// Groups are the switchable selector groups.
+	Groups []ProxyGroup `json:"groups"`
+	// Proxies are the nodes of the requested group; empty when the request
+	// asked for the group list only.
+	Proxies []Proxy `json:"proxies"`
+	// Group echoes the group the proxies were listed from.
+	Group string `json:"group,omitempty"`
+	// Available is false when no Clash API endpoint is configured, which is
+	// the normal state while the core is stopped. The frontend uses it to
+	// show "start the core first" instead of an empty list.
+	Available bool `json:"available"`
+}
+
+// TrafficRate is one periodic speed sample.
+//
+// Up and Down are bytes per second over the interval since the previous
+// sample; TotalUp and TotalDown are the cumulative counters, so a client that
+// joins late can still show lifetime totals.
+type TrafficRate struct {
+	Up        int64 `json:"up"`
+	Down      int64 `json:"down"`
+	TotalUp   int64 `json:"total_up"`
+	TotalDown int64 `json:"total_down"`
+	// AtUnixMS is when the sample was taken, in milliseconds since the epoch.
+	AtUnixMS int64 `json:"at_unix_ms"`
 }
 
 // Core state values used by CoreState.State.

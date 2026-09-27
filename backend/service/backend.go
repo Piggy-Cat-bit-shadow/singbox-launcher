@@ -13,6 +13,7 @@ import (
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
+	"singbox-launcher/core/events"
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
 	"singbox-launcher/internal/locale"
@@ -32,6 +33,20 @@ type Backend struct {
 	// subscribers receive every emitted event. The IPC layer registers one
 	// writer; tests register their own.
 	subscribers []func(protocol.Event)
+
+	// cancelCoreWatch detaches the running-state subscription. Nil when the
+	// controller has no event bus (a construction failure already returned).
+	cancelCoreWatch events.Cancel
+	// traffic is the lazy speed sampler, created on first use and stopped
+	// with the core.
+	traffic     *TrafficSampler
+	trafficOnce sync.Once
+}
+
+// Traffic returns the process-wide speed sampler.
+func (b *Backend) Traffic() *TrafficSampler {
+	b.trafficOnce.Do(func() { b.traffic = NewTrafficSampler(b) })
+	return b.traffic
 }
 
 // New builds the backend for a resolved data layout.
@@ -43,7 +58,37 @@ func New(layout paths.Layout) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Backend{ac: ac}, nil
+	b := &Backend{ac: ac}
+	b.watchCoreState()
+	return b, nil
+}
+
+// watchCoreState subscribes to real running-state transitions.
+//
+// Emitting only after a command would mean the frontend never learns about a
+// change it did not cause — a core that crashes, exits on its own, is killed
+// from outside, or is stopped by the crash-handler supervisor. RunningState.Set
+// dedups no-op calls and publishes VpnStateChanged on the actual transition, so
+// subscribing there makes the frontend event-driven rather than
+// command-driven, without inventing a polling loop or a second source of truth.
+func (b *Backend) watchCoreState() {
+	if b.ac == nil || b.ac.EventBus == nil {
+		return
+	}
+	b.cancelCoreWatch = b.ac.EventBus.Subscribe(events.VpnStateChanged, func(ev events.Event) {
+		// Run the sampler exactly while the core is up: a menu bar should
+		// not keep polling a socket that is not listening.
+		if p, ok := ev.Payload.(events.VpnStateChangedPayload); ok {
+			if p.Running {
+				b.Traffic().Start()
+			} else {
+				b.Traffic().Stop()
+			}
+		}
+		// RunningState.Set can fire from any goroutine; emit is mutex-guarded,
+		// so publishing straight from the bus handler is safe.
+		b.EmitCoreState()
+	})
 }
 
 // Handshake returns the version and capability block.
@@ -238,6 +283,116 @@ func (b *Backend) Shutdown() {
 		return
 	}
 	debuglog.InfoLog("backend: shutdown requested")
+	if b.cancelCoreWatch != nil {
+		b.cancelCoreWatch()
+		b.cancelCoreWatch = nil
+	}
+	if b.traffic != nil {
+		b.traffic.Stop()
+	}
 	b.emit(protocol.EventShuttingDown, nil)
 	b.ac.GracefulExit()
+}
+
+// RestartCore restarts the core through the existing kill-and-let-the-watcher
+// path, then publishes the resulting state.
+//
+// The restart logic is not reimplemented here: KillSingBoxForRestart is the
+// same call the old UI's Restart invoked, and it leaves the supervisor to
+// bring the process back, which is what makes the "restarting" state visible
+// in between.
+func (b *Backend) RestartCore() error {
+	if b.ac == nil {
+		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
+	}
+	debuglog.InfoLog("backend: restart_core requested")
+	core.KillSingBoxForRestart()
+	b.EmitCoreState()
+	return nil
+}
+
+// SetCoreMode switches between the classic and daemon engines.
+//
+// Delegates to SwitchBackendMode, which owns the real semantics: it refuses
+// while the VPN is running (a live classic process cannot be handed to the
+// daemon and vice versa) and performs the engine-specific handover, including
+// removing the system proxy the launcher installed for the daemon.
+//
+// The choice is persisted here, mirroring what the old settings UI did
+// (load-mutate-save), so the mode survives a restart.
+func (b *Backend) SetCoreMode(mode string) error {
+	if b.ac == nil {
+		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
+	}
+	if mode != string(core.BackendClassic) && mode != string(core.BackendDaemon) {
+		return &protocol.Error{
+			Code:        "bad_mode",
+			Message:     "mode must be \"classic\" or \"daemon\"",
+			Recoverable: false,
+		}
+	}
+
+	if err := b.ac.SwitchBackendMode(core.BackendMode(mode)); err != nil {
+		// The running-state refusal is an ordinary, expected outcome — the
+		// frontend shows "stop the core first", not a crash report.
+		return &protocol.Error{
+			Code:        "mode_locked",
+			Message:     err.Error(),
+			Recoverable: true,
+		}
+	}
+
+	binDir := b.ac.FileService.Layout.Data.Bin()
+	st := locale.LoadSettings(binDir)
+	st.CoreBackendMode = mode
+	if err := locale.SaveSettings(binDir, st); err != nil {
+		debuglog.WarnLog("backend: core mode switched but persisting failed: %v", err)
+		b.emit(protocol.EventSettingsChanged, b.settingsState())
+		return &protocol.Error{
+			Code:        "persist_failed",
+			Message:     "the engine switched, but saving the choice failed: " + err.Error(),
+			Recoverable: true,
+		}
+	}
+
+	debuglog.InfoLog("backend: core mode set to %q", mode)
+	b.emit(protocol.EventSettingsChanged, b.settingsState())
+	b.EmitCoreState()
+	return nil
+}
+
+// SetAutoPing toggles the post-connect ping pass.
+func (b *Backend) SetAutoPing(enabled bool) error {
+	return b.updateSettings(func(st *locale.Settings) {
+		st.AutoPingAfterConnectDisabled = !enabled
+	})
+}
+
+// SetAutoUpdateSubscriptions toggles automatic subscription updates.
+func (b *Backend) SetAutoUpdateSubscriptions(enabled bool) error {
+	return b.updateSettings(func(st *locale.Settings) {
+		st.SubscriptionAutoUpdateDisabled = !enabled
+	})
+}
+
+// updateSettings applies a change to settings.json and publishes it.
+//
+// Settings live on disk (the backend owns them); the frontend only ever sees
+// the result, so a toggle cannot drift from what was actually saved.
+func (b *Backend) updateSettings(mutate func(*locale.Settings)) error {
+	if b.ac == nil {
+		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
+	}
+	binDir := b.ac.FileService.Layout.Data.Bin()
+	st := locale.LoadSettings(binDir)
+	mutate(&st)
+	if err := locale.SaveSettings(binDir, st); err != nil {
+		return &protocol.Error{
+			Code:        "persist_failed",
+			Message:     "could not save settings: " + err.Error(),
+			Recoverable: true,
+		}
+	}
+	b.emit(protocol.EventSettingsChanged, b.settingsState())
+	return nil
 }
