@@ -72,7 +72,7 @@ struct HomeView: View {
         Button {
             Task { await model.toggleCore() }
         } label: {
-            if model.core?.state.isTransitioning == true {
+            if primaryIsBusy {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text(primaryTitle)
@@ -92,7 +92,13 @@ struct HomeView: View {
         .help(primaryHelp)
     }
 
+    /// The button's label, reflecting BOTH the reported state and a command in
+    /// flight. The pending case matters because `start_core` returns before the
+    /// core reaches `starting`, so relying on the state alone left a window
+    /// where the button still read "Start" after being clicked.
     private var primaryTitle: String {
+        if model.pending == .startingCore { return "Starting…" }
+        if model.pending == .stoppingCore { return "Stopping…" }
         guard let state = model.core?.state else { return "Start" }
         switch state {
         case .running: return "Stop"
@@ -101,6 +107,13 @@ struct HomeView: View {
         case .error: return "Retry"
         case .stopped: return "Start"
         }
+    }
+
+    /// True while the primary button should show a spinner.
+    private var primaryIsBusy: Bool {
+        model.pending == .startingCore
+            || model.pending == .stoppingCore
+            || model.core?.state.isTransitioning == true
     }
 
     /// Disabled only during a transition or when there is nothing to start, with

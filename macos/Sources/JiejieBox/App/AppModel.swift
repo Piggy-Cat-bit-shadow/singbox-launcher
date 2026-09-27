@@ -49,6 +49,8 @@ final class AppModel {
     /// a second source of truth about the core.
     enum PendingOperation: Equatable {
         case switchingMode(String)
+        case startingCore
+        case stoppingCore
         case restarting
         case reloadingConfig
         case updatingSubscriptions
@@ -106,6 +108,60 @@ final class AppModel {
     private(set) var proxiesAvailable: Bool = false
     /// True while a proxy/test request is in flight.
     private(set) var proxiesLoading: Bool = false
+
+    /// Why the node list is not usable, if it is not.
+    ///
+    /// One explicit state rather than a scatter of booleans, because the
+    /// screen has to tell apart causes that look identical in data but need
+    /// completely different messages and actions: a stopped core, an
+    /// unreachable backend, an empty config, and a config that is merely out of
+    /// date. Collapsing them produced a single "No nodes in this group" for
+    /// every case, which is wrong for most of them.
+    enum ProxyListState: Equatable {
+        /// Nothing requested yet.
+        case idle
+        /// A load is in flight and there is nothing to show yet.
+        case loading
+        /// The backend is not answering; nothing can be known.
+        case backendUnavailable
+        /// The core is not running, so the Clash API has no node list.
+        case coreStopped
+        /// The config has no selector groups at all.
+        case noGroups
+        /// The built config is behind the state; a reload is needed.
+        case configStale
+        /// The selected group genuinely has no nodes.
+        case empty
+        /// A group was never selected, so no nodes were requested.
+        case noGroupSelected
+        /// Nodes are present.
+        case ready
+        /// The last load failed; `proxyError` carries the backend's message.
+        case failed
+    }
+
+    /// The backend's message for the last failed proxy load, if any.
+    private(set) var proxyError: String?
+
+    /// What the Proxies screen should present.
+    ///
+    /// Ordered by what the user can act on: an unreachable backend outranks a
+    /// stale config, because nothing else can be determined until it answers.
+    var proxyListState: ProxyListState {
+        if shouldShowBackendDown { return .backendUnavailable }
+        if let _ = proxyError, proxies.isEmpty, !proxiesLoading { return .failed }
+        if proxiesLoading && proxies.isEmpty { return .loading }
+        if core?.state != .running { return .coreStopped }
+        if core?.config_stale == true && proxies.isEmpty { return .configStale }
+        if groups.isEmpty {
+            // Distinguish "the config defines no groups" from "we have not
+            // asked yet": they need different messages.
+            return proxiesAvailable ? .noGroups : .idle
+        }
+        if selectedGroup.isEmpty { return .noGroupSelected }
+        if proxies.isEmpty { return .empty }
+        return .ready
+    }
 
     /// Free-text filter over the node list. Purely a view concern, kept here
     /// because two views (the list and its empty state) must agree on it.
@@ -416,8 +472,24 @@ final class AppModel {
     // Every command goes to the backend and waits for its event. The UI never
     // flips state itself.
 
-    func startCore() async { await run { try await self.client.startCore() } }
-    func stopCore() async { await run { try await self.client.stopCore() } }
+    /// Start the core.
+    ///
+    /// Uses `withPending` like every other command. `start_core` returns as soon
+    /// as the start is REQUESTED — the transition to `running` happens
+    /// asynchronously — so without a pending marker a rapid double click sent two
+    /// start commands before the state had changed to `starting`.
+    func startCore() async {
+        await withPending(.startingCore, success: nil) {
+            try await self.client.startCore()
+        }
+    }
+
+    /// Stop the core. Same reasoning as `startCore`.
+    func stopCore() async {
+        await withPending(.stoppingCore, success: nil) {
+            try await self.client.stopCore()
+        }
+    }
 
     func restartCore() async {
         await withPending(.restarting, success: "Core restarting…") {
@@ -460,12 +532,19 @@ final class AppModel {
     /// API hiccup is worse than showing slightly stale ones.
     func loadProxies(group: String? = nil) async {
         proxiesLoading = true
+        proxyError = nil
         defer { proxiesLoading = false }
         do {
             let target = group ?? selectedGroup
+            // An empty group means "the config default", which the backend
+            // resolves; asking for "" is deliberate, not a bug.
             let list = try await client.proxies(group: target)
             apply(list)
         } catch {
+            // Recorded separately from `lastError` so the Proxies screen can
+            // explain its own failure inline instead of only raising a banner
+            // on Home. Both are set: the banner is the cross-screen signal.
+            proxyError = error.localizedDescription
             lastError = error.localizedDescription
         }
     }
@@ -473,21 +552,41 @@ final class AppModel {
     /// Load the group list (used when the Proxy screen first appears).
     func loadGroups() async {
         proxiesLoading = true
+        proxyError = nil
         defer { proxiesLoading = false }
+
         do {
             let list = try await client.proxyGroups()
             groups = list.groups
             proxiesAvailable = list.available
+
             // Prefer the config's default group, then the first one, then
-            // wherever we already were.
-            if selectedGroup.isEmpty || !list.groups.contains(where: { $0.name == selectedGroup }) {
+            // wherever we already were — but only keep a remembered group if
+            // the config still defines it. Pointing at a group that no longer
+            // exists made every later load fail with "group not found".
+            if selectedGroup.isEmpty
+                || !list.groups.contains(where: { $0.name == selectedGroup }) {
                 selectedGroup = list.group ?? list.groups.first?.name ?? ""
             }
-            if !selectedGroup.isEmpty {
-                let nodes = try await client.proxies(group: selectedGroup)
-                apply(nodes)
-            }
         } catch {
+            proxyError = error.localizedDescription
+            lastError = error.localizedDescription
+            return
+        }
+
+        // The node load is a SEPARATE step with its own failure. Bundling it
+        // into the group request meant a node-level error was reported as a
+        // group-level one, blaming the wrong thing and discarding a group list
+        // that had in fact loaded fine.
+        guard !selectedGroup.isEmpty else { return }
+
+        proxiesLoading = true
+        defer { proxiesLoading = false }
+        do {
+            let nodes = try await client.proxies(group: selectedGroup)
+            apply(nodes)
+        } catch {
+            proxyError = error.localizedDescription
             lastError = error.localizedDescription
         }
     }
@@ -989,7 +1088,14 @@ final class AppModel {
     }
 
     /// Convenience for the primary button.
+    ///
+    /// Guarded against a click while a command is already in flight: the button
+    /// is disabled in that window, and this is the second line of defence.
     func toggleCore() async {
+        guard !coreOperationBusy else {
+            lastError = "Wait for the current core operation to finish."
+            return
+        }
         guard let state = core?.state else { return }
         switch state {
         case .running, .starting:
@@ -1039,12 +1145,15 @@ final class AppModel {
                 self.settings = settings
             }
         case BackendEventName.proxiesChanged:
-            // The backend rebuilt the config or refreshed subscriptions, so
-            // the node list we hold is stale. Reloading only when the Proxy
-            // screen has ever been opened avoids paying for it on every
-            // background update.
-            if !selectedGroup.isEmpty {
-                await loadProxies(group: selectedGroup)
+            // The backend rebuilt the config or refreshed subscriptions, so the
+            // node list we hold is stale. Only reload once the Proxy screen has
+            // been opened, so a background update does not pay for it.
+            //
+            // GROUPS FIRST. A rebuild can rename or remove selector groups, and
+            // loading nodes for a group that no longer exists fails — leaving
+            // the stale name in place and the list empty. loadGroups() re-picks
+            // a valid group, then loads its nodes.
+            if !selectedGroup.isEmpty || !groups.isEmpty {
                 await loadGroups()
             }
         case BackendEventName.proxySelectionChanged:

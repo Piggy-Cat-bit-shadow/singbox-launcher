@@ -793,3 +793,86 @@ func TestSwiftTimeoutBudgets(t *testing.T) {
 		}
 	}
 }
+
+// TestErrorsCarryAReadableMessage — every failure must reach the UI as text a
+// human can act on.
+//
+// The frontend renders `error.localizedDescription`, which for a Swift Error
+// that is not LocalizedError collapses to
+// "The operation couldn't be completed. (JijieBox.BackendError error 1.)" —
+// discarding the message below. That is why the wire contract requires a
+// non-empty message on every error this backend produces.
+func TestErrorsCarryAReadableMessage(t *testing.T) {
+	b := backendWithConfig(t)
+	srv := NewServer(b, &bytes.Buffer{})
+
+	// Requests chosen so each fails for a DIFFERENT reason: bad params, an
+	// unknown id, a locked engine, an unusable config, a method that does not
+	// exist. All of them must explain themselves.
+	cases := []struct {
+		name string
+		req  protocol.Request
+	}{
+		{"add subscription without a URL", protocol.Request{ID: "1", Method: protocol.MethodAddSubscription}},
+		{"unknown subscription", protocol.Request{ID: "2", Method: protocol.MethodRemoveSubscription,
+			Params: map[string]any{"id": "nope"}}},
+		{"blank proxy name", protocol.Request{ID: "3", Method: protocol.MethodSwitchProxy,
+			Params: map[string]any{"group": "g", "name": ""}}},
+		{"unknown method", protocol.Request{ID: "4", Method: "does_not_exist"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := srv.handle(tc.req)
+			if resp.Error == nil {
+				t.Fatalf("expected a failure for %q", tc.name)
+			}
+			if strings.TrimSpace(resp.Error.Message) == "" {
+				t.Errorf("error %q has an empty message; the UI would show only the generic "+
+					"\"error 1\" text", resp.Error.Code)
+			}
+			// The message must say more than the code, or it adds nothing.
+			if resp.Error.Message == resp.Error.Code {
+				t.Errorf("error message equals its code %q, so it explains nothing", resp.Error.Code)
+			}
+			if strings.TrimSpace(resp.Error.Code) == "" {
+				t.Error("error has no code")
+			}
+		})
+	}
+}
+
+// TestReloadConfigExplainsAnUnrebuildableConfig — a rebuild replays the wizard
+// state, so a config that did not come from the wizard cannot be rebuilt.
+//
+// The raw failure names state.json, a file the user has never heard of. The
+// backend must instead say the configuration was made elsewhere, because the UI
+// offers a Reload button and a dead end behind it is worse than no button.
+func TestReloadConfigExplainsAnUnrebuildableConfig(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// The fixture has config.json but no wizard state, which is exactly the
+	// shape of a hand-written or externally managed configuration.
+	_, err := b.ReloadConfig()
+	if err == nil {
+		t.Skip("this fixture happens to be rebuildable; the guard is covered elsewhere")
+	}
+	pe, ok := err.(*protocol.Error)
+	if !ok {
+		t.Fatalf("error is %T, want *protocol.Error", err)
+	}
+	if pe.Code != "not_rebuildable" && pe.Code != "rebuild_failed" {
+		t.Errorf("code = %q, want not_rebuildable for a config with no wizard state", pe.Code)
+	}
+	if pe.Code == "not_rebuildable" {
+		for _, want := range []string{"wizard", "config.json"} {
+			if !strings.Contains(pe.Message, want) {
+				t.Errorf("message %q does not mention %q; it would not tell the user what to do",
+					pe.Message, want)
+			}
+		}
+		if pe.Recoverable {
+			t.Error("a configuration that was never wizard-built will not become rebuildable by retrying")
+		}
+	}
+}

@@ -10,10 +10,12 @@
 package service
 
 import (
+	"os"
 	"strconv"
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/internal/debuglog"
+	"singbox-launcher/internal/platform"
 )
 
 // MaintenanceResult reports what a rebuild or refresh actually did.
@@ -50,6 +52,22 @@ func (b *Backend) ReloadConfig() (MaintenanceResult, error) {
 	}
 
 	debuglog.InfoLog("backend: reload_config requested")
+
+	// A rebuild replays the wizard state into config.json, so a config that was
+	// not produced by the wizard cannot be rebuilt. Saying so plainly is the
+	// difference between a dead end and a next step: the raw error names
+	// state.json, which the user has never heard of, while this tells them the
+	// configuration was made elsewhere and where to change it.
+	if !b.configIsRebuildable() {
+		return MaintenanceResult{}, &protocol.Error{
+			Code: "not_rebuildable",
+			Message: "This configuration was not created by JiejieBox's wizard, so it " +
+				"cannot be rebuilt here. Edit config.json directly, or rebuild it " +
+				"from the wizard on the desktop build.",
+			Recoverable: false,
+		}
+	}
+
 	if err := b.ac.RebuildConfigIfDirty(true); err != nil {
 		return MaintenanceResult{}, &protocol.Error{
 			Code:        "rebuild_failed",
@@ -67,6 +85,20 @@ func (b *Backend) ReloadConfig() (MaintenanceResult, error) {
 		OK:      true,
 		Message: "Configuration rebuilt from the current state.",
 	}, nil
+}
+
+// configIsRebuildable reports whether a rebuild has the state it needs.
+//
+// Rebuilding is a replay of the wizard state, so without that state there is
+// nothing to replay — the config on disk is then the only source of truth and
+// must not be overwritten from an empty one.
+func (b *Backend) configIsRebuildable() bool {
+	if b.ac == nil || b.ac.FileService == nil {
+		return false
+	}
+	statePath := platform.GetWizardStatePath(b.ac.FileService.Layout.Data)
+	_, err := os.Stat(statePath)
+	return err == nil
 }
 
 // UpdateSubscriptions refreshes every enabled subscription source.

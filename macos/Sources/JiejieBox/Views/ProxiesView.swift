@@ -1,10 +1,20 @@
 // ProxiesView — pick a group, pick a node, see its latency.
 //
-// The screen is deliberately one list rather than a group list plus a node
-// list: a menu bar is a small surface, and the group picker is a menu, not a
-// second column. Every row is full-width and clickable (MenuRow), because
-// selecting a node is the whole purpose of the screen and a user aiming at a
-// 20 pt checkmark is a user the UI has failed.
+// Layout, top to bottom, mirroring the questions a user actually has:
+//
+//   group toolbar   which group am I in, and can I test it?
+//   search          narrow the list
+//   body            exactly one state: loading / stopped / empty / stale /
+//                   unavailable / error / nodes
+//
+// The body renders ONE state, chosen by `model.proxyListState`. The earlier
+// version collapsed every "no nodes" cause into a single sentence, so a stopped
+// core, an empty config and an unreachable backend all looked identical — and
+// only one of those messages could ever be right.
+//
+// Interaction note: a node row has two independent actions, so both are real
+// Buttons laid out as siblings (see ActionRow). Nothing is nested, and neither
+// action can trigger the other.
 
 import SwiftUI
 
@@ -13,22 +23,28 @@ struct ProxiesView: View {
 
     var body: some View {
         PanelScaffold(model: model, title: "Proxies", onBack: { model.goBack() }) {
-            VStack(alignment: .leading, spacing: 10) {
-                if model.shouldShowBackendDown {
-                    BackendDownView(model: model, subject: "the proxy list")
-                } else if !model.proxiesAvailable {
-                    unavailable
-                } else {
-                    header
-                    searchField
-                    nodeList
+            VStack(alignment: .leading, spacing: 0) {
+                // The toolbar only appears once there is something to control:
+                // with no groups or a dead backend, an empty picker and a
+                // disabled Test All would be decoration.
+                if showsToolbar {
+                    groupToolbar
+                    Divider().padding(.horizontal, Metrics.sectionPaddingH)
                 }
+
+                if showsSearch {
+                    searchField
+                    Divider().padding(.horizontal, Metrics.sectionPaddingH)
+                }
+
+                body_
+                    .padding(.vertical, 6)
             }
-            .padding(.vertical, 8)
         }
         .task {
-            // Loading in the view's task (not on appear-and-forget) means the
-            // spinner reflects the real request lifetime.
+            // Loading here (rather than on appear-and-forget) means the spinner
+            // reflects the real request lifetime. An existing list is refreshed
+            // rather than re-fetched blind, so returning to the screen is cheap.
             if model.groups.isEmpty {
                 await model.loadGroups()
             } else {
@@ -37,76 +53,114 @@ struct ProxiesView: View {
         }
     }
 
-    // MARK: - Pieces
+    // MARK: - What to show
 
-    private var header: some View {
-        HStack(spacing: 6) {
-            Menu {
-                ForEach(model.groups) { group in
-                    Button {
-                        Task { await model.selectGroup(group.name) }
-                    } label: {
-                        // A checkmark marks the group in use; the label shows
-                        // the node it currently points at, which is the fact
-                        // the user actually wants.
-                        if group.name == model.selectedGroup {
-                            Label(groupSelectionLabel(group), systemImage: "checkmark")
-                        } else {
-                            Text(groupSelectionLabel(group))
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(currentGroupLabel)
-                        .font(.subheadline.weight(.medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+    private var showsToolbar: Bool {
+        switch model.proxyListState {
+        case .loading, .noGroups, .idle, .backendUnavailable: return false
+        default: return !model.groups.isEmpty
+        }
+    }
 
-            Spacer()
+    private var showsSearch: Bool {
+        model.proxyListState == .ready || model.proxyListState == .empty
+    }
 
-            // A count makes the search field self-explanatory: with a filter
-            // active the number shows how much it hid.
-            if !model.proxies.isEmpty {
-                Text(filterCountLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+    // MARK: - Group toolbar
 
-            Button {
-                Task { await model.testGroup() }
-            } label: {
-                if model.pending == .testingGroup {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Text("Test All")
-                }
-            }
-            .buttonStyle(.borderless)
-            .disabled(model.pending != nil)
-            .help("Measure latency for every node in this group.")
+    private var groupToolbar: some View {
+        HStack(spacing: 8) {
+            groupPicker
+            Spacer(minLength: 8)
+            testAllButton
         }
         .padding(.horizontal, Metrics.rowPaddingH)
+        .padding(.vertical, 6)
+        .frame(minHeight: 40)
     }
 
-    /// "12 nodes", or "3 of 12" while a search is narrowing the list.
-    private var filterCountLabel: String {
-        let total = model.proxies.count
-        let shown = model.filteredProxies.count
-        if shown == total {
-            return total == 1 ? "1 node" : "\(total) nodes"
+    private var groupPicker: some View {
+        Menu {
+            ForEach(model.groups) { group in
+                Button {
+                    Task { await model.selectGroup(group.name) }
+                } label: {
+                    // The checkmark marks the group in use; the label shows the
+                    // node it currently points at, which is the fact the user
+                    // actually wants from this menu.
+                    if group.name == model.selectedGroup {
+                        Label(groupSelectionLabel(group), systemImage: "checkmark")
+                    } else {
+                        Text(groupSelectionLabel(group))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text(currentGroupLabel)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
-        return "\(shown) of \(total)"
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(model.groups.count > 1
+              ? "Switch group. \(model.groups.count) groups available."
+              : "The active selector group.")
     }
 
-    /// The group label plus the node it currently selects, so the menu answers
-    /// "what am I actually using?" without opening it.
+    /// A real button with its own hit area, not a floating label. Disabled with
+    /// a reason in the tooltip when there is nothing to test or the backend
+    /// cannot run a test.
+    private var testAllButton: some View {
+        Button {
+            Task { await model.testGroup() }
+        } label: {
+            HStack(spacing: 5) {
+                if model.pending == .testingGroup {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "bolt.horizontal")
+                        .font(.system(size: 11))
+                }
+                Text(model.pending == .testingGroup ? "Testing…" : "Test All")
+                    .font(.caption.weight(.medium))
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(!canTestGroup)
+        .help(testAllHelp)
+    }
+
+    private var canTestGroup: Bool {
+        guard model.proxyListState == .ready else { return false }
+        return model.pending == nil
+    }
+
+    private var testAllHelp: String {
+        switch model.proxyListState {
+        case .coreStopped: return "Start the core to test latency."
+        case .backendUnavailable: return "The backend is unavailable."
+        case .empty: return "This group has no nodes to test."
+        case .ready:
+            return model.pending == nil
+                ? "Measure latency for every node in this group."
+                : "Another operation is running."
+        default: return "Nothing to test yet."
+        }
+    }
+
     private func groupSelectionLabel(_ group: ProxyGroup) -> String {
         guard let selected = group.selected_display ?? group.selected, !selected.isEmpty else {
             return group.label
@@ -116,96 +170,207 @@ struct ProxiesView: View {
 
     private var currentGroupLabel: String {
         let group = model.groups.first { $0.name == model.selectedGroup }
-        let base = group?.label ?? (model.selectedGroup.isEmpty ? "Proxies" : model.selectedGroup)
+        let base = group?.label ?? (model.selectedGroup.isEmpty ? "No group" : model.selectedGroup)
         guard let selected = group?.selected_display ?? group?.selected, !selected.isEmpty else {
             return base
         }
         return "\(base) — \(selected)"
     }
 
+    // MARK: - Search
+
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             TextField("Search nodes", text: Binding(get: { model.proxySearch },
                                                     set: { model.proxySearch = $0 }))
                 .textFieldStyle(.plain)
+                .font(.callout)
+            // Clearing matters on a filtered list: without it the only way back
+            // to the full list is selecting and deleting the text by hand.
+            if !model.proxySearch.isEmpty {
+                Button {
+                    model.proxySearch = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Clear the search.")
+            }
+            if !model.proxies.isEmpty {
+                Text(countLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
         }
         .padding(.horizontal, Metrics.rowPaddingH)
+        .padding(.vertical, 7)
     }
 
+    private var countLabel: String {
+        let total = model.proxies.count
+        let shown = model.filteredProxies.count
+        if shown == total { return total == 1 ? "1 node" : "\(total) nodes" }
+        return "\(shown) of \(total)"
+    }
+
+    // MARK: - Body — exactly one state
+
     @ViewBuilder
-    private var nodeList: some View {
-        if model.proxiesLoading && model.proxies.isEmpty {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Loading…").font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, Metrics.rowPaddingH)
-        } else if model.proxies.isEmpty {
-            emptyNodes
-        } else if model.filteredProxies.isEmpty {
-            note("No node matches “\(model.proxySearch)”.")
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
-                    ForEach(model.filteredProxies) { node in
-                        nodeRow(node)
+    private var body_: some View {
+        switch model.proxyListState {
+        case .backendUnavailable:
+            BackendDownView(model: model, subject: "the proxy list")
+
+        case .loading, .idle:
+            loadingRow
+
+        case .coreStopped:
+            ProxyNotice(
+                symbol: "power",
+                title: "Core is not running",
+                detail: "Start the core to load, test and switch nodes.",
+                tone: .neutral)
+
+        case .failed:
+            ProxyNotice(
+                symbol: "exclamationmark.triangle",
+                title: "Could not load proxies",
+                detail: model.proxyError ?? "The backend did not answer.",
+                tone: .error,
+                action: ("Try Again", { Task { await model.loadGroups() } }))
+
+        case .configStale:
+            ProxyNotice(
+                symbol: "arrow.triangle.2.circlepath",
+                title: "Configuration needs reload",
+                detail: "Subscriptions changed, so the node list is out of date.",
+                tone: .warning,
+                action: ("Reload Config", {
+                    Task {
+                        await model.reloadConfig()
+                        await model.loadGroups()
                     }
-                }
-                .padding(.bottom, 4)
+                }))
+
+        case .noGroups:
+            ProxyNotice(
+                symbol: "square.stack.3d.up.slash",
+                title: "No selector groups",
+                detail: model.subscriptions.isEmpty
+                    ? "No proxies yet. Add a subscription first."
+                    : "The current configuration defines no selector groups.",
+                tone: .neutral,
+                action: model.subscriptions.isEmpty
+                    ? ("Open Subscriptions", { model.path.append(.subscriptions) })
+                    : ("Reload Config", {
+                        Task {
+                            await model.reloadConfig()
+                            await model.loadGroups()
+                        }
+                    }))
+
+        case .noGroupSelected:
+            ProxyNotice(
+                symbol: "square.stack.3d.up",
+                title: "No group selected",
+                detail: "Choose a selector group above.",
+                tone: .neutral)
+
+        case .empty:
+            ProxyNotice(
+                symbol: "tray",
+                title: "This group has no nodes",
+                detail: model.subscriptions.isEmpty
+                    ? "Add or update a subscription, then reload the configuration."
+                    : "Update the subscriptions to fetch the current node list.",
+                tone: .neutral,
+                action: model.subscriptions.isEmpty
+                    ? ("Open Subscriptions", { model.path.append(.subscriptions) })
+                    : ("Update Subscriptions", {
+                        Task {
+                            await model.updateAllSubscriptions()
+                            await model.reloadConfig()
+                            await model.loadGroups()
+                        }
+                    }))
+
+        case .ready:
+            if model.filteredProxies.isEmpty {
+                ProxyNotice(
+                    symbol: "magnifyingglass",
+                    title: "No matching nodes",
+                    detail: "Nothing matches “\(model.proxySearch)”.",
+                    tone: .neutral,
+                    action: ("Clear Search", { model.proxySearch = "" }))
+            } else {
+                nodeList
             }
-            // The panel is capped at 640pt overall, so the list scrolls rather
-            // than pushing the menu bar window off screen.
-            .frame(minHeight: 120, maxHeight: 340)
         }
     }
 
-    private var emptyNodes: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("No nodes in this group.")
+    private var loadingRow: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Loading nodes…")
                 .font(.callout)
-            Text("Update Subscriptions in More, then reload the config.")
-                .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func note(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, Metrics.rowPaddingH)
+    private var nodeList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
+                ForEach(model.filteredProxies) { node in
+                    nodeRow(node)
+                }
+            }
+            .padding(.bottom, 4)
+        }
+        // The panel is capped at 640pt overall, so the list scrolls rather than
+        // pushing the menu bar window off screen.
+        .frame(minHeight: 120, maxHeight: 340)
     }
+
+    // MARK: - Node row
 
     /// One node, as two independent actions.
     ///
-    /// The row both selects the node and measures its latency. These are
-    /// SIBLINGS, never a button inside a button: nesting them made the latency
-    /// target unreliable and could switch the proxy when the user only asked to
-    /// measure it. The select action gets the larger share because it is the
-    /// common one; the latency action is a right-hand target that is still a
-    /// full-height region, not a small glyph.
+    /// Selecting the node and measuring its latency are SIBLINGS, never a button
+    /// inside a button: nesting them made the latency target unreliable and
+    /// could switch the proxy when the user only asked to measure it. Select
+    /// gets the larger share because it is the common action; the latency
+    /// target is still a full-height region, not a small glyph.
     private func nodeRow(_ node: ProxyNode) -> some View {
         let selected = node.selected
+        let switching = model.pending == .switchingProxy(node.name)
+        let testing = model.pending == .testingProxy(node.name)
         return ActionRow(actions: [
             RowAction(
                 id: "select-\(node.id)",
                 title: node.label,
                 subtitle: node.type,
                 value: nil,
-                isPending: model.pending == .switchingProxy(node.name),
+                isPending: switching,
                 leading: AnyView(
-                    HStack(spacing: 6) {
-                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 12))
-                            .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
-                            .frame(width: 16)
-                    }
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                        .frame(width: 16)
                 ),
                 weight: 3,
-                help: selected ? "Currently in use." : "Use this node.",
+                help: switching
+                    ? "Applying…"
+                    : (selected ? "Currently in use." : "Use this node."),
                 action: { Task { await model.switchProxy(node) } }
             ),
             RowAction(
@@ -213,14 +378,14 @@ struct ProxiesView: View {
                 title: "",
                 value: node.delayLabel,
                 valueColor: delayColor(node),
-                isPending: model.pending == .testingProxy(node.name),
+                isPending: testing,
                 weight: 1,
                 help: node.isMeasured
-                    ? "Measure this node again (\(node.type ?? "node"))."
+                    ? "Measure this node again."
                     : "Measure this node's latency.",
                 action: { Task { await model.testProxy(node) } }
             ),
-        ], disabled: model.pending != nil && model.pending != .testingProxy(node.name))
+        ], disabled: model.pending != nil && !testing)
     }
 
     private func delayColor(_ node: ProxyNode) -> Color {
@@ -229,26 +394,52 @@ struct ProxiesView: View {
         if node.isSlow { return .orange }
         return .primary
     }
+}
 
-    // MARK: - Unavailable
+/// A state explanation with an optional action.
+///
+/// Used instead of a bare sentence so every non-content state answers the same
+/// three questions: what is wrong, why, and what can I do about it.
+struct ProxyNotice: View {
+    enum Tone { case neutral, warning, error }
 
-    private var unavailable: some View {
+    let symbol: String
+    let title: String
+    let detail: String
+    var tone: Tone = .neutral
+    /// Label and action for the way forward, when there is one.
+    var action: (String, () -> Void)?
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Proxies are unavailable")
-                .font(.callout.weight(.medium))
-            Text(model.core?.state == .running
-                 ? "The Clash API is not answering yet. Give it a moment after connecting."
-                 : "Start the core to list and switch proxies.")
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .font(.callout.weight(.medium))
+            }
+            Text(detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            // An explanation with no action is a dead end: offer the retry, so
-            // a slow-starting Clash API can be picked up without leaving.
-            MenuRow("Try Again", systemImage: "arrow.clockwise") {
-                Task { await model.loadGroups() }
+                .fixedSize(horizontal: false, vertical: true)
+            if let action {
+                Button(action: action.1) {
+                    Text(action.0)
+                }
+                .controlSize(.small)
             }
-            .disabled(model.pending != nil)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
-        .padding(.top, 4)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var tint: Color {
+        switch tone {
+        case .neutral: return .secondary
+        case .warning: return .orange
+        case .error: return .red
+        }
     }
 }

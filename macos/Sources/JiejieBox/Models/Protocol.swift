@@ -118,6 +118,18 @@ struct BackendError: Decodable, Error {
     var displayText: String { message }
 }
 
+// Conforming to LocalizedError is what makes the backend's own message reach
+// the user. Without it, `error.localizedDescription` — which every AppModel
+// catch block uses — falls back to the generic
+// "The operation couldn't be completed. (JiejieBox.BackendError error 1.)",
+// so a precise backend explanation such as "stop the VPN before switching
+// engines" was replaced by a message that says nothing.
+extension BackendError: LocalizedError {
+    var errorDescription: String? {
+        message.isEmpty ? code : message
+    }
+}
+
 // MARK: - Handshake
 
 struct Capabilities: Decodable {
