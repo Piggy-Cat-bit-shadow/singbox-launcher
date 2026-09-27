@@ -23,6 +23,7 @@ import (
 	"image/color"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/theme"
 )
 
 // Palette — набор семантических ролей. Поля, а не методы: палитру удобно
@@ -148,8 +149,12 @@ var darkPalette = Palette{
 }
 
 // PaletteFor возвращает палитру для варианта темы.
+//
+// Сравнение — ТОЛЬКО с официальными константами fyne/theme (VariantDark == 0,
+// VariantLight == 1). Никаких собственных числовых значений: именно рукописный
+// алиас сделал так, что светлая системная тема получала тёмную палитру.
 func PaletteFor(v fyne.ThemeVariant) Palette {
-	if v == themeVariantDark {
+	if v == theme.VariantDark {
 		return darkPalette
 	}
 	return lightPalette

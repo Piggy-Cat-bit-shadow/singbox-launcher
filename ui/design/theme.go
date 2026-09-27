@@ -26,21 +26,82 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// themeVariantDark / themeVariantLight — псевдонимы вариантов темы Fyne.
+// Варианты темы берутся ТОЛЬКО из fyne/theme. Своих числовых значений здесь
+// быть не должно: VariantDark == 0 (iota), VariantLight == 1. Рукописные
+// алиасы вида fyne.ThemeVariant(1)/ThemeVariant(2) однажды уже привели к
+// тому, что светлая системная тема (Light == 1) попадала в тёмную палитру —
+// окно рисовалось тёмным под светлым системным titlebar.
+//
+// AppearanceMode — пользовательский выбор внешнего вида.
+type AppearanceMode string
+
 const (
-	themeVariantDark  = fyne.ThemeVariant(1)
-	themeVariantLight = fyne.ThemeVariant(2)
+	// AppearanceSystem — следовать системной теме (по умолчанию).
+	AppearanceSystem AppearanceMode = "system"
+	// AppearanceLight — принудительно светлая.
+	AppearanceLight AppearanceMode = "light"
+	// AppearanceDark — принудительно тёмная.
+	AppearanceDark AppearanceMode = "dark"
 )
 
 // Theme — тема приложения. Реализует fyne.Theme.
 type Theme struct {
 	base fyne.Theme
+	// mode — выбранный пользователем внешний вид. Пустое значение означает
+	// System: так тема ведёт себя правильно даже если её собрали без
+	// явного указания режима.
+	mode AppearanceMode
 }
 
 // NewTheme собирает тему поверх дефолтной. Дефолтная нужна для шрифтов и
 // иконок, которые мы сознательно не подменяем.
-func NewTheme() *Theme {
-	return &Theme{base: theme.DefaultTheme()}
+//
+// mode — System/Light/Dark; неизвестное значение трактуется как System.
+func NewTheme(mode AppearanceMode) *Theme {
+	return &Theme{base: theme.DefaultTheme(), mode: normalizeAppearance(mode)}
+}
+
+// normalizeAppearance приводит значение к одному из трёх допустимых.
+func normalizeAppearance(m AppearanceMode) AppearanceMode {
+	switch m {
+	case AppearanceLight, AppearanceDark:
+		return m
+	default:
+		return AppearanceSystem
+	}
+}
+
+// SetMode меняет режим внешнего вида и перерисовывает всё дерево.
+//
+// Вызывается из настроек: Fyne не имеет публичного SetThemeVariant, поэтому
+// вариант выбирается внутри темы, а не через Environment/private API.
+func (t *Theme) SetMode(mode AppearanceMode) {
+	t.mode = normalizeAppearance(mode)
+	if app := fyne.CurrentApp(); app != nil {
+		// Refresh заставляет все виджеты перечитать цвета из темы.
+		app.Settings().SetTheme(t)
+	}
+}
+
+// Mode возвращает текущий режим.
+func (t *Theme) Mode() AppearanceMode { return t.mode }
+
+// effectiveVariant приводит запрошенный системой вариант к выбранному режиму.
+//
+// В режиме System возвращается системный вариант как есть — поэтому на macOS
+// содержимое окна совпадает с нативным titlebar. В Light/Dark вариант
+// подменяется, но native titlebar остаётся системным: публичного способа
+// переключить оформление окна в Fyne нет, и приватные AppKit-вызовы здесь
+// сознательно не используются (см. docs/release_notes).
+func (t *Theme) effectiveVariant(requested fyne.ThemeVariant) fyne.ThemeVariant {
+	switch t.mode {
+	case AppearanceLight:
+		return theme.VariantLight
+	case AppearanceDark:
+		return theme.VariantDark
+	default:
+		return requested
+	}
 }
 
 var _ fyne.Theme = (*Theme)(nil)
@@ -53,7 +114,7 @@ var _ fyne.Theme = (*Theme)(nil)
 // Неизвестные роли отдаются дефолтной теме: так новая версия Fyne, добавившая
 // цвет, не останется без значения.
 func (t *Theme) Color(name fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
-	p := PaletteFor(v)
+	p := PaletteFor(t.effectiveVariant(v))
 	switch name {
 	case theme.ColorNameBackground:
 		return p.Background

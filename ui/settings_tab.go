@@ -273,7 +273,12 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 	//
 	// Порядок сохранён прежним: Language, Connection, Subscriptions (вместе с
 	// идентификацией — они об одном), Debug API, Storage.
+	// Appearance — рядом с Language: обе настройки про то, как выглядит
+	// приложение, и меняются редко.
+	appearanceRow, refreshAppearance := buildAppearanceSection(ac)
+
 	content := container.NewVBox(
+		design.NewCard(locale.T("Appearance"), "", nil, appearanceRow).Object(),
 		design.NewCard(locale.T("Language"), "", nil, langRow).Object(),
 		design.NewCard(locale.T("Connection"),
 			locale.T("How the launcher brings the core up."), nil, connBlock).Object(),
@@ -285,6 +290,13 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 		design.NewCard(locale.T("Storage"),
 			locale.T("Where the launcher keeps its data."), nil, storageBlock).Object(),
 	)
+	// refresh при входе на страницу перечитывает и внешний вид: его могли
+	// сменить в другой сессии или изменить settings.json вручную.
+	baseRefresh := refresh
+	refresh = func() {
+		baseRefresh()
+		refreshAppearance()
+	}
 	return content, refresh
 }
 

@@ -38,53 +38,40 @@ func (tab *CoreDashboardTab) updateBinaryStatus() {
 // pendingOpTimeout — сколько держим кнопки выключенными, не дождавшись
 // смены состояния ядра.
 //
-// Это НЕ «ожидание успеха», а потолок ожидания: на неудачном пути
-// (config rejected, демон не ответил) состояние не меняется вовсе —
-// StartVPN/StopVPN показывают диалог с ошибкой и выходят, не трогая
-// RunningState. Без потолка кнопки остались бы мёртвыми до перезапуска
-// лаунчера. 12s — заметно больше типичного rebuild+apply и заметно меньше
-// порога, за которым интерфейс кажется сломанным.
-const pendingOpTimeout = 12 * time.Second
+// Потолок ожидания (pendingOpTimeout) живёт в core_actions.go вместе с общей
+// обёрткой Start/Stop: теперь её используют и панель Core, и Home.
 
-// beginPendingOp — мгновенная реакция на Start/Stop: гасим обе кнопки и
-// пишем, что операция идёт. Возврат — в updateRunningStatus по приходу
-// реального статуса, либо по таймауту.
-func (tab *CoreDashboardTab) beginPendingOp(statusText string, wantRunning bool) {
-	tab.pendingOp = true
-	tab.pendingOpWantRun = wantRunning
-	tab.pendingOpMismatchTicks = 0
-	tab.pendingOpGen++
-	gen := tab.pendingOpGen
+// --- Реализация coreActionTarget (см. core_actions.go) ---------------------
+//
+// Обёртка ожидания вынесена в общий код: её используют и панель Core, и
+// страница Home. Здесь остаются только адаптеры к виджетам панели — логика
+// не дублируется.
 
-	if tab.statusLabel != nil {
-		tab.statusLabel.SetText(statusText)
-		tab.statusLabel.Refresh()
-	}
-	for _, b := range []*widget.Button{tab.startButton, tab.stopButton} {
-		if b != nil {
-			b.Disable()
-			b.Importance = widget.MediumImportance
-			b.Refresh()
-		}
-	}
+// actionButtons — кнопки панели, которые надо гасить на время операции.
+func (tab *CoreDashboardTab) actionButtons() []*widget.Button {
+	// restartButton — ttwidget.Button (с tooltip); его гасит отдельный
+	// вызов ниже, здесь только базовые кнопки.
 	if tab.restartButton != nil {
 		tab.restartButton.Disable()
 		tab.restartButton.Refresh()
 	}
+	return []*widget.Button{tab.startButton, tab.stopButton}
+}
 
-	go func() {
-		time.Sleep(pendingOpTimeout)
-		fyne.Do(func() {
-			// Другое поколение — операция уже завершилась (или началась
-			// новая), этот таймаут просрочен и трогать ничего не должен.
-			if !tab.pendingOp || tab.pendingOpGen != gen {
-				return
-			}
-			debuglog.WarnLog("dashboard: core did not switch state within %s — releasing buttons", pendingOpTimeout)
-			tab.pendingOp = false
-			tab.updateRunningStatus()
-		})
-	}()
+// setPendingStatus — «Starting…» / «Stopping…» в подписи состояния.
+func (tab *CoreDashboardTab) setPendingStatus(text string) {
+	tab.pendingOp = true
+	tab.pendingOpMismatchTicks = 0
+	if tab.statusLabel != nil {
+		tab.statusLabel.SetText(text)
+		tab.statusLabel.Refresh()
+	}
+}
+
+// releasePending — отпустить кнопки и вернуться к реальному состоянию.
+func (tab *CoreDashboardTab) releasePending() {
+	tab.pendingOp = false
+	tab.updateRunningStatus()
 }
 
 func (tab *CoreDashboardTab) updateRunningStatus() {

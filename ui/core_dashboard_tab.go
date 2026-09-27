@@ -255,14 +255,16 @@ func (tab *CoreDashboardTab) createStatusRow() fyne.CanvasObject {
 	// ответ может прийти через секунды. Без немедленной реакции кнопка
 	// выглядит «залипшей»: нажатие принято, а интерфейс не меняется —
 	// пользователь жмёт ещё раз, и второй вызов встаёт на applyMu.
+	// Start/Stop идут через ОБЩИЙ путь (core_actions.go) — тот же, что
+	// использует Home. Это гарантирует, что обёртка ожидания (мгновенное
+	// гашение кнопок, подпись «Starting…», потолок ожидания) не разъедется
+	// между двумя экранами.
 	startButton := widget.NewButton(locale.TN(1, "Start"), func() {
-		tab.beginPendingOp(locale.T("Core Status ⏳ Starting..."), true)
-		core.StartSingBoxProcess()
+		StartCoreAction(tab, &tab.pendingOpGen)
 	})
 
 	stopButton := widget.NewButton(locale.TN(1, "Stop"), func() {
-		tab.beginPendingOp(locale.T("Core Status ⏳ Stopping..."), false)
-		core.StopSingBoxProcess()
+		StopCoreAction(tab, &tab.pendingOpGen)
 	})
 
 	restartButton := ttwidget.NewButton("🔄", nil)

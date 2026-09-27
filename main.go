@@ -755,7 +755,10 @@ func main() {
 	// Fyne. Пока она не установлена, интерфейс остаётся в дефолтных цветах
 	// Fyne независимо от вёрстки.
 	if controller.UIService != nil && controller.UIService.Application != nil {
-		controller.UIService.Application.Settings().SetTheme(design.NewTheme())
+		// Режим внешнего вида берём из настроек (по умолчанию — system, чтобы
+		// содержимое окна совпадало с нативной шапкой).
+		mode := design.AppearanceMode(locale.LoadSettings(layout.Data.Bin()).AppearanceMode)
+		controller.UIService.Application.Settings().SetTheme(design.NewTheme(mode))
 	}
 
 	// Create App structure to manage UI

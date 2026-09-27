@@ -92,7 +92,6 @@ type ClickableCard struct {
 
 	bg     *canvas.Rectangle
 	border *canvas.Rectangle
-	holder *cardHoverHolder
 }
 
 // NewClickableCard собирает карточку-ссылку.
@@ -117,50 +116,29 @@ func (c *ClickableCard) CreateRenderer() fyne.WidgetRenderer {
 		inner = append(inner, CardCaption(c.summary))
 	}
 
-	c.holder = &cardHoverHolder{card: c}
-	c.holder.ExtendBaseWidget(c.holder)
-
 	content := container.New(&paddedBox{l: CardPadding, t: SpaceL, r: CardPadding, b: SpaceL},
 		container.NewVBox(inner...))
-	return widget.NewSimpleRenderer(
-		container.NewStack(c.bg, c.border, content, c.holder))
+	// Слои: фон → граница → содержимое. Прозрачного слоя сверху НЕТ.
+	return widget.NewSimpleRenderer(container.NewStack(c.bg, c.border, content))
 }
 
-// Tapped implements fyne.Tappable on the card itself, so keyboard/tap on the
-// surface works even outside the inner holder's bounds.
-func (c *ClickableCard) Tapped(*fyne.PointEvent) {
-	if c.onTapped != nil {
-		c.onTapped()
-	}
-}
+// ClickableCard сам обрабатывает и клик, и наведение.
+//
+// Отдельного прозрачного holder-слоя здесь СОЗНАТЕЛЬНО нет: слой поверх
+// содержимого перехватывал бы попадания и делал недоступным всё, что лежит
+// под ним. Реализация интерфейсов прямо на карточке даёт тот же эффект без
+// overlay'я и без риска для вложенных контролов.
+//
+// Ограничение: внутри ClickableCard допустимы только текст, иконки и
+// шеврон. Кнопки/поля/списки класть сюда нельзя — их события будет
+// перехватывать карточка. Для таких случаев — обычный Card плюс отдельный
+// интерактивный элемент.
+var (
+	_ fyne.Tappable     = (*ClickableCard)(nil)
+	_ desktop.Hoverable = (*ClickableCard)(nil)
+)
 
-// cardHoverHolder перехватывает наведение на карточку.
-type cardHoverHolder struct {
-	widget.BaseWidget
-	card *ClickableCard
-}
-
-// CreateRenderer implements fyne.Widget.
-func (h *cardHoverHolder) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
-}
-
-// Tapped implements fyne.Tappable.
-func (h *cardHoverHolder) Tapped(*fyne.PointEvent) {
-	if h.card.onTapped != nil {
-		h.card.onTapped()
-	}
-}
-
-// MouseIn implements desktop.Hoverable.
-func (h *cardHoverHolder) MouseIn(*desktop.MouseEvent) { h.card.setHover(true) }
-
-// MouseMoved implements desktop.Hoverable.
-func (h *cardHoverHolder) MouseMoved(*desktop.MouseEvent) {}
-
-// MouseOut implements desktop.Hoverable.
-func (h *cardHoverHolder) MouseOut() { h.card.setHover(false) }
-
+// setHover меняет заливку карточки под курсором.
 func (c *ClickableCard) setHover(on bool) {
 	if c.bg == nil {
 		return
@@ -173,17 +151,21 @@ func (c *ClickableCard) setHover(on bool) {
 	c.bg.Refresh()
 }
 
-// Refresh перечитывает цвета темы.
-func (c *ClickableCard) Refresh() {
-	c.BaseWidget.Refresh()
-	if c.bg == nil {
-		return
+// Tapped implements fyne.Tappable.
+func (c *ClickableCard) Tapped(*fyne.PointEvent) {
+	if c.onTapped != nil {
+		c.onTapped()
 	}
-	c.bg.FillColor = Surface()
-	c.border.StrokeColor = Border()
-	c.bg.Refresh()
-	c.border.Refresh()
 }
+
+// MouseIn implements desktop.Hoverable.
+func (c *ClickableCard) MouseIn(*desktop.MouseEvent) { c.setHover(true) }
+
+// MouseMoved implements desktop.Hoverable.
+func (c *ClickableCard) MouseMoved(*desktop.MouseEvent) {}
+
+// MouseOut implements desktop.Hoverable.
+func (c *ClickableCard) MouseOut() { c.setHover(false) }
 
 // CardRow — строка внутри карточки: заголовок, описание и значение/действие
 // справа. Может быть кликабельной.
@@ -216,14 +198,47 @@ func NewCardRow(title, subtitle string, trailing fyne.CanvasObject, onTapped fun
 	var body fyne.CanvasObject = container.NewBorder(nil, nil, nil, trailing, text)
 	inner := container.New(&paddedBox{l: SpaceM, t: SpaceS, r: SpaceM, b: SpaceS}, body)
 
+	// Правило наложения (SPEC 145 fix-wave §10).
+	//
+	// Прозрачный holder, положенный ВЕРХНИМ слоем, перехватывает попадания и
+	// делает недоступными кнопки/поля, лежащие под ним. Поэтому holder
+	// добавляется только тогда, когда в строке НЕТ интерактивного trailing:
+	// иначе клик по вложенному контролу не доходил бы до него.
+	//
+	// Это не теоретический риск: в строки настроек и диагностики кладут
+	// Button/Check/Select/Entry, и обёртка сверху ломала бы именно их.
 	stack := container.NewStack(r.bg, inner)
-	if onTapped != nil {
+	if onTapped != nil && !trailingInteractive(trailing) {
 		r.holder = &rowHoverHolder{row: r}
 		r.holder.ExtendBaseWidget(r.holder)
 		stack = container.NewStack(stack, r.holder)
 	}
 	r.object = container.New(&minHeight{min: RowMinHeight, max: 0}, stack)
 	return r
+}
+
+// trailingInteractive сообщает, является ли правая часть строки интерактивным
+// контролом.
+//
+// Проверяем по интерфейсам, а не по конкретным типам: любой виджет, умеющий
+// принимать тап или нажатие клавиши, не должен оказаться под прозрачным
+// holder'ом.
+func trailingInteractive(trailing fyne.CanvasObject) bool {
+	if trailing == nil {
+		return false
+	}
+	switch trailing.(type) {
+	case fyne.Tappable, fyne.Focusable, desktop.Hoverable:
+		return true
+	}
+	// Контейнеры (HBox/VBox/Border) сами не Tappable, но могут содержать
+	// кнопку. Консервативно считаем интерактивным всё, что не распознано как
+	// простой текст/иконка.
+	switch trailing.(type) {
+	case *widget.Label, *canvas.Text, *widget.Icon, *canvas.Rectangle, *canvas.Circle:
+		return false
+	}
+	return true
 }
 
 // Object возвращает объект строки.

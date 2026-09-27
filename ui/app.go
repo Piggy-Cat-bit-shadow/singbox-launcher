@@ -130,7 +130,7 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	trafficPage := buildTrafficPage(controller)
 
 	app.pages = map[RouteID]fyne.CanvasObject{
-		RouteHome:        homePage.CanvasObject(),
+		RouteHome:        homePage.Object(),
 		RouteProxies:     proxiesPage,
 		RouteTraffic:     trafficPage,
 		RouteRemote:      remoteContent,

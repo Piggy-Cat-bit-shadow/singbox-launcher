@@ -17,6 +17,7 @@ import (
 	"image/color"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/theme"
 )
 
 // currentPalette — палитра активного варианта темы.
@@ -30,7 +31,9 @@ func currentPalette() Palette {
 func currentVariant() fyne.ThemeVariant {
 	app := fyne.CurrentApp()
 	if app == nil {
-		return themeVariantLight
+		// Вне приложения (модульные тесты) считаем светлую тему: она
+		// безопаснее как значение по умолчанию.
+		return theme.VariantLight
 	}
 	return app.Settings().ThemeVariant()
 }
