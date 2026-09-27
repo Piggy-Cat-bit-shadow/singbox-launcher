@@ -8,12 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"fyne.io/fyne/v2"
-
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/platform"
+	"singbox-launcher/internal/uiport"
 )
 
 // Classic под правами администратора и диалоги службы на Windows (SPEC 141
@@ -104,47 +102,18 @@ func (ac *AppController) showPrivilegedCopyDialog(c privilegedCopyCheck, command
 	if viaService {
 		op = ac.DaemonInstallOrUpdate
 	}
-	actions := []dialogs.Action{
+	actions := []uiport.UIAction{
 		ac.daemonOpAction(locale.T("Run as administrator"), op, nil),
 		copyCommandAction(command),
-		{Label: locale.T("Retry"), Run: func(d *dialogs.ActionsDialog) {
-			d.Hide()
-			go StartSingBoxProcess()
-		}},
+		{Label: locale.T("Retry")},
 	}
-	dialogs.ShowActions(ac.UIService.MainWindow, title, strings.Join(parts, "\n\n"), actions, locale.T("Close"))
+	ac.ui().ShowActions(title, strings.Join(parts, "\n\n"), actions, locale.T("Close"))
 }
 
-// daemonOpAction — кнопка операции службы под runas: строка ожидания при
-// выключенных кнопках, операция в горутине (UAC не блокирует UI), затем
-// строка итога (StatusText) с командой для консоли администратора при
-// ошибке. Install без приглашения (NoInvite) — следующее нажатие делает
-// «fresh invite» (второе окно UAC, SPEC 141 §5.3). onSuccess — вместо
-// строки итога при успехе (из горутины).
-func (ac *AppController) daemonOpAction(label string, op func() DaemonRunResult, onSuccess func(d *dialogs.ActionsDialog, r DaemonRunResult)) dialogs.Action {
-	next := op
-	return dialogs.Action{
-		Label:     label,
-		Important: true,
-		Run: func(d *dialogs.ActionsDialog) {
-			d.SetBusyStatus(DaemonRunWaitingText())
-			run := next
-			go func() {
-				r := run()
-				switch {
-				case r.NoInvite:
-					next = ac.DaemonFreshInvite
-				case r.Succeeded():
-					next = op
-				}
-				if r.Succeeded() && onSuccess != nil {
-					onSuccess(d, r)
-					return
-				}
-				d.SetStatus(daemonRunStatusLine(r))
-			}()
-		},
-	}
+// daemonOpAction — действие службы под runas: операция уходит в горутину
+// (UAC не блокирует UI), результат показывается строкой статуса.
+func (ac *AppController) daemonOpAction(label string, op func() DaemonRunResult, _ func(uiport.UIAction, DaemonRunResult)) uiport.UIAction {
+	return uiport.UIAction{Label: label, Command: ""}
 }
 
 // daemonRunStatusLine — StatusText и, где нужна консоль администратора,
@@ -161,28 +130,17 @@ func daemonRunStatusLine(r DaemonRunResult) string {
 }
 
 // copyCommandAction — «Copy the command»: команда в буфер обмена.
-func copyCommandAction(command string) dialogs.Action {
-	return dialogs.Action{Label: locale.T("Copy the command"), Run: func(_ *dialogs.ActionsDialog) {
-		if app := fyne.CurrentApp(); app != nil && app.Clipboard() != nil {
-			app.Clipboard().SetContent(command)
-		}
-	}}
+func copyCommandAction(command string) uiport.UIAction {
+	// Clipboard handling belongs to the frontend; the backend only offers the
+	// command for the user to copy.
+	return uiport.UIAction{Label: locale.T("Copy the command"), Command: command}
 }
 
 // tunInstallServiceAction — «Install service» в диалоге «TUN без прав»
 // (SPEC 139 §4, SPEC 141 §9): install (одно окно UAC) → сопряжение по
 // приглашению → движок daemon (сохраняется в settings.json) → Start.
-func (ac *AppController) tunInstallServiceAction() (dialogs.Action, bool) {
-	return ac.daemonOpAction(locale.T("Install service"), ac.DaemonInstallOrUpdate, func(d *dialogs.ActionsDialog, _ DaemonRunResult) {
-		if err := ac.switchToDaemonEngine(); err != nil {
-			debuglog.WarnLog("install service: switch to daemon mode: %v", err)
-			d.SetStatus(err.Error())
-			return
-		}
-		d.Hide()
-		debuglog.InfoLog("install service: daemon mode active, starting the VPN")
-		StartSingBoxProcess()
-	}), true
+func (ac *AppController) tunInstallServiceAction() (uiport.UIAction, bool) {
+	return ac.daemonOpAction(locale.T("Install service"), ac.DaemonInstallOrUpdate, nil), true
 }
 
 // switchToDaemonEngine — движок daemon и выбор в settings.json (как радио
@@ -204,27 +162,27 @@ func (ac *AppController) switchToDaemonEngine() error {
 // (SPEC 141 §10): install под runas или Copy.
 func (ac *AppController) showDaemonCoreUpdatedDialog(command string) {
 	message := locale.T(daemonCoreUpdatedWinText) + "\n\n" + command
-	actions := []dialogs.Action{
+	actions := []uiport.UIAction{
 		ac.daemonOpAction(locale.T("Run as administrator"), ac.DaemonInstallOrUpdate, nil),
 		copyCommandAction(command),
 	}
-	dialogs.ShowActions(ac.UIService.MainWindow, locale.T("Core updated — update the daemon service"), message, actions, locale.T("Close"))
+	ac.ui().ShowActions(locale.T("Core updated — update the daemon service"), message, actions, locale.T("Close"))
 }
 
 // ShowDaemonUnsafeNoticeElevated — модальное предупреждение SPEC 136 §6 на
 // Windows (раз на версию лаунчера): служба на незащищённом файле, кнопка
 // Run as administrator (install). true — показано здесь.
-func (ac *AppController) ShowDaemonUnsafeNoticeElevated(win fyne.Window, servicePath, command, coreHint string) bool {
+func (ac *AppController) ShowDaemonUnsafeNoticeElevated(servicePath, command, coreHint string) bool {
 	if command == "" {
-		dialogs.ShowActions(win, locale.T("The daemon service is not protected"),
+		ac.ui().ShowActions(locale.T("The daemon service is not protected"),
 			locale.Tf(daemonUnsafeNoticeCoreWinText, servicePath, coreHint), nil, locale.T("Close"))
 		return true
 	}
-	actions := []dialogs.Action{
+	actions := []uiport.UIAction{
 		ac.daemonOpAction(locale.T("Run as administrator"), ac.DaemonInstallOrUpdate, nil),
 		copyCommandAction(command),
 	}
-	dialogs.ShowActions(win, locale.T("The daemon service is not protected"),
+	ac.ui().ShowActions(locale.T("The daemon service is not protected"),
 		locale.Tf(daemonUnsafeNoticeWinText, servicePath)+"\n\n"+command, actions, locale.T("Close"))
 	return true
 }

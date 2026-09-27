@@ -8,6 +8,9 @@
 // The process is owned by its parent. When stdin closes (the frontend exited
 // or crashed) the read loop ends and the backend shuts down, so a frontend
 // crash cannot leave an orphaned backend holding the core.
+//
+// Build with -tags headless (see build/backend_env.sh): that drops the Fyne
+// canvas inspector and is what keeps fyne.io out of the dependency graph.
 package main
 
 import (

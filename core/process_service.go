@@ -16,7 +16,6 @@ import (
 	"singbox-launcher/core/config"
 	"singbox-launcher/internal/ctxutil"
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/platform"
 	"singbox-launcher/internal/process"
@@ -237,14 +236,14 @@ func readFileTail(path string, maxBytes int64) (string, error) {
 // перезапустить»: авто-перезапуск прекращён осознанно, потому что повтор
 // ничего не изменит.
 func (ac *AppController) showDeterministicExitDialog(reason exitReason) {
-	if ac.UIService == nil || ac.UIService.MainWindow == nil {
+	if ac.uiPort == nil {
 		return
 	}
 	body := locale.T(deterministicExitText(reason))
 	if body == "" {
 		return
 	}
-	dialogs.ShowError(ac.UIService.MainWindow, fmt.Errorf("%s", body))
+	ac.ui().ShowError(locale.T("Error"), body)
 }
 
 // NewProcessService constructs a ProcessService bound to the controller.
@@ -257,8 +256,8 @@ func NewProcessService(ac *AppController) *ProcessService {
 func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	ac := svc.ac
 	if ac.RunningState.IsRunning() {
-		if ac.UIService != nil && ac.UIService.Application != nil && ac.UIService.MainWindow != nil {
-			dialogs.ShowAutoHideInfo(ac.UIService.Application, ac.UIService.MainWindow, locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
+		if ac.uiPort != nil {
+			ac.uiPort.ShowInfo(locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
 		}
 		return
 	}
@@ -308,8 +307,8 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	// приходят все входы: кнопка, трей, -start, Debug API, авто-рестарт.
 	if ac.tunNeedsElevation() {
 		ac.showTunElevationDialog()
-		if ac.UIService != nil && ac.UIService.StartAbortedFunc != nil {
-			ac.UIService.StartAbortedFunc()
+		if ac.uiPort != nil {
+			ac.uiPort.ReportCoreStartAborted("")
 		}
 		return
 	}
@@ -317,9 +316,9 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	// Check capabilities on Linux before starting
 	if suggestion := platform.CheckAndSuggestCapabilities(ac.FileService.SingboxPath); suggestion != "" {
 		debuglog.WarnLog("startSingBox: Capabilities check failed: %s", suggestion)
-		if ac.UIService != nil && ac.UIService.MainWindow != nil {
+		if ac.uiPort != nil {
 			cmd := platform.GetSetCapCommand(ac.FileService.SingboxPath)
-			dialogs.ShowLinuxCapabilitiesRequired(ac.UIService.MainWindow, locale.T("Linux capabilities required"), locale.T("Linux capabilities required")+"\n\n"+suggestion, cmd)
+			ac.uiPort.ShowCommandNeedsTerminal(locale.T("Linux capabilities required"), locale.T("Linux capabilities required")+"\n\n"+suggestion, cmd)
 		}
 		return
 	}
@@ -335,9 +334,9 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	}
 
 	// Reset API cache before starting
-	if ac.UIService != nil && ac.UIService.ResetAPIStateFunc != nil {
+	{
 		debuglog.InfoLog("startSingBox: Resetting API state cache...")
-		ac.UIService.ResetAPIStateFunc()
+		ac.ui().ResetAPIState()
 	}
 
 	// On macOS, use privileged start only when config has TUN (so password is asked only when needed)
@@ -620,8 +619,8 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 		ac.CmdMutex.Unlock()
 		runGhostTunCleanup(true)
 		svc.Start(true)
-		if ac.UIService != nil && ac.UIService.UpdateCoreStatusFunc != nil {
-			ac.UIService.UpdateCoreStatusFunc()
+		{
+			ac.uiPort.UpdateCoreStatus()
 		}
 		ac.CmdMutex.Lock()
 		return
@@ -631,15 +630,15 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 		return
 	case actionMaxAttempts:
 		debuglog.DebugLog("onPrivilegedScriptExited: Max restart attempts reached.")
-		if ac.UIService != nil && ac.UIService.MainWindow != nil {
-			dialogs.ShowError(ac.UIService.MainWindow, fmt.Errorf("%s", locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts)))
+		if ac.uiPort != nil {
+			ac.uiPort.ShowError(locale.T("Error"), locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts))
 		}
 		return
 	}
 	// action == actionCrashRestart
 	debuglog.WarnLog("onPrivilegedScriptExited: Sing-Box exited, auto-restart (attempt %d/%d)", ac.ConsecutiveCrashAttempts, restartAttempts)
-	if ac.UIService != nil && ac.UIService.Application != nil && ac.UIService.MainWindow != nil {
-		dialogs.ShowAutoHideInfo(ac.UIService.Application, ac.UIService.MainWindow, locale.T("Crash"), locale.Tf("Sing-Box crashed, restarting... (attempt %d/%d)", ac.ConsecutiveCrashAttempts, restartAttempts))
+	if ac.uiPort != nil {
+		ac.ui().ShowInfo(locale.T("Crash"), locale.Tf("Sing-Box crashed, restarting... (attempt %d/%d)", ac.ConsecutiveCrashAttempts, restartAttempts))
 	}
 	ac.CmdMutex.Unlock()
 	<-time.After(2 * time.Second)
@@ -655,8 +654,8 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 			defer ac.CmdMutex.Unlock()
 			if ac.RunningState.IsRunning() && ac.ConsecutiveCrashAttempts == currentAttemptCount {
 				ac.ConsecutiveCrashAttempts = 0
-				if ac.UIService != nil && ac.UIService.UpdateCoreStatusFunc != nil {
-					ac.UIService.UpdateCoreStatusFunc()
+				{
+					ac.uiPort.UpdateCoreStatus()
 				}
 			}
 		}()
@@ -714,8 +713,8 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		ac.CmdMutex.Unlock()
 		runGhostTunCleanup(true)
 		svc.Start(true)
-		if ac.UIService != nil && ac.UIService.UpdateCoreStatusFunc != nil {
-			ac.UIService.UpdateCoreStatusFunc() // refresh "Restarting..." → "Running" or "Stopped" if start failed
+		{
+			ac.uiPort.UpdateCoreStatus() // refresh "Restarting..." → "Running" or "Stopped" if start failed
 		}
 		ac.CmdMutex.Lock()
 		return
@@ -746,16 +745,16 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 
 	if action == actionMaxAttempts {
 		debuglog.DebugLog("monitorSingBox: Maximum restart attempts (%d) reached. Stopping auto-restart.", restartAttempts)
-		if ac.UIService != nil && ac.UIService.MainWindow != nil {
-			dialogs.ShowError(ac.UIService.MainWindow, fmt.Errorf("%s", locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts)))
+		if ac.uiPort != nil {
+			ac.uiPort.ShowError(locale.T("Error"), locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts))
 		}
 		return
 	}
 
 	// action == actionCrashRestart
 	debuglog.WarnLog("monitorSingBox: Sing-Box crashed: %v, attempting auto-restart (attempt %d/%d)", err, ac.ConsecutiveCrashAttempts, restartAttempts)
-	if ac.UIService != nil && ac.UIService.Application != nil && ac.UIService.MainWindow != nil {
-		dialogs.ShowAutoHideInfo(ac.UIService.Application, ac.UIService.MainWindow, locale.T("Crash"), locale.Tf("Sing-Box crashed, restarting... (attempt %d/%d)", ac.ConsecutiveCrashAttempts, restartAttempts))
+	if ac.uiPort != nil {
+		ac.ui().ShowInfo(locale.T("Crash"), locale.Tf("Sing-Box crashed, restarting... (attempt %d/%d)", ac.ConsecutiveCrashAttempts, restartAttempts))
 	}
 
 	ac.CmdMutex.Unlock()
@@ -783,8 +782,8 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 			if ac.RunningState.IsRunning() && ac.ConsecutiveCrashAttempts == currentAttemptCount {
 				debuglog.DebugLog("monitorSingBox: Process has been stable for %v. Resetting crash counter from %d to 0.", stabilityThreshold, ac.ConsecutiveCrashAttempts)
 				ac.ConsecutiveCrashAttempts = 0
-				if ac.UIService != nil && ac.UIService.UpdateCoreStatusFunc != nil {
-					ac.UIService.UpdateCoreStatusFunc()
+				{
+					ac.uiPort.UpdateCoreStatus()
 				}
 			}
 		}()
@@ -827,7 +826,7 @@ func (svc *ProcessService) Stop() {
 			// На пути выхода диалог бессмысленен: GracefulExit идёт на
 			// main-потоке Fyne, окно закрывается — ошибка остаётся в логе.
 			if ac.hasUI() && !ac.IsExiting() {
-				dialogs.ShowError(ac.UIService.MainWindow, fmt.Errorf("%s: %w", locale.T(stopPrivilegedFailedText), err))
+				ac.uiPort.ShowError(locale.T("Error"), locale.T(stopPrivilegedFailedText)+": "+err.Error())
 			}
 			return
 		}
@@ -954,7 +953,7 @@ func (svc *ProcessService) checkAndShowSingBoxRunningWarning(ctx string) bool {
 		}
 		debuglog.DebugLog("%s: Found sing-box process already running (PID=%d). Showing warning dialog.", ctx, foundPID)
 		if svc.ac.hasUI() {
-			dialogs.ShowProcessKillConfirmation(svc.ac.UIService.MainWindow, func() {
+			killIt := func() {
 				if runtime.GOOS == "darwin" {
 					// Снимаем только те PID, чью личность подтвердили по
 					// executable path (SPEC 145): широкий `pkill -f` снял бы
@@ -984,7 +983,10 @@ func (svc *ProcessService) checkAndShowSingBoxRunningWarning(ctx string) bool {
 				if svc.ac.BackendMode() != BackendDaemon {
 					svc.ac.RunningState.Set(false)
 				}
-			})
+			}
+			// The confirmation is presented by the GUI; the action itself is
+			// the same closure as before.
+			svc.ac.uiPort.ConfirmKillExistingCore(killIt)
 		}
 		return true
 	}

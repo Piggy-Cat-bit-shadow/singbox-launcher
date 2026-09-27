@@ -92,10 +92,10 @@ func (f *debugAPIFacade) StopSingBox() error {
 func (f *debugAPIFacade) PingAllProxies() error {
 	// The pingAllProxies implementation is a closure inside clash_api_tab.go
 	// — we expose it via the same UIService hook the power-resume path uses.
-	if f.ac.UIService == nil || f.ac.UIService.AutoPingAfterConnectFunc == nil {
+	if f.ac.uiPort == nil {
 		return nil
 	}
-	f.ac.UIService.AutoPingAfterConnectFunc()
+	f.ac.uiPort.AutoPingAfterConnect()
 	return nil
 }
 
@@ -203,25 +203,16 @@ func (ac *AppController) StartDebugAPI(port int, token string) error {
 			// UI-override (SPEC 100 §3.8): хуки читаются на КАЖДЫЙ вызов, а не
 			// снимаются здесь — Debug API может стартовать раньше, чем UI
 			// зарегистрирует обработчики (RegisterOverrideAPIHooks в NewApp).
-			UIConnect: func(id string) error {
-				if ac.UIService == nil || ac.UIService.LxdOverrideConnectFunc == nil {
-					return debugapi.ErrUIUnavailable
-				}
-				return ac.UIService.LxdOverrideConnectFunc(id)
+			// Remote machine management is not part of the menu-bar
+			// product, so there is no GUI override to reach.
+			UIConnect: func(string) error {
+				return debugapi.ErrUIUnavailable
 			},
 			UIDisconnect: func() error {
-				if ac.UIService == nil || ac.UIService.LxdOverrideDisconnectFunc == nil {
-					return debugapi.ErrUIUnavailable
-				}
-				ac.UIService.LxdOverrideDisconnectFunc()
-				return nil
+				return debugapi.ErrUIUnavailable
 			},
 			UIState: func() (string, string, bool, error) {
-				if ac.UIService == nil || ac.UIService.LxdOverrideStateFunc == nil {
-					return "", "", false, debugapi.ErrUIUnavailable
-				}
-				id, name, active := ac.UIService.LxdOverrideStateFunc()
-				return id, name, active, nil
+				return "", "", false, debugapi.ErrUIUnavailable
 			},
 		})
 	}
@@ -232,7 +223,8 @@ func (ac *AppController) StartDebugAPI(port int, token string) error {
 	}
 	// Инспектор окон Fyne: стек overlay-ев и фокус, аварийная очистка
 	// overlay-ев — разбор «UI завис при живом процессе» без перезапуска.
-	s.EnableUI(fyneUIInspector{})
+	// The Fyne canvas inspector was removed with the Fyne UI; the Debug API
+	// exposes no UI group in the menu-bar product.
 	debugAPIServer = s
 	debugAPIServer.Start()
 	return nil

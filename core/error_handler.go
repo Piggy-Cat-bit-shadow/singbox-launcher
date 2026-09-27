@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 )
 
@@ -20,7 +19,7 @@ const (
 func (ac *AppController) showErrorUI(category string, err error) {
 	debuglog.ErrorLog("%s: %v", category, err)
 	if ac.hasUI() {
-		dialogs.ShowError(ac.UIService.MainWindow, err)
+		ac.ui().ShowError(locale.T("Error"), err.Error())
 	}
 }
 

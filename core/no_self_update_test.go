@@ -54,15 +54,17 @@ func TestNoApplicationSelfUpdateAPI(t *testing.T) {
 // controller.CheckLauncherVersionOnStartup(). Проверяем и вызов, и сам URL —
 // вернуть проверку можно и иначе, но адрес всё равно появится рядом.
 func TestNoUpstreamReleaseCheckAtStartup(t *testing.T) {
-	mainSrc := repoFile(t, "main.go")
-	if strings.Contains(mainSrc, "CheckLauncherVersionOnStartup") {
-		t.Error("main.go still triggers the launcher version check on startup")
+	// The Fyne main.go was removed with the UI; the entry point is now the
+	// headless backend, which must not check for launcher updates either.
+	backendSrc := repoFile(t, "backend/cmd/jiejiebox-backend/main.go")
+	if strings.Contains(backendSrc, "CheckLauncherVersionOnStartup") {
+		t.Error("the backend entry point still triggers the launcher version check on startup")
 	}
 
 	// Адрес апстримного releases API не должен встречаться в коде приложения.
 	// core_downloader.go — исключение: он качает ЯДРО, а не приложение, и
 	// ходит за релизами форка sing-box. Проверяем по файлам self-update.
-	for _, rel := range []string{"core/core_version.go", "core/controller.go", "ui/help_tab.go"} {
+	for _, rel := range []string{"core/core_version.go", "core/controller.go"} {
 		src := repoFile(t, rel)
 		for _, forbidden := range []string{
 			"api.github.com/repos/Leadaxe/singbox-launcher",
@@ -78,13 +80,13 @@ func TestNoUpstreamReleaseCheckAtStartup(t *testing.T) {
 // TestNoUpdatePopupUIPlumbing — попап «Update Available» и его проводка
 // удалены: ни колбэка в UIService, ни метода показа, ни якоря в Help.
 func TestNoUpdatePopupUIPlumbing(t *testing.T) {
+	// The Fyne dashboard, Help tab and UIService were removed with the UI, so
+	// the popup cannot come back through them. What remains checkable is that
+	// no such plumbing exists in the surviving code.
 	checks := []struct{ file, forbidden string }{
-		{"ui/core_dashboard_tab.go", "showUpdatePopup"},
-		{"ui/core_dashboard_tab.go", "Update Available"},
-		{"ui/core_dashboard_tab.go", "Download from GitHub"},
-		{"ui/help_tab.go", "launcherUpdateLabel"},
-		{"ui/help_tab.go", "updateLauncherVersionInfo"},
-		{"core/uiservice/ui_service.go", "ShowUpdatePopupFunc"},
+		{"core/controller.go", "ShowUpdatePopupFunc"},
+		{"core/core_version.go", "ShowUpdatePopupFunc"},
+		{"backend/service/backend.go", "ShowUpdatePopupFunc"},
 	}
 	for _, c := range checks {
 		if strings.Contains(repoFile(t, c.file), c.forbidden) {

@@ -13,12 +13,12 @@ func TestEmitWireGuardRefusesMultiplePeers(t *testing.T) {
 		"peers": []interface{}{
 			map[string]interface{}{
 				"address": "1.1.1.1", "port": 51820,
-				"public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+				"public_key":  "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
 				"allowed_ips": []interface{}{"0.0.0.0/0"},
 			},
 			map[string]interface{}{
 				"address": "2.2.2.2", "port": 51820,
-				"public_key": "AQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQI=",
+				"public_key":  "AQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQI=",
 				"allowed_ips": []interface{}{"0.0.0.0/0"},
 			},
 		},
@@ -32,12 +32,12 @@ func TestEmitWireGuardRefusesMultiplePeers(t *testing.T) {
 		"peers": []map[string]interface{}{
 			{
 				"address": "1.1.1.1", "port": 51820,
-				"public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+				"public_key":  "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
 				"allowed_ips": []string{"0.0.0.0/0"},
 			},
 			{
 				"address": "2.2.2.2", "port": 51820,
-				"public_key": "AQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQI=",
+				"public_key":  "AQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQIDAQI=",
 				"allowed_ips": []string{"0.0.0.0/0"},
 			},
 		},

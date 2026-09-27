@@ -274,8 +274,8 @@ func (ac *AppController) StartTemplateRefresh() {
 			}
 			ac.StateService.MarkConfigStale()
 		}
-		if res.Downloaded && ac.UIService != nil && ac.UIService.UpdateConfigStatusFunc != nil {
-			ac.UIService.UpdateConfigStatusFunc()
+		if res.Downloaded && ac.uiPort != nil {
+			ac.uiPort.UpdateConfigStatus()
 		}
 	}()
 }

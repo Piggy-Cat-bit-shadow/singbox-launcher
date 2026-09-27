@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,20 +14,17 @@ import (
 
 	"singbox-launcher/internal/debuglog"
 
-	"fyne.io/fyne/v2"
-
 	"singbox-launcher/api"
 	"singbox-launcher/core/config"
 	"singbox-launcher/core/config/subscription"
 	"singbox-launcher/core/events"
 	"singbox-launcher/core/services"
-	"singbox-launcher/core/uiservice"
 	"singbox-launcher/internal/constants"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
 	"singbox-launcher/internal/process"
+	"singbox-launcher/internal/uiport"
 )
 
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
@@ -45,8 +41,9 @@ const (
 // The controller maintains application-wide state and provides callbacks for UI updates.
 type AppController struct {
 	// --- Services ---
-	// UIService manages UI-related state, callbacks, and tray menu logic
-	UIService *uiservice.UIService
+	// uiPort is the GUI boundary (see uiport.go). It is nil in the headless
+	// backend, which is why core never imports a GUI toolkit.
+	uiPort uiport.Port
 	// APIService manages Clash API interactions and proxy list management
 	APIService *services.APIService
 	// StateService manages application state including version caches and auto-update state
@@ -240,25 +237,13 @@ func NewAppController(layout paths.Layout, appIconData, greyIconData, greenIconD
 	ac.RunningState = &RunningState{controller: ac}
 	ac.RunningState.Set(false)
 
-	// Initialize UIService.
-	//
-	// Nil icon data means "headless": no Fyne application is created and
-	// UIService stays nil. Every UI touchpoint in this package already checks
-	// hasUI() or `UIService != nil` before dereferencing, so the headless
-	// path is a supported mode rather than a special case bolted on later.
-	// The SwiftUI frontend uses it; the Fyne build passes real icons.
-	if appIconData != nil {
-		uiService, err := uiservice.NewUIService(
-			appIconData, greyIconData, greenIconData, redIconData,
-			func() bool { return ac.RunningState.IsRunning() },
-			ac.FileService.SingboxPath,
-			func() { ac.UpdateUI() },
-		)
-		if err != nil {
-			return nil, fmt.Errorf("NewAppController: cannot create UIService: %w", err)
-		}
-		ac.UIService = uiService
-	}
+	// No GUI is created here. The presentation layer builds its own service
+	// and installs it with SetUIPort; a headless backend simply never does.
+	// This is what keeps fyne.io out of core's dependency graph.
+	_ = appIconData
+	_ = greyIconData
+	_ = greenIconData
+	_ = redIconData
 	ac.ConsecutiveCrashAttempts = 0
 	ac.ProcessService = NewProcessService(ac)
 	ac.ConfigService = NewConfigService(ac)
@@ -301,33 +286,20 @@ func NewAppController(layout paths.Layout, appIconData, greyIconData, greenIconD
 		ac.FileService.ConfigPath,
 		func() bool { return ac.RunningState.IsRunning() },
 		func() {
-			// OnProxiesUpdated callback
-			if ac.hasUI() {
-				if ac.UIService.ProxiesListWidget != nil {
-					ac.UIService.ProxiesListWidget.Refresh()
-				}
-				if ac.UIService.ListStatusLabel != nil {
-					group := ac.APIService.GetSelectedClashGroup()
-					active := ac.APIService.GetActiveProxyName()
-					ac.UIService.ListStatusLabel.SetText(fmt.Sprintf("Proxies loaded for '%s'. Active: %s", group, active))
-				}
-				if ac.UIService.RefreshAPIFunc != nil {
-					ac.UIService.RefreshAPIFunc()
-				}
-				if ac.UIService.UpdateTrayMenuFunc != nil {
-					ac.UIService.UpdateTrayMenuFunc()
-				}
+			// OnProxiesUpdated callback.
+			if ac.uiPort != nil {
+				group := ac.APIService.GetSelectedClashGroup()
+				active := ac.APIService.GetActiveProxyName()
+				ac.uiPort.SetListStatus(fmt.Sprintf("Proxies loaded for '%s'. Active: %s", group, active))
+				ac.uiPort.RefreshProxyList()
+				ac.uiPort.UpdateCoreStatus()
 			}
 		},
 		func() {
 			// OnProxySwitched callback
 			if ac.hasUI() {
-				if ac.UIService.UpdateTrayMenuFunc != nil {
-					ac.UIService.UpdateTrayMenuFunc()
-				}
-				if ac.UIService.RefreshAPIFunc != nil {
-					ac.UIService.RefreshAPIFunc()
-				}
+				ac.uiPort.UpdateCoreStatus()
+				ac.uiPort.RefreshProxyList()
 			}
 		},
 	)
@@ -375,32 +347,18 @@ func NewAppController(layout paths.Layout, appIconData, greyIconData, greenIconD
 	return ac, nil
 }
 
-// UpdateUI updates all UI elements based on the current application state.
+// UpdateUI asks the GUI to re-render from current state.
+//
+// A no-op in the headless backend, where uiPort is nil.
 func (ac *AppController) UpdateUI() {
-	if ac.hasUI() {
-		ac.UIService.UpdateUI()
+	if ac.uiPort != nil {
+		ac.ui().UpdateCoreStatus()
 	}
 }
 
-// GetApplication returns the Fyne application instance.
-func (ac *AppController) GetApplication() fyne.App {
-	if ac.hasUI() {
-		return ac.UIService.Application
-	}
-	return nil
-}
-
-// GetMainWindow returns the main window instance.
-func (ac *AppController) GetMainWindow() fyne.Window {
-	if ac.hasUI() {
-		return ac.UIService.MainWindow
-	}
-	return nil
-}
-
-// hasUI проверяет, доступен ли UI для обновлений (MainWindow)
+// hasUI reports whether a GUI is attached.
 func (ac *AppController) hasUI() bool {
-	return ac.UIService != nil && ac.UIService.MainWindow != nil
+	return ac.uiPort != nil
 }
 
 // GracefulExit performs a graceful shutdown of the application.
@@ -453,7 +411,7 @@ func (ac *AppController) gracefulExit() {
 
 	// Stop any pending menu update timer
 	if ac.hasUI() {
-		ac.UIService.StopTrayMenuUpdateTimer()
+		ac.ui().UpdateCoreStatus()
 	}
 
 	// Через backend: classic останавливает ядро (как раньше), daemon может
@@ -515,7 +473,7 @@ func (ac *AppController) gracefulExit() {
 		// the process. By this point sing-box is stopped and the log files
 		// are closed, so os.Exit loses nothing.
 		ac.forceExitAfter(shutdownUnwindDeadline, "Fyne event loop unwind after Quit")
-		ac.UIService.QuitApplication()
+		ac.ui().QuitApplication()
 	}
 }
 
@@ -614,7 +572,7 @@ func CheckLinuxCapabilities() {
 		// Show dialog with selectable command and Copy button (issue #34)
 		if ac.hasUI() {
 			cmd := platform.GetSetCapCommand(ac.FileService.SingboxPath)
-			dialogs.ShowLinuxCapabilitiesRequired(ac.UIService.MainWindow, "Linux Capabilities", suggestion, cmd)
+			ac.uiPort.ShowCommandNeedsTerminal("Linux Capabilities", suggestion, cmd)
 		}
 	}
 }
@@ -652,9 +610,9 @@ func (r *RunningState) Set(value bool) {
 						return
 					}
 				}
-				if ac.UIService != nil && ac.UIService.AutoPingAfterConnectFunc != nil {
+				if ac.uiPort != nil {
 					debuglog.DebugLog("auto-ping: triggering after %v of running state", autoPingDelayAfterConnect)
-					ac.UIService.AutoPingAfterConnectFunc()
+					ac.uiPort.AutoPingAfterConnect()
 				}
 			})
 		}
@@ -665,10 +623,6 @@ func (r *RunningState) Set(value bool) {
 	r.Unlock()
 
 	r.controller.UpdateUI()
-	// Call callback to update status in Core Dashboard
-	if r.controller.UIService != nil && r.controller.UIService.UpdateCoreStatusFunc != nil {
-		r.controller.UIService.UpdateCoreStatusFunc()
-	}
 
 	// SPEC 047 / audit BUG6: publish typed VpnStateChanged on the ACTUAL
 	// running transition (Set dedups no-op calls above). Subscribers such as
@@ -760,7 +714,7 @@ func StartSingBoxProcess(skipRunningCheck ...bool) {
 	if ac.IsStorageSwitching() {
 		debuglog.WarnLog("StartSingBoxProcess: refused, data move in progress")
 		if ac.hasUI() {
-			dialogs.ShowError(ac.UIService.MainWindow, errors.New(locale.T("Data move in progress")))
+			ac.uiPort.ShowError(locale.T("Error"), locale.T("Data move in progress"))
 		}
 		return
 	}
@@ -931,7 +885,7 @@ func CheckConfigFileExists() {
 		message := locale.Tf(configNotFoundMessageText, constants.ConfigFileName)
 
 		if ac.hasUI() {
-			dialogs.ShowInfo(ac.UIService.MainWindow, locale.T("Configuration Not Found"), message)
+			ac.uiPort.ShowInfo(locale.T("Configuration Not Found"), message)
 		}
 	}
 }
@@ -961,7 +915,7 @@ func CheckIfLauncherAlreadyRunningUtil() {
 		}
 		if strings.EqualFold(p.Name, execName) {
 			if ac.hasUI() {
-				dialogs.ShowInfo(ac.UIService.MainWindow, locale.T("Information"), locale.T("The application is already running. Use the existing instance or close it before starting a new one."))
+				ac.uiPort.ShowInfo(locale.T("Information"), locale.T("The application is already running. Use the existing instance or close it before starting a new one."))
 			}
 			return
 		}

@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"fyne.io/fyne/v2"
-
 	"singbox-launcher/api"
 	"singbox-launcher/core/config"
 	"singbox-launcher/internal/ctxutil"
@@ -550,18 +548,18 @@ func (apiSvc *APIService) AutoLoadProxies(ctx context.Context) {
 				debuglog.DebugLog("AutoLoadProxies: Result for group '%s' dropped — superseded", currentGroup)
 				return
 			}
-			fyne.Do(func() {
-				if isStale() {
-					return
-				}
-				apiSvc.SetProxiesList(proxies)
-				apiSvc.SetActiveProxyName(now)
+			// The GUI port owns thread marshalling: the headless backend
+			// applies this directly, the Fyne frontend hops to its UI thread
+			// inside the port implementation.
+			if isStale() {
+				return
+			}
+			apiSvc.SetProxiesList(proxies)
+			apiSvc.SetActiveProxyName(now)
 
-				// Notify about proxies update
-				if apiSvc.OnProxiesUpdated != nil {
-					apiSvc.OnProxiesUpdated()
-				}
-			})
+			if apiSvc.OnProxiesUpdated != nil {
+				apiSvc.OnProxiesUpdated()
+			}
 
 			// Проверяем, есть ли сохраненный прокси для текущей группы, и переключаемся на него, если он отличается от текущего
 			// Делаем это после обновления UI, чтобы не блокировать

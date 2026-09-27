@@ -1,3 +1,5 @@
+//go:build windows && !386
+
 package core
 
 // Права по требованию на Windows (SPEC 139). Лаунчер собран с манифестом
@@ -15,16 +17,14 @@ import (
 	"runtime"
 	"strings"
 
-	"fyne.io/fyne/v2"
-
 	"singbox-launcher/core/config"
 	"singbox-launcher/core/state"
 	"singbox-launcher/core/template"
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
+	"singbox-launcher/internal/uiport"
 )
 
 // Флаги командной строки, которые собирает перезапуск (main их объявляет).
@@ -107,70 +107,26 @@ func (ac *AppController) showTunElevationDialog() {
 		message += "\n\n" + locale.T(otherAccountText)
 	}
 
-	actions := []dialogs.Action{
-		{
-			Label:     locale.T("Restart as administrator"),
-			Important: true,
-			Run:       func(d *dialogs.ActionsDialog) { ac.runRestartAsAdministrator(d, true) },
-		},
+	actions := []uiport.UIAction{
+		{Label: locale.T("Restart as administrator")},
 		ac.switchToProxyAction(),
 	}
 	// SPEC 141 §9: Install service — первой (служба ставится одним окном UAC,
 	// лаунчер переходит в daemon-режим и стартует без прав).
 	if install, ok := ac.tunInstallServiceAction(); ok {
-		actions = append([]dialogs.Action{install}, actions...)
+		actions = append([]uiport.UIAction{install}, actions...)
 	}
 
-	ac.UIService.ShowMainWindowOrFocusWizard()
-	win := ac.UIService.MainWindow
-	fyne.Do(win.RequestFocus)
-	dialogs.ShowActions(win, locale.T("TUN needs administrator rights"), message, actions, locale.T("Cancel"))
+	ac.ui().ShowActions(locale.T("TUN needs administrator rights"), message, actions, locale.T("Cancel"))
 }
 
-// switchToProxyAction — кнопка «Switch to proxy mode». При открытом
-// конфигураторе недоступна: его Save перезаписал бы state и вернул tun=true.
-func (ac *AppController) switchToProxyAction() dialogs.Action {
-	act := dialogs.Action{Label: locale.T("Switch to proxy mode")}
-	if ac.UIService.WizardWindow != nil {
-		act.Disabled = true
-		act.Hint = locale.T("Close the configurator first")
-		return act
-	}
-	act.Run = func(d *dialogs.ActionsDialog) {
-		// Конфигуратор могли открыть, пока диалог висел.
-		if ac.UIService.WizardWindow != nil {
-			d.SetStatus(locale.T("Close the configurator first"))
-			return
-		}
-		d.Hide()
-		go func() {
-			if err := ac.SwitchToProxyMode(); err != nil {
-				debuglog.ErrorLog("switch to proxy mode: %v", err)
-				ac.ShowRebuildError(err)
-			}
-		}()
-	}
-	return act
-}
-
-// runRestartAsAdministrator — нажатие «Restart as administrator»: запрос UAC
-// в отдельной горутине (UI не блокируется). Отмена UAC — строка в диалоге,
-// иная ошибка — текст в диалоге; успех — выход этого экземпляра.
-func (ac *AppController) runRestartAsAdministrator(d *dialogs.ActionsDialog, withStart bool) {
-	d.SetBusy()
-	go func() {
-		err := ac.RestartAsAdministrator(withStart)
-		switch {
-		case err == nil:
-			d.Hide()
-		case errors.Is(err, platform.ErrElevationCancelled):
-			debuglog.InfoLog("restart as administrator: the UAC prompt was cancelled")
-			d.SetStatus(locale.T("The administrator prompt was cancelled."))
-		default:
-			debuglog.WarnLog("restart as administrator: %v", err)
-			d.SetStatus(locale.Tf("Could not restart as administrator: %s", err.Error()))
-		}
-	}()
+// switchToProxyAction — действие «Switch to proxy mode».
+//
+// The Windows elevation dialog is gone with the Fyne UI, so this is now a
+// plain description: the frontend owns presentation, the operation itself is
+// reachable through SwitchToProxyMode.
+func (ac *AppController) switchToProxyAction() uiport.UIAction {
+	return uiport.UIAction{Label: locale.T("Switch to proxy mode")}
 }
 
 // RestartAsAdministrator запускает новый экземпляр лаунчера с повышением и
@@ -185,9 +141,9 @@ func (ac *AppController) RestartAsAdministrator(withStart bool) error {
 	if err := ac.startElevatedInstance(restartArgs(ac.FileService.Layout, withStart, false)); err != nil {
 		return err
 	}
-	// Как Quit в трее: GracefulExit на UI-потоке. RequestRestartAfterExit не
-	// взводится — новый экземпляр уже запущен.
-	fyne.Do(ac.GracefulExit)
+	// Как Quit в трее: GracefulExit. RequestRestartAfterExit не взводится —
+	// новый экземпляр уже запущен.
+	go ac.GracefulExit()
 	return nil
 }
 
@@ -331,11 +287,7 @@ func (ac *AppController) ShowKillNeedsElevation() {
 	if !ac.hasUI() {
 		return
 	}
-	actions := []dialogs.Action{{
-		Label:     locale.T("Restart as administrator"),
-		Important: true,
-		Run:       func(d *dialogs.ActionsDialog) { ac.runRestartAsAdministrator(d, false) },
-	}}
+	actions := []uiport.UIAction{{Label: locale.T("Restart as administrator")}}
 	dialogs.ShowActions(ac.UIService.MainWindow, locale.T("Warning"), locale.T(killNeedsAdminText), actions, locale.T("Close"))
 }
 

@@ -19,7 +19,6 @@ import (
 	"singbox-launcher/core/services"
 	daemonpb "singbox-launcher/internal/daemonpb"
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/lxdclient"
 	"singbox-launcher/internal/paths"
@@ -261,8 +260,8 @@ func (b *DaemonBackend) Admin() *lxdclient.Client { return b.admin }
 func (b *DaemonBackend) StartVPN(skipRunningCheck ...bool) {
 	ac := b.ac
 	if ac.RunningState.IsRunning() {
-		if ac.UIService != nil && ac.UIService.Application != nil && ac.UIService.MainWindow != nil {
-			dialogs.ShowAutoHideInfo(ac.UIService.Application, ac.UIService.MainWindow, locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
+		if ac.uiPort != nil {
+			b.ac.uiPort.ShowInfo(locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
 		}
 		return
 	}
@@ -330,8 +329,8 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 			debuglog.WarnLog("daemon.%s: reload Clash API config: %v", caller, err)
 		}
 	}
-	if ac.UIService != nil && ac.UIService.ResetAPIStateFunc != nil {
-		ac.UIService.ResetAPIStateFunc()
+	{
+		ac.ui().ResetAPIState()
 	}
 
 	config, err := os.ReadFile(ac.FileService.ConfigPath)
@@ -460,7 +459,7 @@ func (b *DaemonBackend) StopVPN() {
 		if err := b.admin.Stop(); err != nil {
 			debuglog.ErrorLog("daemon.StopVPN: %v", err)
 			if ac.hasUI() {
-				dialogs.ShowError(ac.UIService.MainWindow, fmt.Errorf("daemon stop: %w", err))
+				b.ac.uiPort.ShowError(locale.T("Error"), fmt.Errorf("daemon stop: %w", err).Error())
 			}
 			return
 		}
@@ -579,8 +578,8 @@ func (b *DaemonBackend) Close() {
 // refreshUI дёргает статус-виджеты после операций, которые могли не дать
 // перехода RunningState (Set дедуплицирует no-op вызовы).
 func (b *DaemonBackend) refreshUI() {
-	if b.ac.UIService != nil && b.ac.UIService.UpdateCoreStatusFunc != nil {
-		b.ac.UIService.UpdateCoreStatusFunc()
+	{
+		b.ac.ui().UpdateCoreStatus()
 	}
 }
 

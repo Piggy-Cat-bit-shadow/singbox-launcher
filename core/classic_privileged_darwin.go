@@ -7,10 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"fyne.io/fyne/v2"
-
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
+	"singbox-launcher/internal/uiport"
 )
 
 // Гейт привилегированного старта classic-движка (SPEC 137).
@@ -58,15 +56,14 @@ func (ac *AppController) showPrivilegedCopyDialog(c privilegedCopyCheck, command
 	parts := []string{reason}
 	if command == "" {
 		parts = append(parts, coreHint)
-		dialogs.ShowCommandRetry(ac.UIService.MainWindow, title, strings.Join(parts, "\n\n"), "", nil, nil)
+		ac.ui().ShowCommandNeedsTerminal(title, strings.Join(parts, "\n\n"), "")
 		return
 	}
 	if viaService {
 		parts = append(parts, locale.T(privilegedCopyServiceNoteText))
 	}
 	parts = append(parts, locale.T(privilegedCopyInstructionText))
-	dialogs.ShowCommandRetry(ac.UIService.MainWindow, title, strings.Join(parts, "\n\n"), command,
-		ac.OpenTerminalWithCommand, func() { go StartSingBoxProcess() })
+	ac.ui().ShowCommandNeedsTerminal(title, strings.Join(parts, "\n\n"), command)
 }
 
 // classicElevatedUsesCopy — на macOS привилегированный старт идёт своим
@@ -79,21 +76,18 @@ func (ac *AppController) elevatedClassicStart() (string, *os.File, error) {
 }
 
 // tunInstallServiceAction — диалога «TUN без прав» на macOS нет.
-func (ac *AppController) tunInstallServiceAction() (dialogs.Action, bool) {
-	return dialogs.Action{}, false
+func (ac *AppController) tunInstallServiceAction() (uiport.UIAction, bool) {
+	return uiport.UIAction{}, false
 }
 
 // showDaemonCoreUpdatedDialog — «Core updated»: sudo-команда install для
 // Terminal.
 func (ac *AppController) showDaemonCoreUpdatedDialog(command string) {
-	dialogs.ShowLinuxCapabilitiesRequired(ac.UIService.MainWindow,
-		locale.T("Core updated — update the daemon service"),
-		locale.T(daemonCoreUpdatedBodyText),
-		command)
+	ac.ui().ShowCommandNeedsTerminal(locale.T("Core updated — update the daemon service"), locale.T(daemonCoreUpdatedBodyText), command)
 }
 
 // ShowDaemonUnsafeNoticeElevated — на macOS модальное предупреждение
 // показывает main.go (sudo-команда для Terminal).
-func (ac *AppController) ShowDaemonUnsafeNoticeElevated(_ fyne.Window, _, _, _ string) bool {
+func (ac *AppController) ShowDaemonUnsafeNoticeElevated(_, _, _ string) bool {
 	return false
 }

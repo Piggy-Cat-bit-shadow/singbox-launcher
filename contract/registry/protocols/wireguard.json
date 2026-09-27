@@ -2732,7 +2732,7 @@
         "code": "fields_order_invalid",
         "desc_en": "The junk packet size bounds must be ordered: jmin must not exceed jmax.",
         "desc_ru": "Границы размера мусорных пакетов упорядочены: jmin не больше jmax.",
-        "impl": "Контракт 1.1.63, SPEC 142 C8. Ядро (sing-box-lx transport/wireguard/device_awg.go validateJunk) отвергает endpoint с jmin > jmax на сборке — «amneziawg: jmin (N) must be <= jmax (M)», то есть падает ВЕСЬ конфиг: вендорный amneziawg-go считает размер мусорного пакета rand(jmax-jmin)+jmin и паникует на отрицательном аргументе. Какое из двух чисел ошибочно, по телу не понять, поэтому `drop` снимает ОБА поля: junk-пакеты без размеров ядро считает безвредными (пустой мусор, validateJunk такое пропускает), узел работает. Прежде правило жило только в форме обфускации (ui/configurator/tabs/source_awg_edit.go:validateAWGSettings) и не действовало ни на одном входе разбора."
+        "impl": "Контракт 1.1.63, SPEC 142 C8. Ядро (sing-box-lx transport/wireguard/device_awg.go validateJunk) отвергает endpoint с jmin > jmax на сборке — «amneziawg: jmin (N) must be <= jmax (M)», то есть падает ВЕСЬ конфиг: вендорный amneziawg-go считает размер мусорного пакета rand(jmax-jmin)+jmin и паникует на отрицательном аргументе. Какое из двух чисел ошибочно, по телу не понять, поэтому `drop` снимает ОБА поля: junk-пакеты без размеров ядро считает безвредными (пустой мусор, validateJunk такое пропускает), узел работает. Прежде правило жило только в форме обфускации графического редактора и не действовало ни на одном входе разбора."
       },
       {
         "kind": "cooccurrence",

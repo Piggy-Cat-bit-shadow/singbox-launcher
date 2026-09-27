@@ -17,8 +17,6 @@
   "refs": {
     "go": [
       "core/config/endpoint_schemes.go:applyTailscaleStateDirectory",
-      "ui/configurator/dialogs/add_server_tailscale.go:tailscaleDocument",
-      "ui/configurator/tabs/dns_server_form.go:dnsTypeTailscale",
       "core/config/registry/registry.go:Registry.ExitCapable",
       "core/config/configtypes/types.go:ParsedNode.IsExitCapable"
     ],
@@ -32,7 +30,29 @@
   },
   "body": {
     "core": "1.14.1-lx.4",
-    "order": ["state_directory", "auth_key", "control_url", "ephemeral", "hostname", "accept_routes", "exit_node", "exit_node_allow_lan_access", "advertise_routes", "advertise_exit_node", "advertise_tags", "listen_port", "relay_server_port", "relay_server_static_endpoints", "system_interface", "system_interface_name", "system_interface_mtu", "udp_timeout", "ssh_server", "taildrop_directory", "__dialer"],
+    "order": [
+      "state_directory",
+      "auth_key",
+      "control_url",
+      "ephemeral",
+      "hostname",
+      "accept_routes",
+      "exit_node",
+      "exit_node_allow_lan_access",
+      "advertise_routes",
+      "advertise_exit_node",
+      "advertise_tags",
+      "listen_port",
+      "relay_server_port",
+      "relay_server_static_endpoints",
+      "system_interface",
+      "system_interface_name",
+      "system_interface_mtu",
+      "udp_timeout",
+      "ssh_server",
+      "taildrop_directory",
+      "__dialer"
+    ],
     "fields": {
       "state_directory": {
         "type": "string",
@@ -105,7 +125,10 @@
         "format": "cidr",
         "normalize": "cidr_masked",
         "item_forbidden": {
-          "values": ["0.0.0.0/0", "::/0"],
+          "values": [
+            "0.0.0.0/0",
+            "::/0"
+          ],
           "code": "tailscale_default_route_advertised"
         },
         "on_invalid": {
@@ -195,7 +218,12 @@
       },
       "ssh_server": {
         "type": "object",
-        "order": ["enabled", "disable_pty", "disable_sftp", "disable_forwarding"],
+        "order": [
+          "enabled",
+          "disable_pty",
+          "disable_sftp",
+          "disable_forwarding"
+        ],
         "fields": {
           "enabled": {
             "type": "bool",
@@ -247,8 +275,15 @@
       }
     },
     "build_tag": "with_tailscale",
-    "on_core_unsupported": { "action": "drop_node", "code": "tailscale_core_unsupported" },
-    "exit_capable_when": { "any_set": ["exit_node"] }
+    "on_core_unsupported": {
+      "action": "drop_node",
+      "code": "tailscale_core_unsupported"
+    },
+    "exit_capable_when": {
+      "any_set": [
+        "exit_node"
+      ]
+    }
   },
   "mappers": {
     "singbox": {

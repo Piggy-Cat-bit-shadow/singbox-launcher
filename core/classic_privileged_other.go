@@ -5,10 +5,6 @@ package core
 import (
 	"errors"
 	"os"
-
-	"fyne.io/fyne/v2"
-
-	"singbox-launcher/internal/dialogs"
 )
 
 // privilegedCoreCopyGate — заглушка вне daemon-платформ (Linux, Win7):
@@ -30,11 +26,11 @@ func (ac *AppController) elevatedClassicStart() (string, *os.File, error) {
 }
 
 // tunInstallServiceAction — службы нет (Linux, Win7): кнопки Install service нет.
-func (ac *AppController) tunInstallServiceAction() (dialogs.Action, bool) {
-	return dialogs.Action{}, false
+func (ac *AppController) tunInstallServiceAction() (uiport.UIAction, bool) {
+	return uiport.UIAction{}, false
 }
 
 // ShowDaemonUnsafeNoticeElevated — службы нет: показывать нечего.
-func (ac *AppController) ShowDaemonUnsafeNoticeElevated(_ fyne.Window, _, _, _ string) bool {
+func (ac *AppController) ShowDaemonUnsafeNoticeElevated(_, _, _ string) bool {
 	return false
 }

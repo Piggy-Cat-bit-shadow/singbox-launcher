@@ -58,8 +58,8 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 
 	ac := GetController()
 	progress := func(p float64, msg string) {
-		if ac != nil && ac.UIService != nil && ac.UIService.UpdateParserProgressFunc != nil {
-			ac.UIService.UpdateParserProgressFunc(p, msg)
+		if ac != nil && ac.uiPort != nil {
+			ac.uiPort.ReportParserProgress(p, msg)
 		}
 	}
 

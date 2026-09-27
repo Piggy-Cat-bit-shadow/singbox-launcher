@@ -379,7 +379,7 @@ type Param struct {
 	Priority int    `json:"priority"`
 	Merge    string `json:"merge"`
 
-	ValueMap map[string]interface{}            `json:"value_map"`
+	ValueMap map[string]interface{} `json:"value_map"`
 	// ValueMapCase — "sensitive", если регистр значения ЗНАЧИМ.
 	//
 	// Общее правило обратное (живые подписки шлют `security=NONE`), но там,
@@ -397,9 +397,9 @@ type Param struct {
 	//
 	// Читается ТОЛЬКО вместе с `on_invalid`: у записи без него промах и так
 	// означает «вези как пришло», и перечислять годные значения незачем.
-	Allow    []string                          `json:"allow"`
-	Sets     map[string]map[string]interface{} `json:"sets"`
-	Implies  map[string]interface{}            `json:"implies"`
+	Allow   []string                          `json:"allow"`
+	Sets    map[string]map[string]interface{} `json:"sets"`
+	Implies map[string]interface{}            `json:"implies"`
 
 	When map[string]interface{} `json:"when"`
 
@@ -460,7 +460,7 @@ type Param struct {
 	// которого во входе не было. Отличается от простого наличия implies: при
 	// занятом пути присваивание проигрывает, и сообщать не о чем.
 	OnImpliesWritten map[string]interface{} `json:"on_implies_written"`
-	OnLenGt       map[string]interface{} `json:"on_len_gt"`
+	OnLenGt          map[string]interface{} `json:"on_len_gt"`
 	// OnEmpty — код за ПУСТОЕ либо отсутствующее значение источника.
 	//
 	// Отличается от `required` тем, что узел ОСТАЁТСЯ: «поля нет» бывает и
@@ -641,7 +641,7 @@ type UserInfo struct {
 	// законный userid socks4 (пароля у версии 4 нет по протоколу), но
 	// "useridonly" проходит RawStdEncoding и уезжает мусором.
 	DecodeRequiresSeparator string `json:"decode_requires_separator"`
-	Split                *struct {
+	Split                   *struct {
 		Sep string `json:"sep"`
 		// Limit: 2 — резать по ПЕРВОМУ разделителю: пароль с двоеточием
 		// иначе теряется.
@@ -948,7 +948,6 @@ func (e *EmitUserInfo) UnmarshalJSON(data []byte) error {
 // Mapper — одна секция-маппер: вид источника у одного протокола.
 type Mapper struct {
 	Detect *Detect `json:"detect"`
-
 
 	// BodySource — каким source тело приходит в санитайзер: на это опирается
 	// except_sources в правилах реестра. У нас пять значений

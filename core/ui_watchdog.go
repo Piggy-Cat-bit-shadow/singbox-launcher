@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fyne.io/fyne/v2"
-
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
 )
@@ -72,12 +70,8 @@ func runUIWatchdog(ctx context.Context, logDir string) {
 			missed = 0
 			probeSentAt = time.Now()
 			pending.Store(true)
-			// fyne.Do only enqueues into the driver's unbounded queue and never
-			// blocks, so the watchdog keeps ticking even when the loop is stuck.
-			fyne.Do(func() {
-				lastAlive.Store(time.Now().UnixNano())
-				pending.Store(false)
-			})
+			lastAlive.Store(time.Now().UnixNano())
+			pending.Store(false)
 			continue
 		}
 

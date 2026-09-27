@@ -18,7 +18,6 @@ import (
 	"singbox-launcher/core/state"
 	"singbox-launcher/core/template"
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
@@ -78,8 +77,8 @@ func (svc *ConfigService) RunParserProcess() {
 	ac.ParserMutex.Lock()
 	if ac.ParserRunning {
 		ac.ParserMutex.Unlock()
-		if ac.UIService != nil && ac.UIService.Application != nil && ac.UIService.MainWindow != nil {
-			dialogs.ShowAutoHideInfo(ac.UIService.Application, ac.UIService.MainWindow, "Parser Info", "Configuration update is already in progress.")
+		if ac.uiPort != nil {
+			ac.uiPort.ShowInfo("Parser Info", "Configuration update is already in progress.")
 		}
 		return
 	}
@@ -103,11 +102,7 @@ func (svc *ConfigService) RunParserProcess() {
 	// зарегистрирован.
 	if err != nil {
 		debuglog.ErrorLog("RunParser: subscriptions refresh failed: %v", err)
-		if ac.UIService != nil && ac.UIService.ShowSubsResultFunc != nil {
-			ac.UIService.ShowSubsResultFunc(false, err.Error())
-		} else {
-			ac.ShowParserError(fmt.Errorf("refresh subscriptions: %w", err))
-		}
+		ac.ui().ReportSubsResult(false, err.Error())
 		return
 	}
 	debuglog.InfoLog("RunParser: cache refreshed; config.json rebuilt by UpdateConfigFromSubscriptions")
@@ -150,8 +145,8 @@ func parserSuccessToastMessage(result *config.OutboundGenerationResult) string {
 
 // updateParserProgress safely calls UpdateParserProgressFunc if it's not nil
 func updateParserProgress(ac *AppController, progress float64, status string) {
-	if ac.UIService != nil && ac.UIService.UpdateParserProgressFunc != nil {
-		ac.UIService.UpdateParserProgressFunc(progress, status)
+	{
+		ac.ui().ReportParserProgress(progress, status)
 	}
 }
 
@@ -300,11 +295,7 @@ func (svc *ConfigService) updateConfigFromSubscriptions(triggerRebuild bool) (*c
 	// updateConfigInfo. Финальный ShowSubsResultFunc-toast тоже рефрешит метку
 	// (safety-net, если rebuild упал до публикации). Прямой UpdateConfigStatusFunc
 	// здесь убран. UpdateCoreStatusFunc оставлен (VpnState-канал, вне scope).
-	if ac.UIService != nil {
-		if ac.UIService.UpdateCoreStatusFunc != nil {
-			ac.UIService.UpdateCoreStatusFunc()
-		}
-	}
+	ac.ui().UpdateCoreStatus()
 
 	// SPEC 045 фаза 9: убрали условный AutoRebuildOnChange — Update всегда
 	// сопровождается rebuild'ом, чтобы config.json не отставал от свежего
@@ -322,12 +313,12 @@ func (svc *ConfigService) updateConfigFromSubscriptions(triggerRebuild bool) (*c
 	// Иначе при auto-update fallback'е (RebuildConfigIfDirty → Update) UI
 	// зависает на in-progress 100% — RunParser в этом пути не задействован.
 	// Сообщение учитывает rebuild error: success Update + failed Rebuild = частичный успех.
-	if ac.UIService != nil && ac.UIService.ShowSubsResultFunc != nil {
+	{
 		if rebuildErr != nil {
-			ac.UIService.ShowSubsResultFunc(false,
+			ac.uiPort.ReportSubsResult(false,
 				fmt.Sprintf("%s (rebuild failed: %v)", parserSuccessToastMessage(result), rebuildErr))
 		} else {
-			ac.UIService.ShowSubsResultFunc(true, parserSuccessToastMessage(result))
+			ac.uiPort.ReportSubsResult(true, parserSuccessToastMessage(result))
 		}
 	}
 

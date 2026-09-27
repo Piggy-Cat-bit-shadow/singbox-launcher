@@ -17,7 +17,6 @@ import (
 	"singbox-launcher/core/template"
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/dialogs"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
@@ -273,10 +272,8 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 	if !configValid {
 		checkErr := outcome.CheckErr
 		debuglog.ErrorLog("RebuildConfigIfDirty: sing-box check failed: %v", checkErr)
-		if ac.UIService != nil && ac.UIService.MainWindow != nil {
-			dialogs.ShowErrorText(ac.UIService.MainWindow,
-				locale.T("Config validation failed"),
-				// Текст переписан вместе с §5А: «Connect won't work until
+		if ac.uiPort != nil {
+			ac.uiPort.ShowError(locale.T("Config validation failed"), // Текст переписан вместе с §5А: «Connect won't work until
 				// this is fixed» стало бы прямой неправдой — config.json НЕ
 				// заменён, на диске лежит предыдущий рабочий конфиг, и
 				// Connect как раз будет работать, на нём.
@@ -366,10 +363,8 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 	// dashboard-подписчик зовёт updateConfigInfo. Поэтому прямой вызов
 	// UpdateConfigStatusFunc здесь убран. UpdateCoreStatusFunc оставлен
 	// (VpnState-канал, вне scope этого шага).
-	if ac.UIService != nil {
-		if ac.UIService.UpdateCoreStatusFunc != nil {
-			ac.UIService.UpdateCoreStatusFunc()
-		}
+	if ac.uiPort != nil {
+		ac.ui().UpdateCoreStatus()
 	}
 
 	// SPEC 115 §3: тоста об исключённых источниках здесь больше НЕТ (решение
@@ -408,8 +403,8 @@ func (ac *AppController) loadTemplateForBuild(l paths.Layout) (td *template.Temp
 	}
 	// Вкладка Local прячет Configurator и показывает Download, пока файла
 	// нет, — после докачки ей надо перечитать.
-	if ac.UIService != nil && ac.UIService.UpdateConfigStatusFunc != nil {
-		ac.UIService.UpdateConfigStatusFunc()
+	{
+		ac.ui().UpdateConfigStatus()
 	}
 	return td, true, nil
 }
