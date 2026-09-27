@@ -5,7 +5,7 @@ Fork-only delivery. Everything below is produced and kept in
 
 - Repository: `https://github.com/Piggy-Cat-bit-shadow/singbox-launcher`
 - Branch: `fix/macos-custom-core-reliability`
-- Commit: `e1b84c7e996e1454aaf28d2b4088a8710e5cc619`
+- Commit: `92c5848099f7792991dacfb7f4355863bc94ae70`
 - Baseline the branch is built on: `58f3eb47ed015c984b7d8fff3fd97f5494a793c8` (`v2.3.2`)
 
 The `upstream` git remote was removed, so `git remote -v` shows `origin` only.
@@ -18,9 +18,9 @@ The `upstream` git remote was removed, so `git remote -v` shows `origin` only.
 | Executable | `singbox-launcher.app/Contents/MacOS/singbox-launcher` |
 | Size | `39 275 474` bytes |
 | Architecture | Mach-O 64-bit executable **arm64** |
-| SHA256 | `5f591837bcdc865beebb418d572bfd6dc3550aaec9c06bfe216deef1dbe851fd` |
+| SHA256 | see `BUILD_INFO.txt` beside the `.app` — it goes stale here on every commit |
 | Signature | ad-hoc (`Signature=adhoc`, `TeamIdentifier=not set`) — **not notarized** |
-| Embedded commit | `e1b84c7e…` (the build stamps `RequiredTemplateRef` from `HEAD`) |
+| Embedded commit | `92c58480…` (the build stamps `RequiredTemplateRef` from `HEAD`) |
 
 Rebuild with:
 
@@ -34,7 +34,18 @@ export GITHUB_ACTIONS=true          # skips 'go mod tidy'
 The SHA256 **tracks `HEAD`**, because the commit is embedded in the binary
 (`RequiredTemplateRef`, verifiable with `strings … | grep "$(git rev-parse HEAD)"`).
 Rebuilding after any new commit yields a different hash; that is expected, not a
-mismatch. Always record the hash together with the commit it came from.
+mismatch.
+
+Because of that, the authoritative hash for the artifact currently sitting in the
+working copy is recorded in **`BUILD_INFO.txt` next to the `.app`**, together with the
+commit it was built from. Read it there instead of relying on a hash quoted in this
+document, which would go stale on the next commit. Verify with:
+
+```bash
+cd "<working copy>"
+shasum -a 256 singbox-launcher.app/Contents/MacOS/singbox-launcher
+git rev-parse HEAD                 # must match the 'Commit' line in BUILD_INFO.txt
+```
 
 The `.app` is git-ignored (`*.app/`) and is therefore a build output, not repository
 content.
@@ -118,7 +129,7 @@ want it started automatically.
 ```bash
 cd "<working copy>"
 shasum -a 256 /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher
-# must equal: 5f591837bcdc865beebb418d572bfd6dc3550aaec9c06bfe216deef1dbe851fd
+# must equal the SHA256 in BUILD_INFO.txt (the artifact you just installed)
 file /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher   # must say arm64
 codesign --verify /Applications/singbox-launcher.app && echo "seal OK"
 /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher -paths
