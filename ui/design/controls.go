@@ -153,7 +153,7 @@ func (s *SegmentedNav) CreateRenderer() fyne.WidgetRenderer {
 	s.row = container.NewHBox(objs...)
 	return widget.NewSimpleRenderer(container.NewStack(
 		s.bg, border,
-		container.New(&paddedBox{l: 3, t: 3, r: 3, b: 3}, s.row)))
+		container.New(&paddedBox{L: 3, T: 3, R: 3, B: 3}, s.row)))
 }
 
 // MinSize: высота фиксирована, ширина — по подписям.
@@ -209,7 +209,7 @@ func newSegmentedItem(label string, index int, nav *SegmentedNav) *segmentedItem
 	it.holder = &segmentedHolder{item: it}
 	it.holder.ExtendBaseWidget(it.holder)
 
-	inner := container.New(&paddedBox{l: SpaceM, t: SpaceXS, r: SpaceM, b: SpaceXS},
+	inner := container.New(&paddedBox{L: SpaceM, T: SpaceXS, R: SpaceM, B: SpaceXS},
 		container.NewStack(it.bg, container.NewCenter(it.text)))
 	it.object = container.New(&minHeight{min: SegmentedHeight - 6, max: SegmentedHeight - 6},
 		container.NewStack(inner, it.holder))
@@ -317,3 +317,43 @@ func (b *StatusBadge) Level() StatusLevel { return b.level }
 
 // themeIcon возвращает иконку темы (хелпер для страниц).
 func themeIcon(n fyne.ThemeIconName) fyne.Resource { return theme.Icon(n) }
+
+// EmptyState — состояние «здесь пока нечего показать».
+//
+// Единый вид для пустых списков (нет машин, нет узлов): иконка, короткий
+// заголовок и одно пояснение. Раньше такие места выглядели по-разному —
+// где-то абзац текста, где-то ряд серых кнопок, который читается как поломка.
+type EmptyState struct {
+	object fyne.CanvasObject
+}
+
+// NewEmptyState собирает пустое состояние. caption может быть пустым.
+func NewEmptyState(title, caption string) *EmptyState {
+	iconBox := canvas.NewRectangle(SurfaceAlt())
+	iconBox.CornerRadius = RadiusControl
+	iconBox.SetMinSize(fyne.NewSize(40, 40))
+	icon := widget.NewIcon(theme.Icon(theme.IconNameInfo))
+	glyph := container.New(&fixedSizeBox{w: 40, h: 40}, container.NewStack(iconBox, container.NewCenter(icon)))
+
+	titleLbl := widget.NewLabel(title)
+	titleLbl.TextStyle = fyne.TextStyle{Bold: true}
+	titleLbl.Alignment = fyne.TextAlignCenter
+
+	items := []fyne.CanvasObject{container.NewCenter(glyph), titleLbl}
+	if caption != "" {
+		c := widget.NewLabel(caption)
+		c.Alignment = fyne.TextAlignCenter
+		c.Wrapping = fyne.TextWrapWord
+		c.Importance = widget.LowImportance
+		items = append(items, c)
+	}
+
+	e := &EmptyState{}
+	e.object = container.NewCenter(container.New(&paddedBox{
+		L: Space2XL, T: Space2XL, R: Space2XL, B: Space2XL,
+	}, container.NewVBox(items...)))
+	return e
+}
+
+// Object возвращает объект состояния.
+func (e *EmptyState) Object() fyne.CanvasObject { return e.object }

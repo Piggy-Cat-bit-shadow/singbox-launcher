@@ -144,24 +144,6 @@ func withColumnWidth(content fyne.CanvasObject, width float32) fyne.CanvasObject
 	return container.New(&minSizeBox{min: fyne.NewSize(width, 0)}, content)
 }
 
-// CreateRemoteTab — вкладка Remote: слева прокси ВЫБРАННОЙ машины, справа
-// список машин с управлением.
-//
-// onSelectionChanged перезагружает левую колонку после смены активной машины.
-// Без этого список остался бы с узлами предыдущей — то есть показывал бы
-// чужие данные под именем новой машины (нарушение инварианта §5.3).
-func CreateRemoteTab(ac *core.AppController) (fyne.CanvasObject, *ProxyListPanel) {
-	proxyPanel := CreateProxyListPanel(ac, services.ScopeRemote)
-	// Обновляем СВОЮ панель напрямую, а не через UIService.RefreshAPIFunc:
-	// выбор машины касается списка Remote, и промахнуться мимо него в момент,
-	// когда слоты принадлежат другой вкладке, нельзя.
-	machines := CreateMachineListPanel(ac, proxyPanel)
-	split := container.NewHSplit(proxyPanel.Content, withColumnWidth(machines, rightColumnWidth))
-	return pageWithHeader(locale.T("Remote"),
-		locale.T("Manage the sing-box cores on your other machines"),
-		withMinimalLeftColumn(split)), proxyPanel
-}
-
 // MinWindowSize — нижняя граница размера главного окна (SPEC 144).
 //
 // Выведена из содержимого, а не назначена: сайдбар (208) плюс обе колонки

@@ -64,8 +64,8 @@ func (m *MaxWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 // полями страницы.
 func ConstrainContent(content fyne.CanvasObject, maxWidth float32) fyne.CanvasObject {
 	padded := container.New(&paddedBox{
-		l: ContentPaddingH, t: ContentPaddingV,
-		r: ContentPaddingH, b: ContentPaddingV,
+		L: ContentPaddingH, T: ContentPaddingV,
+		R: ContentPaddingH, B: ContentPaddingV,
 	}, content)
 	return container.New(&MaxWidthLayout{Max: maxWidth}, padded)
 }
@@ -82,4 +82,95 @@ func SpacerV(h float32) fyne.CanvasObject {
 	r := canvas.NewRectangle(color.Transparent)
 	r.SetMinSize(fyne.NewSize(1, h))
 	return r
+}
+
+// MaxContentWidthWide — предел ширины для страниц со списками (Remote,
+// Proxies). Шире обычных текстовых страниц: список узлов выигрывает от
+// дополнительного места, тогда как форма настроек — нет.
+const MaxContentWidthWide float32 = 900
+
+// ConstrainContentWide — как ConstrainContent, но с широким пределом.
+func ConstrainContentWide(content fyne.CanvasObject) fyne.CanvasObject {
+	return ConstrainContent(content, MaxContentWidthWide)
+}
+
+// VStack — вертикальный список с ТОЧНЫМ промежутком.
+//
+// Отличие от container.NewVBox: последний берёт промежуток из
+// theme.SizeNamePadding, поэтому объявленный в токенах gap не действует, а
+// явно вставленный распор даёт двойной зазор. Здесь промежуток задаётся
+// ровно один раз и не зависит от темы.
+type VStack struct {
+	Gap     float32
+	Objects []fyne.CanvasObject
+}
+
+// NewVStack собирает вертикальный стек.
+func NewVStack(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&VStack{Gap: gap, Objects: objects}, objects...)
+}
+
+// Layout размещает объекты сверху вниз с промежутком Gap.
+func (v *VStack) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	y := float32(0)
+	for _, o := range objects {
+		h := o.MinSize().Height
+		o.Move(fyne.NewPos(0, y))
+		o.Resize(fyne.NewSize(size.Width, h))
+		y += h + v.Gap
+	}
+}
+
+// MinSize складывает высоты и промежутки между ними.
+func (v *VStack) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var w, h float32
+	for i, o := range objects {
+		m := o.MinSize()
+		if m.Width > w {
+			w = m.Width
+		}
+		h += m.Height
+		if i > 0 {
+			h += v.Gap
+		}
+	}
+	return fyne.NewSize(w, h)
+}
+
+// HStack — горизонтальный список с точным промежутком.
+type HStack struct {
+	Gap     float32
+	Objects []fyne.CanvasObject
+}
+
+// NewHStack собирает горизонтальный стек.
+func NewHStack(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&HStack{Gap: gap, Objects: objects}, objects...)
+}
+
+// Layout размещает объекты слева направо с промежутком Gap.
+func (h *HStack) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	x := float32(0)
+	for _, o := range objects {
+		w := o.MinSize().Width
+		o.Move(fyne.NewPos(x, 0))
+		o.Resize(fyne.NewSize(w, size.Height))
+		x += w + h.Gap
+	}
+}
+
+// MinSize складывает ширины и промежутки между ними.
+func (h *HStack) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var w, ht float32
+	for i, o := range objects {
+		m := o.MinSize()
+		w += m.Width
+		if i > 0 {
+			w += h.Gap
+		}
+		if m.Height > ht {
+			ht = m.Height
+		}
+	}
+	return fyne.NewSize(w, ht)
 }

@@ -4942,5 +4942,11 @@
   },
   "Where the launcher keeps its data.": {
     "value": "Где лаунчер хранит данные."
+  },
+  "No machine connected": {
+    "value": "Машина не подключена"
+  },
+  "Choose a machine on the Machines tab to see its nodes.": {
+    "value": "Выберите машину на вкладке «Машины», чтобы увидеть её узлы."
   }
 }

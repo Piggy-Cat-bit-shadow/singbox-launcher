@@ -40,45 +40,6 @@ func buildProxiesPage(panel *ProxyListPanel) fyne.CanvasObject {
 		container.New(&design.MaxWidthLayout{Max: design.MaxContentWidth + 260}, panel.Content))
 }
 
-// buildRemotePage — страница удалённых машин.
-//
-// Сохраняется прежняя двухколоночная модель (список машин + список прокси
-// выбранной машины), потому что она отражает реальную связь данных: прокси
-// принадлежат выбранной машине. Меняется оформление, не структура.
-func buildRemotePage(proxyPanel *ProxyListPanel, machines fyne.CanvasObject) fyne.CanvasObject {
-	// Page-local navigation: страница показывает либо машины, либо их узлы.
-	// Раньше обе колонки стояли одновременно, и список прокси невыбранной
-	// машины занимал половину экрана пустотой.
-	body := container.NewStack()
-
-	machinesView := container.New(&design.MaxWidthLayout{Max: design.MaxContentWidth},
-		container.NewVBox(machines))
-	proxiesView := container.New(&design.MaxWidthLayout{Max: design.MaxContentWidth + 260},
-		container.NewVBox(proxyPanel.Content))
-
-	seg := design.NewSegmentedNav(
-		[]string{locale.T("Machines"), locale.T("Proxies")},
-		func(i int) {
-			if i == 0 {
-				body.Objects = []fyne.CanvasObject{machinesView}
-			} else {
-				body.Objects = []fyne.CanvasObject{proxiesView}
-			}
-			body.Refresh()
-		},
-	)
-	// По умолчанию — машины: без выбранной машины список узлов пуст, и
-	// показывать пустоту первым экраном нельзя.
-	body.Objects = []fyne.CanvasObject{machinesView}
-
-	header := design.NewPageHeader(
-		locale.T("Remote"),
-		locale.T("Manage the sing-box cores on your other machines"),
-		seg,
-	)
-	return container.NewBorder(header.Object(), nil, nil, nil, body)
-}
-
 // buildAboutPage — страница «О программе».
 //
 // Раньше Help был одной строкой с версией и двумя ссылками в подвале,
