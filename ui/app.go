@@ -15,13 +15,20 @@ import (
 	"singbox-launcher/ui/icons"
 )
 
-// App manages the UI structure and tabs.
+// App manages the UI structure, its root shell and the retained tab strip.
 //
-// `overlay` and `content` exist for the optional main-window click-redirect
-// overlay (see `ui/wizard_overlay.go::wizardOverlayEnabled`). When the
-// feature flag is off, `content == tabs` (bare passthrough) and `overlay`
-// stays nil — clicks on the main window flow normally even while the
-// configurator is open.
+// **Root content (SPEC 144).** `content` is the sidebar shell:
+// `Border(left: sidebar, center: contentHost)`. `tabs` is a legacy
+// compatibility object — it still owns `OnSelected`, which now delegates to
+// `selectSection`, and `updateClashAPITabState` still touches it, but it is
+// never placed in the visual tree. Only `GetContent()` decides what the window
+// shows, and it returns `content`.
+//
+// `overlay` is the optional main-window click-redirect overlay
+// (see `ui/wizard_overlay.go::wizardOverlayEnabled`). With the flag off
+// (default) `overlay` stays nil and `content` remains the bare sidebar shell —
+// clicks flow normally even while the configurator is open. With the flag on,
+// `content` becomes `Stack(sidebar shell, overlay)`.
 type App struct {
 	window      fyne.Window
 	core        *core.AppController
@@ -50,9 +57,12 @@ type App struct {
 	// currentSection — активный раздел. Единственный источник истины для
 	// подсветки навигации; состояние ядра/машин здесь не хранится.
 	currentSection SectionID
-	content        fyne.CanvasObject
+	// content — корень окна: сайдбар + contentHost (SPEC 144). Именно его
+	// возвращает GetContent; AppTabs в дерево не попадает.
+	content fyne.CanvasObject
 	// overlay is a concrete ClickRedirect component from `ui/components`.
-	// nil when `wizardOverlayEnabled` is false (current default).
+	// nil when `wizardOverlayEnabled` is false (current default), in which
+	// case `content` is the sidebar shell itself.
 	overlay *components.ClickRedirect
 
 	// rejected — плашка «ядро выключило N серверов» на вкладке Local
@@ -435,9 +445,14 @@ func (a *App) showSection(id SectionID) {
 	}
 }
 
-// GetContent returns the root content for the main window (tabs alone when
-// the overlay is disabled, tabs+overlay when enabled — see
-// `wizardOverlayEnabled`).
+// GetContent returns the root content for the main window: the sidebar shell
+// (`content`), or sidebar shell + ClickRedirect overlay when
+// `wizardOverlayEnabled` is on (see `ui/wizard_overlay.go`).
+//
+// The `a.tabs` fallback is unreachable in practice — NewApp always assigns
+// `content` — and exists only so an App built without that assignment cannot
+// return nil to SetContent. It is NOT the intended root: AppTabs is a
+// compatibility object and must never be what the window shows (SPEC 144).
 func (a *App) GetContent() fyne.CanvasObject {
 	if a.content != nil {
 		return a.content

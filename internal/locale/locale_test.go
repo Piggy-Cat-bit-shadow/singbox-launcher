@@ -135,8 +135,12 @@ func TestTfFunction(t *testing.T) {
 	loadExternalLocalesForTest(t)
 	SetLang("ru")
 	defer SetLang("en")
-	got := Tf("📦 Version: %s", "v1.0")
-	if got != "📦 Версия: v1.0" {
+	// Fixture uses a real key from the shipped catalog. It used to be
+	// "📦 Version: %s"; SPEC 144 removed that emoji variant from the UI and
+	// from bin/locale/ru.json, so the key is now "Version: %s" — the old
+	// string fell back to the English source and failed here.
+	got := Tf("Version: %s", "v1.0")
+	if got != "Версия: v1.0" {
 		t.Errorf("Tf = %q", got)
 	}
 }
