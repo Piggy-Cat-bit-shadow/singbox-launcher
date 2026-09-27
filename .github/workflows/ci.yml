@@ -230,9 +230,11 @@ jobs:
           APP_VERSION: ${{ needs.meta.outputs.version }}
         run: |
           ./build/package_macos.sh universal
-          rm -rf dist
           mkdir -p dist
           cp -R JiejieBox.app dist/singbox-launcher.app
+          # The packaging script also drops its own zip/BUILD_INFO into dist/;
+          # CI publishes only the .app bundles (the release job zips them).
+          rm -f dist/*.zip dist/*.dmg dist/BUILD_INFO.txt
 
       - name: Build macOS .app bundle (Catalina target, Intel-only)
         shell: bash
@@ -248,6 +250,7 @@ jobs:
           else
             echo "Warning: catalina build did not produce JiejieBox.app"
           fi
+          rm -f dist/*.zip dist/*.dmg dist/BUILD_INFO.txt
 
       - name: Upload Catalina artifacts
         uses: actions/upload-artifact@v6

@@ -95,7 +95,10 @@ LDFLAGS="$LDFLAGS -X singbox-launcher/internal/constants.RequiredTemplateRef=$TE
 # штампует minos по SDK, из-за чего бинарь требует macOS новее заявленного.
 LDFLAGS="$LDFLAGS -linkmode=external -extldflags=-mmacosx-version-min=$MIN_MACOS_VERSION"
 
-rm -rf "$APP_NAME.app" "$DIST_DIR"
+rm -rf "$APP_NAME.app"
+# Do NOT wipe dist/ wholesale: CI runs the universal and catalina builds in the
+# same workspace, and the second run would delete the first run's bundle.
+# Remove only this run's own outputs.
 mkdir -p "$DIST_DIR"
 
 echo ""
