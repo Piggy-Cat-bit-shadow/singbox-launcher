@@ -219,16 +219,20 @@ jobs:
           clang --version || echo "Warning: clang check failed, but continuing..."
           xcrun --show-sdk-path || echo "Warning: xcrun check failed, but continuing..."
 
-      - name: Build macOS .app bundle (Universal)
+      # This fork ships as JiejieBox (own name + bundle id) so it can sit
+      # beside the upstream app. build/package_macos.sh applies that identity;
+      # the upstream build_darwin.sh would produce upstream-branded bundles.
+      - name: Build JiejieBox .app bundle (Universal)
         shell: bash
         env:
           CGO_ENABLED: 1
           GOOS: darwin
           APP_VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          ./build/build_darwin.sh universal
+          ./build/package_macos.sh universal
+          rm -rf dist
           mkdir -p dist
-          mv -f singbox-launcher.app dist/
+          cp -R JiejieBox.app dist/singbox-launcher.app
 
       - name: Build macOS .app bundle (Catalina target, Intel-only)
         shell: bash
@@ -237,12 +241,12 @@ jobs:
           GOOS: darwin
           APP_VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          ./build/build_darwin.sh catalina
+          ./build/package_macos.sh catalina
           mkdir -p dist
-          if [ -d "singbox-launcher.app" ]; then
-            mv -f singbox-launcher.app dist/singbox-launcher-macos-catalina.app
+          if [ -d "JiejieBox.app" ]; then
+            cp -R JiejieBox.app dist/singbox-launcher-macos-catalina.app
           else
-            echo "Warning: catalina build did not produce singbox-launcher.app"
+            echo "Warning: catalina build did not produce JiejieBox.app"
           fi
 
       - name: Upload Catalina artifacts

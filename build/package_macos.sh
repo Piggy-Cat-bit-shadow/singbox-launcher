@@ -13,7 +13,7 @@
 # нельзя — см. комментарий к constants.DataDirAppName.
 #
 # Использование:
-#   build/package_macos.sh [arm64|universal] [--install]
+#   build/package_macos.sh [arm64|universal|catalina] [--install]
 #
 #   --install  дополнительно установить в /Applications (обновляет только
 #              исполняемый файл, если приложение уже стоит).
@@ -26,10 +26,10 @@ BUILD_TYPE="arm64"
 DO_INSTALL=false
 for arg in "$@"; do
     case "$arg" in
-        arm64|universal) BUILD_TYPE="$arg" ;;
+        arm64|universal|catalina) BUILD_TYPE="$arg" ;;
         --install) DO_INSTALL=true ;;
         -h|--help)
-            echo "Usage: $0 [arm64|universal] [--install]"
+            echo "Usage: $0 [arm64|universal|catalina] [--install]"
             exit 0
             ;;
         *) echo "ERROR: unknown argument: $arg" >&2; exit 1 ;;
@@ -40,6 +40,10 @@ APP_NAME="JiejieBox"
 APP_BUNDLE_ID="com.piggycat.jiejiebox"
 BINARY_NAME="JiejieBox"
 MIN_MACOS_VERSION="11.0"
+# catalina — Intel-only сборка с минимальной macOS 10.15 (как в апстриме).
+if [ "$BUILD_TYPE" = "catalina" ]; then
+    MIN_MACOS_VERSION="10.15"
+fi
 DIST_DIR="dist"
 
 echo ""
@@ -101,6 +105,8 @@ if [ "$BUILD_TYPE" = "universal" ]; then
     GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "${BINARY_NAME}_amd64"
     lipo -create -output "$BINARY_NAME" "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
     rm -f "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
+elif [ "$BUILD_TYPE" = "catalina" ]; then
+    GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 else
     GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o "$BINARY_NAME"
 fi
@@ -148,6 +154,9 @@ fi
     if [ "$BUILD_TYPE" = "universal" ]; then
         echo '    <key>LSArchitecturePriority</key>'
         echo '    <array><string>arm64</string><string>x86_64</string></array>'
+    elif [ "$BUILD_TYPE" = "catalina" ]; then
+        echo '    <key>LSArchitecturePriority</key>'
+        echo '    <array><string>x86_64</string></array>'
     else
         echo '    <key>LSArchitecturePriority</key>'
         echo '    <array><string>arm64</string></array>'
