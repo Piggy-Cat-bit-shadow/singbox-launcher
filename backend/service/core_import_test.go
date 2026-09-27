@@ -3,11 +3,10 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
 
 	"singbox-launcher/backend/protocol"
@@ -154,7 +153,7 @@ func TestCoreImportRejectsNonCoreBinaries(t *testing.T) {
 
 	// A real arm64 executable that is not sing-box: correct architecture, runs
 	// fine, prints no version banner.
-	_, ierr := b.ImportCoreFile(benignBinary(t))
+	_, ierr := b.ImportCoreFile(knownNonCoreExecutable(t))
 	coreImportCode(t, ierr, "invalid_core")
 
 	if after := mustHash(t, corePath); after != before {
@@ -162,57 +161,69 @@ func TestCoreImportRejectsNonCoreBinaries(t *testing.T) {
 	}
 }
 
-// benignBinary builds a tiny, genuine Mach-O executable that exits immediately.
+// knownNonCoreExecutable returns a system executable that is a real Mach-O for
+// this architecture but is NOT sing-box.
 //
-// Why not just copy the Go test binary: `os.Executable()` inside a test is the
-// test binary itself, and running it bare RE-ENTERS the test suite instead of
-// exiting. `coreIsStoppedForReplacement` reads the installed core's version by
-// running it (`<path> version`), which has no timeout, so seeding that binary as
-// the installed core makes the import hang until the 10-minute test timeout —
-// observed in CI, where it looked like a feature failure and was not.
+// This exists because of a runaway that cost the macOS CI runner ten minutes per
+// push. The tests used to pass `os.Executable()` — the Go test binary itself —
+// as the candidate core. That is a trap, because the production code EXECUTES the
+// candidate:
 //
-// Compiling a two-line program gives a real arm64 Mach-O that is safe to execute
-// and terminates at once, which is all these tests need: what is under test is
-// the ORDER of the checks and the non-destructiveness of each failure, not the
-// contents of a working sing-box.
+//	ImportCoreFile → stageCoreBinary → probeStagedCoreVersion
+//	              → exec.CommandContext(ctx, staged, "version")
 //
-// The build is cached for the whole package run: several tests need this
-// fixture, and recompiling per test would dominate the suite.
-var benignBinaryOnce struct {
-	once sync.Once
-	path string
-	err  error
-}
-
-func benignBinary(t *testing.T) string {
+// and a Go test binary treats the positional argument `version` as "run the whole
+// suite". The child therefore re-entered the suite, reached the same core-import
+// test, and exec'd itself again. Confirmed by sending SIGQUIT to a runaway child:
+// goroutine 1 sat in testing.(*T).Run while another goroutine blocked in
+// os/exec.(*Cmd).Wait, and the only test symbol on the stack was
+// TestCoreImportRejectsNonCoreBinaries. The 3 s probe context bounds one
+// generation, not the whole tree, so the package burned its full timeout.
+//
+// `/usr/bin/true` is the right fixture: a regular file (not a symlink, so the
+// not_regular_file and same-path checks still behave normally), a universal
+// Mach-O that genuinely contains an arm64 slice, exits immediately, and prints
+// nothing resembling a version banner. `true version` therefore yields exactly
+// the invalid_core verdict these tests assert, without ever starting a test
+// runner.
+//
+// It skips rather than inventing a fixture when the system binary is missing or
+// fails the same architecture gate production applies, so the test can never
+// pass against something that is not a valid Mach-O.
+func knownNonCoreExecutable(t *testing.T) string {
 	t.Helper()
 
-	benignBinaryOnce.once.Do(func() {
-		dir, err := os.MkdirTemp("", "jiejiebox-benign-*")
-		if err != nil {
-			benignBinaryOnce.err = err
-			return
-		}
-		srcPath := filepath.Join(dir, "benign.go")
-		const src = "package main\n\nfunc main() {}\n"
-		if err := os.WriteFile(srcPath, []byte(src), 0o600); err != nil {
-			benignBinaryOnce.err = err
-			return
-		}
-		out := filepath.Join(dir, "benign")
-		if combined, err := exec.Command("go", "build", "-o", out, srcPath).CombinedOutput(); err != nil {
-			benignBinaryOnce.err = fmt.Errorf("cannot build the benign fixture: %w (%s)", err, combined)
-			return
-		}
-		benignBinaryOnce.path = out
-	})
-
-	if benignBinaryOnce.err != nil {
-		// No toolchain available: skip rather than assert against a fixture
-		// that could not be produced.
-		t.Skipf("%v", benignBinaryOnce.err)
+	path, err := exec.LookPath("true")
+	if err != nil {
+		t.Skipf("no system `true` executable to use as a non-core fixture: %v", err)
 	}
-	return benignBinaryOnce.path
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Skipf("cannot stat %s: %v", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Skipf("%s is not a regular file, so it would exercise the wrong rejection path", path)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Skipf("%s is not executable", path)
+	}
+
+	// The same checker the production path uses, so the fixture is proven to get
+	// past architecture validation and reach the version probe under test.
+	if err := checkCoreArchitecture(path); err != nil {
+		t.Skipf("%s does not pass the core architecture check: %v", path, err)
+	}
+
+	// Never let a test runner be selected again. This is the exact class of
+	// binary that caused the recursion, so a future edit that reaches for
+	// os.Executable() fails loudly here rather than quietly in CI.
+	if strings.HasSuffix(filepath.Base(path), ".test") {
+		t.Fatalf("refusing to use a Go test binary (%s) as a core candidate: "+
+			"executing it would re-enter the test suite", path)
+	}
+
+	return path
 }
 
 // TestCoreImportRefusesToReplaceItself — importing the path that is already
@@ -230,7 +241,7 @@ func TestCoreImportRefusesToReplaceItself(t *testing.T) {
 	b, corePath := coreImportFixture(t)
 
 	// Install a genuine arm64 Mach-O at the target path.
-	copyFile(t, benignBinary(t), corePath)
+	copyFile(t, knownNonCoreExecutable(t), corePath)
 	before := mustHash(t, corePath)
 
 	_, ierr := b.ImportCoreFile(corePath)
@@ -254,7 +265,7 @@ func TestCoreImportRefusesWhileOverrideIsActive(t *testing.T) {
 	b.ac.FileService.CoreSource = "env"
 	defer func() { b.ac.FileService.CoreSource = original }()
 
-	_, ierr := b.ImportCoreFile(benignBinary(t))
+	_, ierr := b.ImportCoreFile(knownNonCoreExecutable(t))
 	coreImportCode(t, ierr, "core_override_active")
 
 	if after := mustHash(t, corePath); after != before {
@@ -274,7 +285,7 @@ func TestCoreImportLeavesNoStagingLeftovers(t *testing.T) {
 	before := dirEntries(t, binDir)
 
 	// Any outcome is fine here; what matters is what is left behind.
-	_, _ = b.ImportCoreFile(benignBinary(t))
+	_, _ = b.ImportCoreFile(knownNonCoreExecutable(t))
 
 	after := dirEntries(t, binDir)
 	for name := range after {

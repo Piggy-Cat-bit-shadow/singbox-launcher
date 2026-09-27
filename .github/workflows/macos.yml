@@ -87,6 +87,15 @@ jobs:
       # Один прогон тестов. test_darwin.sh в CI сам отключает пересборку
       # тестовых бинарников «на посмотреть» (это стоило ~60 с и никому не
       # нужно) и НЕ подменяет GOCACHE, чтобы setup-go мог восстановить кэш.
+      #
+      # Этот прогон УЖЕ включает backend/... и internal/paths (проверено
+      # `go list ./...`): backend/service — это IPC-контракт, который
+      # декодирует SwiftUI-фронтенд, а internal/paths решает, где живут
+      # данные пользователя. Отдельный шаг «Backend protocol + layout tests»
+      # дублировал ровно это подмножество теми же флагами и был удалён
+      # (SPEC 150): тот же прогон, но второй раз, ~3.5 с на каждый push.
+      # Если понадобится проверять эти пакеты отдельно — они уже здесь;
+      # добавлять второй go test не нужно.
       - name: Run tests
         env:
           CGO_ENABLED: 1
@@ -169,16 +178,6 @@ jobs:
         if: inputs.deep_checks
         shell: bash
         run: go test ./core/config/ -run 'Registry' -count=1
-
-      # The backend/service package is the IPC contract the SwiftUI frontend
-      # decodes, and internal/paths decides where user data lives. Both are
-      # cheap and fast, so they run on every push rather than only in deep
-      # checks: a rename in a wire field breaks the app at runtime with no
-      # compile error on either side, and a layout regression silently points
-      # the app at the wrong data directory.
-      - name: Backend protocol + layout tests
-        shell: bash
-        run: go test ./backend/... ./internal/paths/ -count=1
 
       - name: Race detector (deep)
         if: inputs.deep_checks

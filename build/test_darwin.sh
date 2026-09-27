@@ -198,8 +198,44 @@ fi
 # Run tests with output to both file and screen
 echo "Packages to be tested:" 
 echo "$PKGS"
-go test $TEST_FLAGS -count=1 $PKGS 2>&1 | tee "$TEST_LOG"
+
+# Бюджет времени на весь прогон (SPEC 150).
+#
+# Без -timeout действует дефолт Go в 10 минут НА ПАКЕТ, и runaway-тест сжигает
+# раннер целиком: именно так прогон 36348884288 провисел >10 минут вместо ~45 с,
+# потому что тест подсовывал production-пробе собственный test binary, а тот
+# заново запускал набор тестов. Явный бюджет превращает такой сценарий в
+# быстрый внятный FAIL с дампом горутин, а не в тишину на десять минут.
+#
+# Применяется только в CI и в обычном прогоне: race-тесты идут своим путём
+# (run_mode=deep_checks) и требуют более широкого бюджета, а локальный
+# разработчик может захотеть поднять лимит через GO_TEST_TIMEOUT.
+TEST_TIMEOUT="${GO_TEST_TIMEOUT:-}"
+if [ -z "$TEST_TIMEOUT" ]; then
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        # Полный набор в CI идёт ~45 с; 2m оставляет запас на дрожание раннера
+        # и при этом гарантированно короткий FAIL вместо десяти минут.
+        TEST_TIMEOUT="2m"
+    else
+        # Локально — прежнее поведение, чтобы не менять привычные прогоны.
+        TEST_TIMEOUT="10m"
+    fi
+fi
+echo "Test timeout: $TEST_TIMEOUT"
+
+TEST_STARTED_AT=$(date +%s)
+go test $TEST_FLAGS -count=1 -timeout="$TEST_TIMEOUT" $PKGS 2>&1 | tee "$TEST_LOG"
 TEST_EXIT_CODE=${PIPESTATUS[0]}
+TEST_ELAPSED=$(( $(date +%s) - TEST_STARTED_AT ))
+echo ""
+echo "Test run wall time: ${TEST_ELAPSED}s (budget ${TEST_TIMEOUT})"
+if [ "$TEST_EXIT_CODE" -ne 0 ]; then
+    # Пакет-виновник виден и в tee-логе, и здесь; при таймауте Go печатает
+    # «panic: test timed out after ...» вместе с дампом горутин, по которому
+    # сразу ясно, какой тест не завершился.
+    echo "!!! Tests failed (exit $TEST_EXIT_CODE). Failing packages:"
+    grep -E "^(FAIL|--- FAIL|panic:)" "$TEST_LOG" | head -20 || true
+fi
 
 # Show finish time
 echo ""
