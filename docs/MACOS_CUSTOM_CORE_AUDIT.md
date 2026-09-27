@@ -6,12 +6,26 @@ from what remains **unconfirmed**.
 
 - Upstream: `https://github.com/Leadaxe/singbox-launcher`
 - Baseline commit: `58f3eb47ed015c984b7d8fff3fd97f5494a793c8`
-- Baseline == tag `v2.3.2` == current `upstream/main` (0 ahead / 0 behind)
+- Baseline == tag `v2.3.2` == current upstream `main` (0 ahead / 0 behind)
 - Fork: `https://github.com/Piggy-Cat-bit-shadow/singbox-launcher`
 - Branch: `fix/macos-custom-core-reliability`
 
 Because `v2.3.2` is the current tip of `main`, **none** of the reported issues have
 been superseded upstream: there is no already-fixed case to skip.
+
+## Delivery mode
+
+This work is developed **only** in `Piggy-Cat-bit-shadow/singbox-launcher`. Upstream is
+not a development target:
+
+- the pull request opened upstream during this task was **closed** and is not reopened;
+- no pull request is opened in the fork either;
+- the `upstream` git remote was **removed**, so there is no configured path to push
+  upstream by accident;
+- the fork, the branch and all commits are kept as-is;
+- new pull requests are created only on an explicit request.
+
+`git remote -v` therefore shows `origin` only.
 
 ## 0. Historical reproduction state vs current disk state
 
