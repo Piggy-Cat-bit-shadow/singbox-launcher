@@ -314,11 +314,17 @@ func (svc *ConfigService) updateConfigFromSubscriptions(triggerRebuild bool) (*c
 	// зависает на in-progress 100% — RunParser в этом пути не задействован.
 	// Сообщение учитывает rebuild error: success Update + failed Rebuild = частичный успех.
 	{
+		// ac.ui() rather than ac.uiPort: the field is nil unless a UI attached
+		// itself, and the headless backend never does. Calling through the
+		// accessor returns the no-op port instead of panicking on a nil
+		// interface — which is exactly what happened the first time the menu bar
+		// exercised update_subscriptions.
+		ui := ac.ui()
 		if rebuildErr != nil {
-			ac.uiPort.ReportSubsResult(false,
+			ui.ReportSubsResult(false,
 				fmt.Sprintf("%s (rebuild failed: %v)", parserSuccessToastMessage(result), rebuildErr))
 		} else {
-			ac.uiPort.ReportSubsResult(true, parserSuccessToastMessage(result))
+			ui.ReportSubsResult(true, parserSuccessToastMessage(result))
 		}
 	}
 

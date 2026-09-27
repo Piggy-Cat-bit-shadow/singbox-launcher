@@ -9,6 +9,14 @@ import (
 	"singbox-launcher/internal/debuglog"
 )
 
+// looksLikeJSON reports whether a body starts like JSON.
+//
+// Used only to decide whether the structured classification matters; the
+// classifier itself performs the real validation.
+func looksLikeJSON(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+}
+
 // tryDecodeBase64 attempts to decode base64 string using multiple encoding variants
 // Returns decoded bytes and source description, or error if all attempts fail.
 // Thin wrapper over the shared DecodeBase64Multi helper (encoding_utils.go).
@@ -52,22 +60,47 @@ func DecodeSubscriptionContent(content []byte) ([]byte, error) {
 		return decoded, nil
 	}
 
-	// JSON array of full configs (Xray-style subscription): pass through as subscription body.
-	if strings.HasPrefix(strings.TrimSpace(contentStr), "[") {
-		trimmed := strings.TrimSpace(contentStr)
-		if json.Valid([]byte(trimmed)) {
-			var elems []json.RawMessage
-			if err := json.Unmarshal([]byte(trimmed), &elems); err == nil {
-				debuglog.DebugLog("DecodeSubscriptionContent: JSON array subscription (%d element(s))", len(elems))
-				return []byte(trimmed), nil
-			}
-		}
-	}
+	trimmed := strings.TrimSpace(contentStr)
 
-	// Single JSON object or invalid JSON array: not a supported subscription list
-	if strings.HasPrefix(strings.TrimSpace(contentStr), "{") || strings.HasPrefix(strings.TrimSpace(contentStr), "[") {
-		debuglog.DebugLog("DecodeSubscriptionContent: Content is JSON configuration, not a subscription list")
-		return nil, fmt.Errorf("subscription URL returned JSON configuration instead of subscription list (base64 or plain text links)")
+	// Structured bodies pass through untouched for the parser to handle.
+	//
+	// The decoder's job is to unwrap base64 and reject the obviously invalid —
+	// NOT to decide which formats exist. It previously rejected every body
+	// starting with '{' before the parser saw it, so a subscription returning a
+	// complete sing-box config was refused even though the importer supports
+	// exactly that shape. ClassifySubscriptionBody is the single source of truth
+	// for formats (its own doc comment records this divergence), so the decoder
+	// asks it rather than second-guessing it.
+	//
+	// The kinds below are the ones that only the structured importer can read. A
+	// URI list keeps falling through to the plain-text branch, and anything the
+	// classifier does not recognise also lands there — which is why unknown JSON
+	// is rejected explicitly just below rather than passed through.
+	if looksLikeJSON(trimmed) {
+		switch ClassifySubscriptionBody(trimmed) {
+		case BodyKindSingboxOutbound, BodyKindSingboxOutboundArray,
+			BodyKindSingboxConfig, BodyKindSingboxConfigArray,
+			BodyKindXrayConfig, BodyKindXrayArray:
+			debuglog.DebugLog("DecodeSubscriptionContent: structured body (%s) passed through to the parser",
+				ClassifySubscriptionBody(trimmed))
+			return []byte(trimmed), nil
+		case BodyKindVPNLink:
+			// A vpn:// link is not JSON, but the classifier checks it first; it
+			// belongs to the parser too.
+			return []byte(trimmed), nil
+		}
+
+		// Valid JSON that no importer recognises. It must NOT fall through to
+		// the URI branch: a JSON blob is not a link list, and treating it as one
+		// produces zero nodes with no explanation.
+		var probe interface{}
+		if json.Unmarshal([]byte(trimmed), &probe) == nil {
+			debuglog.DebugLog("DecodeSubscriptionContent: unrecognised JSON body")
+			return nil, fmt.Errorf("unsupported JSON subscription format")
+		}
+		// Invalid JSON starting with '{' or '[': a truncated or corrupted body.
+		debuglog.DebugLog("DecodeSubscriptionContent: malformed JSON body")
+		return nil, fmt.Errorf("subscription body looks like JSON but is not valid JSON")
 	}
 
 	// Check if it's plain text links

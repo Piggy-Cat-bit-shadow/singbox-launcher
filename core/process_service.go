@@ -620,7 +620,10 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 		runGhostTunCleanup(true)
 		svc.Start(true)
 		{
-			ac.uiPort.UpdateCoreStatus()
+			// ac.ui() is nil-safe: the headless backend never attaches a UI, so
+			// calling through the field would panic on this path — which runs on
+			// every restart.
+			ac.ui().UpdateCoreStatus()
 		}
 		ac.CmdMutex.Lock()
 		return
@@ -655,7 +658,7 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 			if ac.RunningState.IsRunning() && ac.ConsecutiveCrashAttempts == currentAttemptCount {
 				ac.ConsecutiveCrashAttempts = 0
 				{
-					ac.uiPort.UpdateCoreStatus()
+					ac.ui().UpdateCoreStatus()
 				}
 			}
 		}()
@@ -714,7 +717,8 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		runGhostTunCleanup(true)
 		svc.Start(true)
 		{
-			ac.uiPort.UpdateCoreStatus() // refresh "Restarting..." → "Running" or "Stopped" if start failed
+			// nil-safe accessor: see the note on the restart path above.
+			ac.ui().UpdateCoreStatus() // refresh "Restarting..." → "Running" or "Stopped" if start failed
 		}
 		ac.CmdMutex.Lock()
 		return
@@ -783,7 +787,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 				debuglog.DebugLog("monitorSingBox: Process has been stable for %v. Resetting crash counter from %d to 0.", stabilityThreshold, ac.ConsecutiveCrashAttempts)
 				ac.ConsecutiveCrashAttempts = 0
 				{
-					ac.uiPort.UpdateCoreStatus()
+					ac.ui().UpdateCoreStatus()
 				}
 			}
 		}()
@@ -985,8 +989,9 @@ func (svc *ProcessService) checkAndShowSingBoxRunningWarning(ctx string) bool {
 				}
 			}
 			// The confirmation is presented by the GUI; the action itself is
-			// the same closure as before.
-			svc.ac.uiPort.ConfirmKillExistingCore(killIt)
+			// the same closure as before. Through ac.ui() so the headless
+			// backend, which has no port, does not panic here.
+			svc.ac.ui().ConfirmKillExistingCore(killIt)
 		}
 		return true
 	}

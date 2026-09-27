@@ -59,7 +59,9 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 	ac := GetController()
 	progress := func(p float64, msg string) {
 		if ac != nil && ac.uiPort != nil {
-			ac.uiPort.ReportParserProgress(p, msg)
+			// Same reason as the toast below: nil uiPort in the headless
+			// backend, so report through the nil-safe accessor.
+			ac.ui().ReportParserProgress(p, msg)
 		}
 	}
 

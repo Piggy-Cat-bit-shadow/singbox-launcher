@@ -101,3 +101,94 @@ func TestDecodeSubscriptionContent(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeSubscriptionContentPassesStructuredBodies — the decoder must not
+// second-guess the formats the importer supports.
+//
+// It previously rejected every body starting with '{' before the parser ran, so
+// a subscription returning a complete sing-box config failed with "returned JSON
+// configuration instead of subscription list" even though the importer handles
+// exactly that shape. ClassifySubscriptionBody is the single source of truth for
+// formats, and the decoder now asks it.
+func TestDecodeSubscriptionContentPassesStructuredBodies(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"single sing-box outbound",
+			`{"type":"vless","tag":"node-a","server":"a.example","server_port":443}`},
+		{"full sing-box config",
+			`{"outbounds":[{"type":"vless","tag":"n","server":"a.example","server_port":443}],"route":{"final":"n"}}`},
+		{"sing-box outbound array",
+			`[{"type":"vless","tag":"a"},{"type":"trojan","tag":"b"}]`},
+		{"sing-box config array",
+			`[{"outbounds":[{"type":"vless","tag":"a"}]},{"outbounds":[{"type":"trojan","tag":"b"}]}]`},
+		{"single Xray config",
+			`{"outbounds":[{"protocol":"vless","tag":"x"}]}`},
+		{"Xray config array",
+			`[{"outbounds":[{"protocol":"vless","tag":"x"}]}]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DecodeSubscriptionContent([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("structured body rejected: %v", err)
+			}
+			// Pass-through must be byte-identical: the decoder's job is to
+			// unwrap and reject, never to rewrite a body the parser will read.
+			if string(got) != tc.body {
+				t.Errorf("body was modified\n got: %s\nwant: %s", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestDecodeSubscriptionContentRejectsUnknownJSON — valid JSON that no importer
+// recognises must be refused with an accurate message.
+//
+// The old wording ("returned JSON configuration instead of subscription list")
+// became false once JSON configurations were supported, so it named a problem
+// that no longer existed. It must also NOT fall through to the URI branch: a
+// JSON blob is not a link list, and treating it as one yields zero nodes with no
+// explanation.
+func TestDecodeSubscriptionContentRejectsUnknownJSON(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"unknown object", `{"foo":"bar"}`},
+		{"unknown array", `[{"foo":"bar"}]`},
+		{"empty object", `{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeSubscriptionContent([]byte(tc.body))
+			if err == nil {
+				t.Fatal("unrecognised JSON was accepted")
+			}
+			if !strings.Contains(err.Error(), "unsupported JSON subscription format") {
+				t.Errorf("error %q should explain that the JSON shape is unsupported", err)
+			}
+			// The retired wording must be gone: it described JSON configs as
+			// unsupported, which is no longer true.
+			if strings.Contains(err.Error(), "instead of subscription list") {
+				t.Errorf("error %q still uses the retired wording", err)
+			}
+		})
+	}
+}
+
+// TestDecodeSubscriptionContentKeepsURIAndBrokenBodies — the fix must not widen
+// acceptance. A URI list still passes through, and a truncated JSON body is
+// still an error rather than an empty subscription.
+func TestDecodeSubscriptionContentKeepsURIAndBrokenBodies(t *testing.T) {
+	uri := "vless://uuid@a.example:443#Node A\ntrojan://pw@b.example:443#Node B\n"
+	got, err := DecodeSubscriptionContent([]byte(uri))
+	if err != nil {
+		t.Fatalf("URI list rejected: %v", err)
+	}
+	if string(got) != uri {
+		t.Error("URI list was modified")
+	}
+
+	if _, err := DecodeSubscriptionContent([]byte(`{"outbounds":[`)); err == nil {
+		t.Error("truncated JSON was accepted")
+	}
+}
