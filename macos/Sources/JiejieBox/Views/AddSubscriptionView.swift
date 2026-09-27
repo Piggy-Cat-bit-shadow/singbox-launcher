@@ -49,6 +49,7 @@ struct AddSubscriptionView: View {
                          + "you can refresh it later.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.horizontal, Metrics.rowPaddingH)
             }

@@ -105,14 +105,21 @@ func (b *Backend) Handshake() protocol.HandshakeResult {
 
 // capabilities reports which features this build actually has, so the
 // frontend can hide settings instead of guessing from the OS version.
+//
+// This is a product contract, not a historical capability list: it must
+// describe what the shipped app can do. Remote machines and the config
+// configurator were deliberately removed, so they are reported false even
+// though core still contains the machinery — a capability that claims a
+// deleted feature invites a client to offer UI that cannot work.
 func (b *Backend) capabilities() protocol.Capabilities {
 	return protocol.Capabilities{
 		// The daemon engine exists on macOS and Windows (non-386).
-		Daemon:       core.DaemonEngineAvailable(),
-		Elevation:    core.ElevationSupported(),
-		Remote:       true,
-		Traffic:      true,
-		Configurator: true,
+		Daemon:        core.DaemonEngineAvailable(),
+		Elevation:     core.ElevationSupported(),
+		Traffic:       true,
+		Subscriptions: true,
+		Remote:        false,
+		Configurator:  false,
 	}
 }
 
@@ -127,7 +134,42 @@ func (b *Backend) Snapshot() protocol.AppSnapshot {
 		Handshake:   b.Handshake(),
 		Core:        b.coreState(),
 		Settings:    b.settingsState(),
+		Proxy:       b.proxySummary(),
 	}
+}
+
+// proxySummary projects the current selection for the home screen.
+//
+// Read from the controller's cached state, so this costs nothing and does not
+// touch the network. The full node list stays on the Proxies screen where it is
+// actually needed.
+func (b *Backend) proxySummary() protocol.ProxySummary {
+	if b.ac == nil {
+		return protocol.ProxySummary{Delay: delayNotMeasured}
+	}
+
+	summary := protocol.ProxySummary{Delay: delayNotMeasured}
+	if b.ac.APIService != nil {
+		summary.Group = b.ac.APIService.GetSelectedClashGroup()
+		active := b.ac.APIService.GetActiveProxyName()
+		summary.Proxy = active
+		summary.ProxyDisplay = active
+	}
+
+	// The cached proxy list carries the last measured delay for the active
+	// node, so the summary can show a latency without a fresh measurement.
+	if active := summary.Proxy; active != "" {
+		for _, p := range b.ac.GetProxiesList() {
+			if p.Name == active && p.Delay > 0 {
+				summary.Delay = p.Delay
+				if d := p.DisplayOrName(); d != "" {
+					summary.ProxyDisplay = d
+				}
+				break
+			}
+		}
+	}
+	return summary
 }
 
 // coreState projects the controller's runtime state into the wire DTO.

@@ -26,7 +26,6 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 10) {
                 statusCard
                 banners
-                if let error = model.lastError { errorBanner(error) }
                 runtimeSection
                 networkSection
                 navigationSection
@@ -109,14 +108,17 @@ struct HomeView: View {
     private var canAct: Bool {
         guard case .ready = model.connection else { return false }
         guard let core = model.core else { return false }
-        if core.state.isTransitioning { return false }
+        // Shared policy: a command in flight anywhere (a proxy switch, a config
+        // reload, a mode change) blocks starting and stopping too, so two core
+        // commands can never overlap.
+        if model.coreOperationBusy { return false }
         if core.state != .running && !core.binary_exists { return false }
         return true
     }
 
     private var primaryHelp: String {
         guard let core = model.core else { return "" }
-        if core.state.isTransitioning { return "Please wait for the current operation to finish." }
+        if model.coreOperationBusy { return "Please wait for the current operation to finish." }
         if core.state != .running && !core.binary_exists {
             return "The sing-box core binary was not found."
         }
@@ -146,9 +148,24 @@ struct HomeView: View {
     }
 
     // MARK: - Banners
+    //
+    // Persistent conditions and transient toasts are rendered SEPARATELY rather
+    // than as one else-if chain. Chained, a success message such as
+    // "Subscriptions updated" would suppress "the core binary is missing": the
+    // user would lose a standing warning because an unrelated action succeeded.
+    //
+    // Order within the persistent group is by severity — the first shown is the
+    // one that blocks everything else.
 
     @ViewBuilder
     private var banners: some View {
+        persistentBanners
+        transientBanner
+    }
+
+    /// Standing conditions that last until they are actually resolved.
+    @ViewBuilder
+    private var persistentBanners: some View {
         if case .failed(let message) = model.connection {
             Banner(kind: .error, message: message) {
                 Button("Restart") { Task { await model.restart() } }
@@ -174,7 +191,21 @@ struct HomeView: View {
                 }
                 .controlSize(.small)
             }
-        } else if let status = model.transientStatus {
+        }
+
+        // A failure from the last action. Cleared by the user or by the next
+        // success — never on a timer, because an error the user never read is
+        // an error that did not happen.
+        if let error = model.lastError {
+            errorBanner(error)
+        }
+    }
+
+    /// A success message that clears itself, shown independently of the
+    /// persistent conditions above.
+    @ViewBuilder
+    private var transientBanner: some View {
+        if let status = model.transientStatus, !status.isEmpty {
             Banner(kind: .info, message: status) {
                 Button {
                     model.setTransientStatus("")
@@ -238,19 +269,20 @@ struct HomeView: View {
         }
     }
 
-    /// The node in use, so Home answers "what am I connected through?"
-    /// without a trip to the Proxies screen.
+    /// The node in use.
+    ///
+    /// Read from the snapshot's summary, NOT from `model.proxies`: that list is
+    /// only loaded once the Proxies screen has been opened, so deriving this
+    /// from it left Home showing "Choose…" while a proxy was in fact selected.
     private var proxySummary: String {
         guard model.core?.state == .running else { return "—" }
-        if let node = model.proxies.first(where: { $0.selected }) {
-            let delay = node.isMeasured ? " · \(node.delay) ms" : ""
-            return node.label + delay
+        guard let summary = model.proxySummary, summary.hasSelection else {
+            return "Choose…"
         }
-        if let group = model.groups.first(where: { $0.name == model.selectedGroup }),
-           let selected = group.selected_display ?? group.selected, !selected.isEmpty {
-            return selected
+        if let delay = summary.delayLabel {
+            return "\(summary.label) · \(delay)"
         }
-        return "Choose…"
+        return summary.label
     }
 
     // MARK: - Navigation

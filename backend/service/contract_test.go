@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -380,4 +381,80 @@ func TestRealRunningStateTransitionReachesSubscribers(t *testing.T) {
 	if len(got) != after {
 		t.Errorf("received %d event(s) after Shutdown", len(got)-after)
 	}
+}
+
+// TestSwiftClientCoversEveryMethod — the Swift client and the Go server must
+// agree on the method set.
+//
+// This reads the Swift sources and compares them against the Go constants, so a
+// method added on one side only fails CI instead of failing at runtime in the
+// shipped app, where the mismatch would appear as a button that does nothing.
+//
+// The Swift files live outside the Go module, so this test skips when they are
+// absent (for example a Go-only checkout).
+func TestSwiftClientCoversEveryMethod(t *testing.T) {
+	clientPath := filepath.Join("..", "..", "macos", "Sources", "JiejieBox",
+		"Services", "BackendClient.swift")
+	protoPath := filepath.Join("..", "..", "macos", "Sources", "JiejieBox",
+		"Models", "Protocol.swift")
+
+	clientSrc, err := os.ReadFile(clientPath)
+	if err != nil {
+		t.Skipf("Swift sources not present: %v", err)
+	}
+	protoSrc, err := os.ReadFile(protoPath)
+	if err != nil {
+		t.Skipf("Swift protocol not present: %v", err)
+	}
+
+	// Swift method constant -> wire string.
+	swiftConst := map[string]string{}
+	for _, m := range regexp.MustCompile(`static let (\w+) = "([a-z_]+)"`).
+		FindAllStringSubmatch(string(protoSrc), -1) {
+		swiftConst[m[1]] = m[2]
+	}
+
+	// Wire strings the Swift client actually calls.
+	called := map[string]bool{}
+	reCalls := regexp.MustCompile(`BackendMethod\.(\w+)`)
+	for _, m := range reCalls.FindAllStringSubmatch(string(clientSrc), -1) {
+		if wire, ok := swiftConst[m[1]]; ok {
+			called[wire] = true
+		} else {
+			t.Errorf("BackendClient uses BackendMethod.%s, which is not declared", m[1])
+		}
+	}
+
+	// Everything the server dispatches, except the transport-level handshake /
+	// snapshot / subscribe, which the client issues through dedicated helpers.
+	for _, wire := range goMethods(t) {
+		switch wire {
+		case protocol.MethodHandshake, protocol.MethodGetAppSnapshot,
+			protocol.MethodSubscribe:
+			continue
+		}
+		if !called[wire] {
+			t.Errorf("Go dispatches %q but the Swift client never calls it", wire)
+		}
+	}
+}
+
+// goMethods returns every Method* wire string declared in the Go protocol.
+func goMethods(t *testing.T) []string {
+	t.Helper()
+	src, err := os.ReadFile("../../backend/protocol/protocol.go")
+	if err != nil {
+		// The test package sits in backend/service, so the relative path is
+		// resolved from there.
+		src, err = os.ReadFile("protocol.go")
+		if err != nil {
+			t.Skipf("cannot read the Go protocol: %v", err)
+		}
+	}
+	var out []string
+	for _, m := range regexp.MustCompile(`Method\w+ = "([a-z_]+)"`).
+		FindAllStringSubmatch(string(src), -1) {
+		out = append(out, m[1])
+	}
+	return out
 }

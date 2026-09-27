@@ -22,8 +22,17 @@ struct CoreModeView: View {
                     daemonRow
                 }
 
-                if coreIsRunning {
-                    Text("Stop the VPN before switching engines.")
+                if let reason = model.coreModeBlockedReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, Metrics.rowPaddingH)
+                }
+
+                if model.coreModePreferenceDiverged {
+                    // The running engine and the saved preference disagree:
+                    // the switch worked but the choice did not persist.
+                    Text("Running \(model.coreModeLabel) (saved preference: \(model.savedCoreModeLabel)).")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, Metrics.rowPaddingH)
@@ -43,8 +52,6 @@ struct CoreModeView: View {
         }
     }
 
-    private var coreIsRunning: Bool { model.core?.state == .running }
-
     // MARK: - Rows
 
     private var classicRow: some View {
@@ -55,7 +62,7 @@ struct CoreModeView: View {
                     Task { await model.activateClassicMode() }
                 },
                 trailing: { activeBadge(model.coreModeLabel == "Classic") })
-            .disabled(model.pending != nil || coreIsRunning || model.coreModeLabel == "Classic")
+            .disabled(!model.canSwitchCoreMode || model.coreModeLabel == "Classic")
     }
 
     /// The daemon row opens the Daemon screen unless the engine is ready and
@@ -72,7 +79,7 @@ struct CoreModeView: View {
                     }
                 },
                 trailing: { activeBadge(daemonActive) })
-            .disabled(model.pending != nil || coreIsRunning || daemonActive)
+            .disabled(!model.canSwitchCoreMode || daemonActive)
     }
 
     @ViewBuilder

@@ -165,13 +165,23 @@ struct DetailLine: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // The label yields first: values such as a core version, an
+            // endpoint or an error message are the information, while the label
+            // is a fixed caption that is meaningless when truncated.
             Text(label)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .layoutPriority(-1)
             Spacer(minLength: 8)
             Text(value)
                 .foregroundStyle(tone == .error ? Color.red : Color.primary)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(3)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                // The full value stays reachable even when it is clipped, so a
+                // long path or error is never lost to the panel width.
+                .help(value)
         }
         .font(.callout)
         .padding(.horizontal, Metrics.rowPaddingH)

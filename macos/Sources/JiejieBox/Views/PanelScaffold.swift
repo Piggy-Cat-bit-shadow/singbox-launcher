@@ -99,7 +99,7 @@ struct PanelIconButton: View {
     var help: String = ""
     let action: () -> Void
 
-    private let hover = HoverState()
+    private var hover: HoverState { HoverStore.box(for: "panelicon:\(systemImage)") }
 
     var body: some View {
         Button(action: action) {
@@ -131,7 +131,7 @@ struct PanelIconButton: View {
 struct QuitButton: View {
     let model: AppModel
 
-    private let hover = HoverState()
+    private var hover: HoverState { HoverStore.box(for: "quit") }
 
     var body: some View {
         Button {

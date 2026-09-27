@@ -19,13 +19,41 @@ import SwiftUI
 
 /// Per-row hover flag.
 ///
-/// A reference type rather than @State: this toolchain has the Observation
-/// macro plugin but not the SwiftUI one, so @State cannot compile (see
-/// AppModel for the same constraint). @Observable gives the view the
-/// re-render on change without a property wrapper.
+/// A reference type rather than @State because this toolchain ships the
+/// Observation macro plugin but NOT the SwiftUI one, so @State cannot compile
+/// (verified: "external macro implementation type 'SwiftUIMacros.StateMacro'
+/// could not be found"). @Observable gives the re-render on change without a
+/// property wrapper.
+///
+/// Crucially it must NOT be created per view instantiation: SwiftUI builds a
+/// new struct value on every parent body pass, so a stored
+/// `let hover = HoverState()` would be replaced each time and the hover tint
+/// would flicker or stick. Rows therefore take their hover box from
+/// `HoverStore`, which keeps one box per row identity for the process
+/// lifetime.
 @Observable
 final class HoverState {
     var isHovering = false
+}
+
+/// Keeps one `HoverState` per row identity.
+///
+/// Identity is the row's stable key (title plus any distinguishing value), not
+/// the struct instance — which is exactly what survives a body re-evaluation.
+/// Bounded because a panel has a few dozen rows; the cap only guards against
+/// unbounded growth if a list with generated keys is ever added.
+@MainActor
+enum HoverStore {
+    private static var boxes: [String: HoverState] = [:]
+    private static let cap = 512
+
+    static func box(for key: String) -> HoverState {
+        if let existing = boxes[key] { return existing }
+        if boxes.count >= cap { boxes.removeAll() }
+        let box = HoverState()
+        boxes[key] = box
+        return box
+    }
 }
 
 /// Visual role of a row.
@@ -37,7 +65,9 @@ enum MenuRowRole {
 }
 
 struct MenuRow<Trailing: View>: View {
-    private let hover = HoverState()
+    /// Stable hover key: the row's identity, not the struct instance.
+    private var hover: HoverState { HoverStore.box(for: hoverKey) }
+    private var hoverKey: String { "menurow:\(title)|\(subtitle ?? "")|\(value ?? "")" }
     let title: String
     var subtitle: String?
     var systemImage: String?

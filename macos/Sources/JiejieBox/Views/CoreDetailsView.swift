@@ -30,9 +30,9 @@ struct CoreDetailsView: View {
                 }
 
                 MenuSection("Paths") {
-                    pathRow("Config file", model.settings?.config_path)
-                    pathRow("Data", model.settings?.data_dir)
-                    pathRow("Logs", model.settings?.logs_dir)
+                    pathRow("Config file", model.settings?.config_path, kind: .file)
+                    pathRow("Data", model.settings?.data_dir, kind: .directory)
+                    pathRow("Logs", model.settings?.logs_dir, kind: .directory)
                 }
 
                 MenuSection {
@@ -65,17 +65,38 @@ struct CoreDetailsView: View {
         .padding(.horizontal, Metrics.rowPaddingH)
     }
 
+    /// What a path row points at, because a file and a directory are opened
+    /// differently. Treating all three paths as files meant "Data" and "Logs"
+    /// revealed a folder's parent with the folder selected, rather than opening
+    /// the folder — the same click doing two different things depending on the
+    /// row, with nothing to tell the user which was which.
+    enum PathKind {
+        case file
+        case directory
+    }
+
     /// A path row that reveals the location on click.
-    private func pathRow(_ title: String, _ path: String?) -> some View {
+    ///
+    /// The row is disabled when the path is unknown, and the help text says
+    /// which action it performs, so what a click will do is never a surprise.
+    private func pathRow(_ title: String, _ path: String?, kind: PathKind) -> some View {
         let usable = !(path ?? "").isEmpty
-        return MenuRow(title, systemImage: "folder",
+        let action = kind == .file ? "Reveal in Finder" : "Open Folder"
+        return MenuRow(title,
+                       subtitle: usable ? action : "Path not reported",
+                       systemImage: kind == .file ? "doc" : "folder",
                        value: usable ? abbreviate(path!) : "Unknown",
                        action: {
                            guard let path, !path.isEmpty else { return }
-                           NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+                           switch kind {
+                           case .file:
+                               NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+                           case .directory:
+                               NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                           }
                        })
             .disabled(!usable)
-            .help(path ?? "Unknown")
+            .help(usable ? "\(action): \(path!)" : "The backend did not report this path.")
     }
 
     private func pendingRow(_ text: String) -> some View {

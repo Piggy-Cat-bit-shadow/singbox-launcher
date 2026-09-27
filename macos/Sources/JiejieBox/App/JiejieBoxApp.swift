@@ -13,7 +13,13 @@ struct JiejieBoxApp: App {
     var body: some Scene {
         MenuBarExtra {
             RootView(model: model)
-                .task { await model.start() }
+                // Detached from the panel's lifetime on purpose. The backend
+                // serves the whole app, not the panel: closing the menu bar
+                // window must not tear down the helper, its event stream, or
+                // the traffic sampler. `bootstrap()` is idempotent, so running
+                // it on every panel appearance is safe and a re-opened panel
+                // simply shows the state the model already holds.
+                .task { await model.bootstrap() }
         } label: {
             // A template symbol so macOS tints it for light and dark menu bars.
             Image(systemName: menuBarSymbol)

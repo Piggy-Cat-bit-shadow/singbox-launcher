@@ -32,6 +32,10 @@ final class AppModel {
     private(set) var core: CoreStatus?
     private(set) var settings: SettingsState?
     private(set) var handshake: HandshakeResult?
+    /// Current proxy selection, always available from the snapshot — unlike
+    /// `groups`/`proxies`, which are only populated after the Proxies screen
+    /// loads. Home must not depend on that having happened.
+    private(set) var proxySummary: ProxySummary?
     private(set) var lastError: String?
 
     /// Navigation inside the menu-bar window.
@@ -47,7 +51,7 @@ final class AppModel {
         case restarting
         case reloadingConfig
         case updatingSubscriptions
-        case updatingSetting
+        case updatingSetting(SettingID)
         case switchingProxy(String)
         case testingProxy(String)
         case testingGroup
@@ -57,6 +61,13 @@ final class AppModel {
         case refreshingSubscription
         case configuringDaemon
         case pairingDaemon
+    }
+
+    /// A specific boolean setting, so pending feedback can name it.
+    enum SettingID: Equatable {
+        case autoPing
+        case autoUpdateSubscriptions
+        case daemonKeepRunning
     }
 
     /// A daemon setup step the user can request.
@@ -69,8 +80,10 @@ final class AppModel {
     }
 
     private(set) var pending: PendingOperation?
-    /// Transient success line, cleared by the view after a moment.
-    var transientStatus: String?
+    /// Transient success line. Auto-clears; see `showTransient`.
+    private(set) var transientStatus: String?
+    /// Task that clears `transientStatus`, cancelled and restarted per message.
+    private var transientTask: Task<Void, Never>?
 
     // MARK: - Proxy state
 
@@ -157,7 +170,15 @@ final class AppModel {
     /// the backend never learns about it.
     private(set) var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
 
+    /// Enable or disable Launch at Login through SMAppService.
+    ///
+    /// The system can refuse (the app may not be in a location the service
+    /// manager accepts, or the user may have denied it in System Settings). The
+    /// toggle then snaps back to the real state — so the reason MUST be
+    /// reported. Silently reverting looks like a broken switch, and the user has
+    /// no way to learn why.
     func setLaunchAtLogin(_ enabled: Bool) {
+        var failure: String?
         do {
             if enabled {
                 try SMAppService.mainApp.register()
@@ -165,9 +186,26 @@ final class AppModel {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            // fall through: re-read the real state below
+            failure = error.localizedDescription
         }
+
+        // Always report the system's real state, never what was requested: the
+        // switch must show whether the login item is actually registered.
         launchAtLogin = SMAppService.mainApp.status == .enabled
+
+        if let failure {
+            lastError = enabled
+                ? "Could not enable Launch at Login: \(failure)"
+                : "Could not disable Launch at Login: \(failure)"
+        } else if launchAtLogin != enabled {
+            // No thrown error, but the service did not end up in the requested
+            // state — usually a pending user approval in System Settings.
+            lastError = enabled
+                ? "Launch at Login was not enabled. Approve JiejieBox in System Settings › General › Login Items."
+                : "Launch at Login is still enabled. Turn it off in System Settings › General › Login Items."
+        } else {
+            showTransient(enabled ? "Launch at Login enabled." : "Launch at Login disabled.")
+        }
     }
 
     enum Screen: Hashable {
@@ -223,18 +261,60 @@ final class AppModel {
     /// Highest event sequence applied; events older than the snapshot are
     /// discarded so a late frame cannot roll the UI back.
     private var appliedSeq: Int64 = 0
+    /// The in-flight bootstrap, if any.
+    ///
+    /// A second caller awaits the SAME task rather than starting a second
+    /// helper: without this, two concurrent `start()` calls (a re-created panel
+    /// view, a retry racing the first attempt) would each launch a process,
+    /// open a second event stream and handshake twice.
+    private var bootstrap: Task<Void, Never>?
 
     // MARK: - Lifecycle
 
+    /// Ensure the backend is running, without binding it to the caller's
+    /// lifetime.
+    ///
+    /// The panel view calls this from `.task`, but SwiftUI cancels that task
+    /// when the menu-bar window closes. Starting the helper inside the caller's
+    /// task would therefore abort the bootstrap every time the user dismisses
+    /// the panel — so the work is handed to a detached, model-owned task that
+    /// survives the view, and the caller only awaits its completion.
+    ///
+    /// Idempotent: concurrent and repeated calls join the same attempt.
+    func bootstrap() async {
+        if connection == .ready { return }
+        if let bootstrap {
+            await bootstrap.value
+            return
+        }
+
+        let task = Task { [weak self] in
+            await self?.performStart()
+            return ()
+        }
+        bootstrap = task
+        await task.value
+        // Cleared only if it is still ours, so a newer bootstrap is not dropped.
+        if bootstrap == task { bootstrap = nil }
+    }
+
     /// Start the backend, handshake, take a snapshot and begin consuming events.
+    ///
+    /// Kept as the explicit entry point for retries and tests; it is the same
+    /// idempotent bootstrap.
     func start() async {
-        guard connection != .ready else { return }
+        await bootstrap()
+    }
+
+    private func performStart() async {
         connection = .connecting
         lastError = nil
 
         do {
             try await client.start { [weak self] code in
                 Task { @MainActor in
+                    // Only ever reported for an exit we did not ask for; the
+                    // client filters intentional quits and restarts.
                     self?.connection = .failed("The backend stopped unexpectedly (code \(code)).")
                 }
             }
@@ -242,7 +322,10 @@ final class AppModel {
             handshake = try await client.handshake()
 
             // Subscribe before the snapshot: an event that races the snapshot
-            // is filtered by sequence number rather than lost.
+            // is filtered by sequence number rather than lost. Any previous
+            // stream is finished first, so an event can never be delivered to
+            // two consumers after a restart.
+            eventTask?.cancel()
             let stream = await client.events()
             eventTask = Task { [weak self] in
                 for await event in stream {
@@ -253,7 +336,16 @@ final class AppModel {
             let snapshot = try await client.snapshot()
             apply(snapshot)
 
+            // The token that proves this bootstrap was not superseded or
+            // cancelled while it ran.
+            try Task.checkCancellation()
+
             connection = .ready
+        } catch is CancellationError {
+            // The panel closed mid-start. The helper is still ours and the next
+            // start() will finish the job, so leave the state resumable rather
+            // than pinning the UI on "connecting" forever.
+            connection = .idle
         } catch {
             connection = .failed(error.localizedDescription)
         }
@@ -313,13 +405,15 @@ final class AppModel {
     }
 
     func setAutoPing(_ enabled: Bool) async {
-        await withPending(.updatingSetting, success: nil) {
+        await withPending(.updatingSetting(.autoPing),
+                          success: enabled ? "Auto ping enabled." : "Auto ping disabled.") {
             self.settings = try await self.client.setAutoPing(enabled)
         }
     }
 
     func setAutoUpdateSubscriptions(_ enabled: Bool) async {
-        await withPending(.updatingSetting, success: nil) {
+        await withPending(.updatingSetting(.autoUpdateSubscriptions),
+                          success: enabled ? "Automatic updates enabled." : "Automatic updates disabled.") {
             self.settings = try await self.client.setAutoUpdateSubscriptions(enabled)
         }
     }
@@ -437,7 +531,7 @@ final class AppModel {
         await withPending(.addingSubscription, success: nil) {
             _ = try await self.client.addSubscription(name: name, url: url)
             added = true
-            self.transientStatus = "Subscription added."
+            self.showTransient("Subscription added.")
         }
         if added { await loadSubscriptions() }
         return added
@@ -448,14 +542,14 @@ final class AppModel {
         await withPending(.savingSubscription, success: nil) {
             _ = try await self.client.updateSubscription(id: id, name: name, url: url)
             saved = true
-            self.transientStatus = "Subscription saved."
+            self.showTransient("Subscription saved.")
         }
         if saved { await loadSubscriptions() }
         return saved
     }
 
     func setSubscriptionEnabled(_ id: String, enabled: Bool) async {
-        await withPending(.updatingSetting, success: nil) {
+        await withPending(.updatingSetting(.autoUpdateSubscriptions), success: nil) {
             _ = try await self.client.setSubscriptionEnabled(id: id, enabled: enabled)
         }
         await loadSubscriptions()
@@ -466,7 +560,7 @@ final class AppModel {
         await withPending(.removingSubscription, success: nil) {
             try await self.client.removeSubscription(id: id)
             removed = true
-            self.transientStatus = "Subscription removed."
+            self.showTransient("Subscription removed.")
         }
         if removed { await loadSubscriptions() }
         return removed
@@ -530,7 +624,7 @@ final class AppModel {
         await withPending(.pairingDaemon, success: nil) {
             self.daemon = try await self.client.pairDaemon(invite: invite)
             paired = self.daemon?.paired ?? false
-            self.transientStatus = paired ? "Daemon paired." : nil
+            if paired { self.showTransient("Daemon paired.") }
         }
         return paired
     }
@@ -538,12 +632,15 @@ final class AppModel {
     func unpairDaemon() async {
         await withPending(.pairingDaemon, success: nil) {
             self.daemon = try await self.client.unpairDaemon()
-            self.transientStatus = "Pairing removed."
+            self.showTransient("Pairing removed.")
         }
     }
 
     func setDaemonKeepRunning(_ keepRunning: Bool) async {
-        await withPending(.updatingSetting, success: nil) {
+        await withPending(.updatingSetting(.daemonKeepRunning),
+                          success: keepRunning
+                            ? "The VPN will keep running after quit."
+                            : "The VPN will stop when JiejieBox quits.") {
             self.daemon = try await self.client.setDaemonKeepRunning(keepRunning)
         }
     }
@@ -596,12 +693,14 @@ final class AppModel {
     /// returns no error but changed nothing.
     private func report(_ result: MaintenanceResult, success: String) {
         if result.ok {
-            transientStatus = result.message.isEmpty ? success : result.message
+            showTransient(result.message.isEmpty ? success : result.message)
         } else {
             lastError = result.message
         }
         if !result.core_skips.isEmpty {
-            transientStatus = (transientStatus.map { $0 + " " } ?? "") + result.core_skips.joined(separator: " ")
+            // Node skips accompany the summary rather than replacing it.
+            let summary = transientStatus ?? ""
+            showTransient((summary + " " + result.core_skips.joined(separator: " ")).trimmingCharacters(in: .whitespaces))
         }
     }
 
@@ -609,13 +708,23 @@ final class AppModel {
     private func withPending(_ op: PendingOperation,
                              success: String?,
                              _ body: @escaping () async throws -> Void) async {
-        guard pending == nil else { return }
+        // Overlap is prevented in the UI by disabling controls while an
+        // operation is in flight; this guard is the second line of defence
+        // against a rapid double click that slips through. It must never be a
+        // SILENT no-op: a click that produces nothing is indistinguishable from
+        // a broken button, so the reason is surfaced.
+        guard pending == nil else {
+            lastError = "Another operation is still running. Wait for it to finish."
+            return
+        }
         pending = op
+        // A new action supersedes the previous failure, so a stale error does
+        // not sit next to a fresh attempt.
         lastError = nil
         defer { pending = nil }
         do {
             try await body()
-            if let success { transientStatus = success }
+            if let success { showTransient(success) }
         } catch {
             lastError = error.localizedDescription
         }
@@ -631,8 +740,34 @@ final class AppModel {
 
     func clearError() { lastError = nil }
 
-    /// Set the transient success line from a view.
-    func setTransientStatus(_ text: String) { transientStatus = text }
+    /// Show a success line that clears itself.
+    ///
+    /// Centralised so every caller gets the same lifetime and a new message
+    /// replaces the old one instead of stacking. Success and error are
+    /// deliberately different: a success message is transient, while an error
+    /// persists until the user dismisses it or a later action succeeds — an
+    /// error that vanished on a timer is an error the user may never read.
+    func showTransient(_ text: String, seconds: Double = 3.0) {
+        guard !text.isEmpty else { return }
+        transientStatus = text
+        transientTask?.cancel()
+        transientTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.transientStatus = nil
+        }
+    }
+
+    /// Replace the transient line from a view.
+    func setTransientStatus(_ text: String) {
+        if text.isEmpty {
+            transientTask?.cancel()
+            transientTask = nil
+            transientStatus = nil
+        } else {
+            showTransient(text)
+        }
+    }
 
     /// Drop the last setup command, so a stale command is not shown next to
     /// refreshed status.
@@ -643,12 +778,82 @@ final class AppModel {
     var coreMissing: Bool { core?.binary_exists == false }
     var configMissing: Bool { core?.config_exists == false }
 
+    /// The engine actually in use, from RUNTIME state.
+    ///
+    /// `core.backend` is what the running backend reports; `settings` is only
+    /// the saved preference. They can legitimately diverge — a switch can
+    /// succeed while saving the preference fails — and showing the saved value
+    /// as "Active" would then misdescribe what is actually running.
     var coreModeLabel: String {
+        (core?.backend ?? "classic").capitalized
+    }
+
+    /// The saved preference, which may differ from the active engine.
+    var savedCoreModeLabel: String {
         (settings?.core_backend_mode ?? "classic").capitalized
+    }
+
+    /// True when the saved preference and the running engine disagree, which is
+    /// what happens when a switch succeeded but persisting it did not. Surfaced
+    /// rather than hidden: the next launch uses the saved value, so the user
+    /// should know the preference did not stick.
+    var coreModePreferenceDiverged: Bool {
+        guard settings != nil, core != nil else { return false }
+        return coreModeLabel != savedCoreModeLabel
     }
 
     /// True once the handshake succeeded and the backend is answering.
     var isReady: Bool { connection == .ready }
+
+    // MARK: - Core operation policy
+    //
+    // One shared notion of "the core is in the middle of something", so Start,
+    // Stop, Restart and the engine switch cannot overlap. Deriving it per view
+    // is how a Stop and a mode switch end up racing each other.
+
+    /// The core is in a settled state where a new operation may begin.
+    ///
+    /// `starting` and `stopping` are transitions, not states: acting during them
+    /// means issuing a command against a core that is already moving, so they
+    /// count as busy.
+    var coreIsTransitioning: Bool { core?.state.isTransitioning ?? false }
+
+    /// True while any core-affecting command is in flight.
+    var coreOperationBusy: Bool {
+        if pending != nil { return true }
+        if coreIsTransitioning { return true }
+        return false
+    }
+
+    /// The engine may only be switched with the core fully stopped.
+    ///
+    /// Not "not running": a `starting` core is about to be running, and a
+    /// `stopping` one has not released the process yet. A daemon engine cannot
+    /// take over a live classic process, and vice versa, so anything other than
+    /// a settled `stopped` state must refuse.
+    var canSwitchCoreMode: Bool {
+        guard isReady else { return false }
+        guard let state = core?.state else { return false }
+        if coreOperationBusy { return false }
+        return state == .stopped
+    }
+
+    /// Why the engine cannot be switched, for an inline explanation.
+    var coreModeBlockedReason: String? {
+        guard let state = core?.state else { return nil }
+        switch state {
+        case .stopped:
+            return nil
+        case .running:
+            return "Stop the VPN before switching engines."
+        case .starting:
+            return "The core is starting. Wait for it to settle."
+        case .stopping:
+            return "The core is stopping. Wait for it to settle."
+        case .error:
+            return "The core is in an error state. Restart it before switching."
+        }
+    }
 
     /// Whether the daemon engine is offered by this build.
     var daemonAvailable: Bool { handshake?.capabilities.daemon ?? false }
@@ -692,6 +897,7 @@ final class AppModel {
         handshake = snapshot.handshake
         core = snapshot.core
         settings = snapshot.settings
+        proxySummary = snapshot.proxy
         appliedSeq = max(appliedSeq, snapshot.snapshot_seq)
     }
 

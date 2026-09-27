@@ -14,7 +14,9 @@ struct ProxiesView: View {
     var body: some View {
         PanelScaffold(model: model, title: "Proxies", onBack: { model.goBack() }) {
             VStack(alignment: .leading, spacing: 10) {
-                if !model.proxiesAvailable {
+                if model.shouldShowBackendDown {
+                    BackendDownView(model: model, subject: "the proxy list")
+                } else if !model.proxiesAvailable {
                     unavailable
                 } else {
                     header
@@ -177,39 +179,48 @@ struct ProxiesView: View {
             .padding(.horizontal, Metrics.rowPaddingH)
     }
 
-    /// One node. The whole row selects it; the latency is a separate control
-    /// so a user can re-test without switching.
+    /// One node, as two independent actions.
+    ///
+    /// The row both selects the node and measures its latency. These are
+    /// SIBLINGS, never a button inside a button: nesting them made the latency
+    /// target unreliable and could switch the proxy when the user only asked to
+    /// measure it. The select action gets the larger share because it is the
+    /// common one; the latency action is a right-hand target that is still a
+    /// full-height region, not a small glyph.
     private func nodeRow(_ node: ProxyNode) -> some View {
-        MenuRow(node.label,
+        let selected = node.selected
+        return ActionRow(actions: [
+            RowAction(
+                id: "select-\(node.id)",
+                title: node.label,
                 subtitle: node.type,
-                action: { Task { await model.switchProxy(node) } },
-                trailing: {
-                    HStack(spacing: 8) {
-                        if model.pending == .testingProxy(node.name) {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Button {
-                                Task { await model.testProxy(node) }
-                            } label: {
-                                Text(node.delayLabel)
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(delayColor(node))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(model.pending != nil)
-                            .help(node.isMeasured
-                                  ? "Measure this node again."
-                                  : "Measure this node's latency.")
-                        }
-
-                        if node.selected {
-                            Image(systemName: "checkmark")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tint)
-                        }
+                value: nil,
+                isPending: model.pending == .switchingProxy(node.name),
+                leading: AnyView(
+                    HStack(spacing: 6) {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                            .frame(width: 16)
                     }
-                })
-            .opacity(model.pending == .testingProxy(node.name) ? 0.6 : 1)
+                ),
+                weight: 3,
+                help: selected ? "Currently in use." : "Use this node.",
+                action: { Task { await model.switchProxy(node) } }
+            ),
+            RowAction(
+                id: "test-\(node.id)",
+                title: "",
+                value: node.delayLabel,
+                valueColor: delayColor(node),
+                isPending: model.pending == .testingProxy(node.name),
+                weight: 1,
+                help: node.isMeasured
+                    ? "Measure this node again (\(node.type ?? "node"))."
+                    : "Measure this node's latency.",
+                action: { Task { await model.testProxy(node) } }
+            ),
+        ], disabled: model.pending != nil && model.pending != .testingProxy(node.name))
     }
 
     private func delayColor(_ node: ProxyNode) -> Color {

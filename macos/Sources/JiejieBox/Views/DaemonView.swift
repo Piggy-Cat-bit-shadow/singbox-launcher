@@ -18,12 +18,24 @@ struct DaemonView: View {
 
     var body: some View {
         PanelScaffold(model: model, title: "Daemon", onBack: { model.goBack() }) {
-            if let status = model.daemon {
+            if model.shouldShowBackendDown {
+                BackendDownView(model: model, subject: "the daemon status")
+            } else if let status = model.daemon {
                 content(status)
             } else if model.daemonLoading {
                 PendingRow("Checking daemon status…")
             } else {
-                PendingRow("Checking daemon status…")
+                // Reachable but no status yet: offer a retry rather than an
+                // endless spinner.
+                MenuSection("Status") {
+                    Text("Daemon status has not loaded yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, Metrics.rowPaddingH)
+                    MenuRow("Load Status", systemImage: "arrow.clockwise") {
+                        Task { await model.loadDaemonStatus() }
+                    }
+                }
             }
         }
         .task { await model.loadDaemonStatus() }
@@ -99,6 +111,7 @@ struct DaemonView: View {
                      + "Install a core that supports it, then refresh.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Metrics.rowPaddingH)
                 // A diagnosis with no way forward is a dead end, so offer the
                 // one action that can actually change this state.
@@ -154,6 +167,7 @@ struct DaemonView: View {
                  + "If you just installed it, give it a moment and refresh.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, Metrics.rowPaddingH)
             MenuRow("Refresh Status", systemImage: "arrow.clockwise") {
                 Task { await model.loadDaemonStatus() }
@@ -177,7 +191,7 @@ struct DaemonView: View {
                 MenuRow("Switch Back to Classic", systemImage: "arrow.uturn.backward") {
                     Task { await model.activateClassicMode() }
                 }
-                .disabled(model.pending != nil || model.core?.state == .running)
+                .disabled(!model.canSwitchCoreMode)
             } else {
                 Button {
                     Task { await model.activateDaemonMode() }
@@ -187,12 +201,12 @@ struct DaemonView: View {
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .disabled(model.pending != nil || model.core?.state == .running)
+                .disabled(!model.canSwitchCoreMode)
                 .padding(.horizontal, Metrics.rowPaddingH)
                 .padding(.vertical, 6)
 
-                if model.core?.state == .running {
-                    Text("Stop the VPN before switching engines.")
+                if let reason = model.coreModeBlockedReason {
+                    Text(reason)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, Metrics.rowPaddingH)
@@ -206,23 +220,22 @@ struct DaemonView: View {
     @ViewBuilder
     private func settingsSection(_ status: DaemonStatus) -> some View {
         MenuSection("Behaviour") {
+            // One action, so it stays a MenuRow — but the state is shown as a
+            // value rather than a drawn switch. A switch implies its own hit
+            // target, and one that cannot be clicked directly reads as broken
+            // even when the row itself works.
             MenuRow("Keep VPN Running After Quit",
                     subtitle: status.persists_after_quit
                         ? "The VPN stays connected when JiejieBox quits."
                         : "The VPN stops when JiejieBox quits.",
+                    value: status.persists_after_quit ? "On" : "Off",
                     action: {
                         Task { await model.setDaemonKeepRunning(!status.persists_after_quit) }
-                    },
-                    trailing: {
-                        Toggle("", isOn: Binding(
-                            get: { status.persists_after_quit },
-                            set: { value in Task { await model.setDaemonKeepRunning(value) } }))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .allowsHitTesting(false)
                     })
             .disabled(model.pending != nil)
+            .help(status.persists_after_quit
+                  ? "Click to make the VPN stop when JiejieBox quits."
+                  : "Click to keep the VPN running after JiejieBox quits.")
         }
     }
 
@@ -264,6 +277,7 @@ struct DaemonView: View {
             Text(cmd.message)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, Metrics.rowPaddingH)
                 .padding(.vertical, 4)
 

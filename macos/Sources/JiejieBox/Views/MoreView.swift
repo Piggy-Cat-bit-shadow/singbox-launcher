@@ -48,17 +48,22 @@ struct MoreView: View {
                 MenuSection("Automation") {
                     toggleRow("Auto Ping After Connect",
                               isOn: model.settings?.auto_ping_after_connect ?? false,
-                              help: "Test proxies shortly after the core connects.") { value in
+                              help: "Test proxies shortly after the core connects.",
+                              id: .autoPing) { value in
                         Task { await model.setAutoPing(value) }
                     }
                     toggleRow("Auto Update Subscriptions",
                               isOn: model.settings?.auto_update_subscriptions ?? false,
-                              help: "Refresh subscription data on a schedule.") { value in
+                              help: "Refresh subscription data on a schedule.",
+                              id: .autoUpdateSubscriptions) { value in
                         Task { await model.setAutoUpdateSubscriptions(value) }
                     }
-                    toggleRow("Launch at Login",
-                              isOn: model.launchAtLogin,
-                              help: "Start JiejieBox when you sign in.") { value in
+                    // Launch at Login is frontend-only (SMAppService): the call
+                    // is synchronous and reports failure through the error
+                    // banner, so it has no backend pending state to show.
+                    frontendToggleRow("Launch at Login",
+                                      isOn: model.launchAtLogin,
+                                      help: "Start JiejieBox when you sign in.") { value in
                         model.setLaunchAtLogin(value)
                     }
                 }
@@ -98,8 +103,12 @@ struct MoreView: View {
     /// Built from MenuRow plus a switch, so the whole row is the hit target and
     /// the label belongs to the control rather than a bare switch the user has
     /// to aim at precisely.
-    private func toggleRow(_ title: String, isOn: Bool, help: String,
-                           set: @escaping (Bool) -> Void) -> some View {
+    /// A frontend-only toggle: no backend call, so no pending state.
+    ///
+    /// Separate from `toggleRow` because it must NOT block on, or be blocked
+    /// by, backend operations — SMAppService is a local system call.
+    private func frontendToggleRow(_ title: String, isOn: Bool, help: String,
+                                   set: @escaping (Bool) -> Void) -> some View {
         MenuRow(title, action: { set(!isOn) },
                 trailing: {
                     Toggle("", isOn: Binding(get: { isOn }, set: set))
@@ -109,6 +118,34 @@ struct MoreView: View {
                         .allowsHitTesting(false)
                 })
             .help(help)
+    }
+
+    /// A boolean setting as a full-width row.
+    ///
+    /// The switch is drawn rather than interactive: the whole row is the hit
+    /// target (a bare switch is a small target, and a row is not). `id` lets
+    /// the row show its OWN saving state, so a user who flips two settings can
+    /// see which one is still in flight instead of both looking stuck.
+    private func toggleRow(_ title: String, isOn: Bool, help: String,
+                           id: AppModel.SettingID,
+                           set: @escaping (Bool) -> Void) -> some View {
+        let saving = model.pending == .updatingSetting(id)
+        return MenuRow(title,
+                       subtitle: saving ? "Saving…" : nil,
+                       action: { set(!isOn) },
+                       trailing: {
+                           if saving {
+                               ProgressView().controlSize(.small)
+                           } else {
+                               Toggle("", isOn: Binding(get: { isOn }, set: set))
+                                   .labelsHidden()
+                                   .toggleStyle(.switch)
+                                   .controlSize(.small)
+                                   .allowsHitTesting(false)
+                           }
+                       })
+            .help(help)
+            .disabled(model.pending != nil)
     }
 }
 

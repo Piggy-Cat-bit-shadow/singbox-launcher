@@ -76,6 +76,20 @@ actor BackendClient {
     /// Called when the process exits unexpectedly.
     private var onTermination: (@Sendable (Int32) -> Void)?
 
+    /// Why the helper is expected to exit.
+    ///
+    /// Without this, every exit looks like a crash: quitting the app or
+    /// restarting the backend would flash "the backend stopped unexpectedly"
+    /// at the user for a termination the app itself requested.
+    enum TerminationIntent {
+        /// Nobody asked it to stop: a crash, a kill, or an OOM.
+        case none
+        /// Quit, or an intentional teardown before a restart.
+        case requested
+    }
+
+    private var terminationIntent: TerminationIntent = .none
+
     // MARK: - Lifecycle
 
     /// Locate the helper inside the running bundle.
@@ -104,6 +118,9 @@ actor BackendClient {
     func start(onTermination: @escaping @Sendable (Int32) -> Void) throws {
         guard process == nil else { return }
         self.onTermination = onTermination
+        // A fresh process starts with nobody having asked it to stop, so the
+        // next exit is a fault until we mark otherwise.
+        terminationIntent = .none
 
         guard let helper = Self.helperURL() else {
             throw BackendClientError.helperMissing
@@ -165,6 +182,7 @@ actor BackendClient {
     /// command would truncate that teardown and could leave the core in an
     /// inconsistent state.
     func shutdownGracefully() async {
+        terminationIntent = .requested
         // Best effort: the backend may already be gone.
         try? await requestShutdown()
 
@@ -201,6 +219,7 @@ actor BackendClient {
     /// Stop the helper without asking the backend to exit (used when the
     /// connection is being torn down for a restart).
     func shutdown() async {
+        terminationIntent = .requested
         readTask?.cancel()
         readTask = nil
 
@@ -222,7 +241,18 @@ actor BackendClient {
     }
 
     private func handleTermination(_ code: Int32) {
-        log.warning("backend exited with code \(code)")
+        // Only an exit nobody asked for is a fault. A quit or an intentional
+        // teardown is the app getting what it requested, and reporting it as
+        // "stopped unexpectedly" would show the user an error for doing exactly
+        // what they clicked.
+        let expected = terminationIntent == .requested
+        terminationIntent = .none
+        if expected {
+            log.info("backend exited as requested (code \(code))")
+        } else {
+            log.warning("backend exited with code \(code)")
+        }
+
         // Fail every in-flight request so no caller awaits forever.
         let waiting = pending
         pending.removeAll()
@@ -232,7 +262,11 @@ actor BackendClient {
         for (_, cont) in eventContinuations { cont.finish() }
         eventContinuations.removeAll()
         process = nil
-        onTermination?(code)
+        stdinHandle = nil
+        readTask = nil
+        if !expected {
+            onTermination?(code)
+        }
     }
 
     private func handleReadEnded() {
@@ -320,16 +354,48 @@ actor BackendClient {
                 guard let self else { throw BackendClientError.notRunning }
                 return try await self.awaitResponse(id: id, request: request)
             }
-            group.addTask {
+            group.addTask { [weak self] in
                 try await Task.sleep(nanoseconds: timeout)
+                // Abandon BEFORE throwing: the waiter is resumed with a timeout
+                // error here, so a response arriving after the deadline finds
+                // no waiter and is dropped by handleLine rather than resuming a
+                // continuation a second time.
+                await self?.abandon(id: id, reason: .timedOut(method: method))
                 throw BackendClientError.timedOut(method: method)
             }
             defer { group.cancelAll() }
-            guard let first = try await group.next() else {
-                throw BackendClientError.timedOut(method: method)
+            do {
+                guard let first = try await group.next() else {
+                    abandon(id: id, reason: .timedOut(method: method))
+                    throw BackendClientError.timedOut(method: method)
+                }
+                return first
+            } catch {
+                // Covers cancellation of this task (view torn down, navigation,
+                // app quitting) as well as the timeout above. Either way the
+                // waiter must be resumed, never merely dropped.
+                abandon(id: id, reason: error as? BackendClientError ?? .backendUnavailable)
+                throw error
             }
-            return first
         }
+    }
+
+    /// Abandon a waiter whose response will never be used.
+    ///
+    /// Removes the continuation AND resumes it. Removing alone is not enough:
+    /// a checked continuation that is dropped without being resumed leaks the
+    /// awaiting task, which is precisely the "spinner forever" failure this
+    /// timeout exists to prevent — it would just move the hang from the pending
+    /// map into the task graph.
+    ///
+    /// Resuming exactly once is guaranteed because whoever removes the entry
+    /// owns the resume: `handleLine` on a response, or this method when no
+    /// response is coming. A late response therefore finds no entry (it is
+    /// logged and dropped), and this method finds none if the response already
+    /// arrived — never both.
+    private func abandon(id: String, reason: BackendClientError) {
+        guard let cont = pending.removeValue(forKey: id) else { return }
+        cont.resume(throwing: reason)
     }
 
     /// Wait for the response with a given id.
@@ -355,11 +421,21 @@ actor BackendClient {
         let seconds: Double
         switch method {
         case BackendMethod.handshake, BackendMethod.getAppSnapshot,
-             BackendMethod.getProxyGroups, BackendMethod.getProxies:
+             BackendMethod.getProxyGroups, BackendMethod.getProxies,
+             BackendMethod.listSubscriptions:
+            // Local state reads. Two seconds would be generous; eight allows
+            // for a busy machine without hiding a wedged backend.
             seconds = 8
         case BackendMethod.switchProxy, BackendMethod.setCoreMode,
              BackendMethod.restartCore, BackendMethod.startCore,
-             BackendMethod.stopCore:
+             BackendMethod.stopCore, BackendMethod.shutdown,
+             BackendMethod.addSubscription, BackendMethod.updateSubscription,
+             BackendMethod.removeSubscription, BackendMethod.setSubscriptionEnabled,
+             BackendMethod.setAutoPing, BackendMethod.setAutoUpdate,
+             BackendMethod.setDaemonKeepRunning, BackendMethod.unpairDaemon:
+            // Commands that change state: process lifecycle, engine switches,
+            // state.json writes. Bounded well above a normal write so a slow
+            // disk is not mistaken for a failure.
             seconds = 20
         case BackendMethod.testProxy, BackendMethod.testProxyGroup,
              BackendMethod.refreshSubscription, BackendMethod.updateSubscriptions,
@@ -377,6 +453,9 @@ actor BackendClient {
         case BackendMethod.pairDaemon:
             seconds = 30
         default:
+            // Every method the client actually calls is listed explicitly
+            // above; this fallback exists only so a future method cannot be
+            // added without a bound. A test asserts the two sets agree.
             seconds = 20
         }
         return UInt64(seconds * 1_000_000_000)

@@ -50,6 +50,7 @@ struct DaemonPairView: View {
                          + "a one-time invite.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.horizontal, Metrics.rowPaddingH)
             }

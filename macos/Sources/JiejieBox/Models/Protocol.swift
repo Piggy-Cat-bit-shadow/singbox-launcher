@@ -126,8 +126,13 @@ struct BackendError: Decodable, Error {
 struct Capabilities: Decodable {
     let daemon: Bool
     let elevation: Bool
-    let remote: Bool
+    /// The lightweight 1 Hz rate readout, not the full profiler.
     let traffic: Bool
+    /// The subscription manager.
+    let subscriptions: Bool
+    /// Always false: remote machines and the config wizard were removed from
+    /// the product. Kept so the block still decodes against older backends.
+    let remote: Bool
     let configurator: Bool
 }
 
@@ -457,6 +462,28 @@ struct AppSnapshot: Decodable {
     let handshake: HandshakeResult
     let core: CoreStatus
     let settings: SettingsState
+    /// Lightweight current-proxy summary, so Home can show what is in use
+    /// without loading a full node list.
+    let proxy: ProxySummary
+}
+
+/// The current proxy selection, without the node list.
+struct ProxySummary: Decodable {
+    let group: String?
+    let proxy: String?
+    let proxy_display: String?
+    /// Last known latency in ms; negative means never measured.
+    let delay: Int64
+
+    var label: String {
+        if let d = proxy_display, !d.isEmpty { return d }
+        if let p = proxy, !p.isEmpty { return p }
+        return ""
+    }
+
+    var hasSelection: Bool { !label.isEmpty }
+
+    var delayLabel: String? { delay >= 0 ? "\(delay) ms" : nil }
 }
 
 // MARK: - Event

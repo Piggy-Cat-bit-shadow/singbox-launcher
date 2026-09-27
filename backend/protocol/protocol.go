@@ -197,11 +197,17 @@ type Capabilities struct {
 	Daemon bool `json:"daemon"`
 	// Elevation reports whether the backend can request privileges.
 	Elevation bool `json:"elevation"`
-	// Remote reports whether remote machine management is available.
-	Remote bool `json:"remote"`
-	// Traffic reports whether the traffic profiler is available.
+	// Traffic reports whether the traffic sampler is available. Note this is
+	// the lightweight 1 Hz rate readout, not the full profiler.
 	Traffic bool `json:"traffic"`
-	// Configurator reports whether the config wizard backend is available.
+	// Subscriptions reports whether the subscription manager is available.
+	Subscriptions bool `json:"subscriptions"`
+	// Deprecated: remote machine management and the config wizard were removed
+	// from the product. The fields stay so an older frontend still decodes the
+	// block, but they are always false — a capability that claims a deleted
+	// feature is worse than no capability, because a client would offer UI for
+	// something that cannot work.
+	Remote       bool `json:"remote"`
 	Configurator bool `json:"configurator"`
 }
 
@@ -221,6 +227,27 @@ type AppSnapshot struct {
 	Core CoreState `json:"core"`
 	// Settings holds the business settings the backend owns.
 	Settings SettingsState `json:"settings"`
+	// Proxy is the lightweight "what am I connected through" summary, so the
+	// home screen can answer that without loading a subscription's full node
+	// list — which can be hundreds of entries and is only needed on the
+	// Proxies screen.
+	Proxy ProxySummary `json:"proxy"`
+}
+
+// ProxySummary is the current proxy selection, without the node list.
+//
+// Sourced from the controller's cached selection rather than a fresh Clash API
+// read: the summary is for display, and issuing a network call on every
+// snapshot would make the home screen slow and the backend chatty.
+type ProxySummary struct {
+	// Group is the selector group currently in use.
+	Group string `json:"group,omitempty"`
+	// Proxy is the selected node's tag.
+	Proxy string `json:"proxy,omitempty"`
+	// ProxyDisplay is the node tag normalised for display.
+	ProxyDisplay string `json:"proxy_display,omitempty"`
+	// Delay is the last known latency in ms; -1 when never measured.
+	Delay int64 `json:"delay"`
 }
 
 // CoreState is the core runtime status.
