@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,20 +180,51 @@ func (ac *AppController) classifyCoreExitReason() exitReason {
 	if path == "" {
 		return exitReasonUnknown
 	}
-	data, err := os.ReadFile(path)
+	// Читаем только хвост: лог ротируется на 2 МиБ, а причина падения всегда
+	// в последних строках. Читать файл целиком ради 16 КиБ — лишняя память на
+	// каждом падении ядра.
+	text, err := readFileTail(path, coreLogTailBytes)
 	if err != nil {
 		debuglog.DebugLog("classifyCoreExitReason: cannot read %s: %v", path, err)
 		return exitReasonUnknown
 	}
-	// Ограничиваем объём: причина — в хвосте, читать весь лог незачем.
-	const tailBytes = 16 * 1024
-	text := string(data)
-	if len(text) > tailBytes {
-		text = text[len(text)-tailBytes:]
-	}
 	reason := classifyExitText(lastLines(text, 40))
 	debuglog.InfoLog("classifyCoreExitReason: %s (log %s)", reason, path)
 	return reason
+}
+
+// coreLogTailBytes — сколько хвоста лога достаточно для классификации.
+const coreLogTailBytes = 16 * 1024
+
+// readFileTail возвращает последние maxBytes файла, не читая его целиком.
+//
+// Файл может быть меньше — тогда возвращается он весь. Хвост может начаться
+// с середины строки: вызывающий разбирает текст построчно (lastLines), и
+// обрезанная первая строка просто не попадает в значимые.
+func readFileTail(path string, maxBytes int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer debuglog.RunAndLog("readFileTail: close", f.Close)
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := info.Size()
+	offset := int64(0)
+	if size > maxBytes {
+		offset = size - maxBytes
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+	buf := make([]byte, size-offset)
+	if _, err := io.ReadFull(f, buf); err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return "", err
+	}
+	return string(buf), nil
 }
 
 // showDeterministicExitDialog — диалог детерминированного отказа (SPEC 143).
