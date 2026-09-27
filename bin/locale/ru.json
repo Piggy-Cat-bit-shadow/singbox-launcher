@@ -2665,12 +2665,6 @@
   "Connect to this machine first: its config points at the machine's own resource store, and that path comes from the daemon when you connect.": {
     "value": "Сначала подключитесь к машине: её конфиг ссылается на собственное хранилище ресурсов, а этот путь приходит от демона при соединении."
   },
-  "Core Status ⏳ Starting...": {
-    "value": "Статус ядра ⏳ Запуск..."
-  },
-  "Core Status ⏳ Stopping...": {
-    "value": "Статус ядра ⏳ Остановка..."
-  },
   "Stop the core": {
     "value": "Остановить ядро"
   },
@@ -4936,5 +4930,20 @@
   },
   "How subscription data is fetched and identified.": {
     "value": "Как загружаются и идентифицируются подписки."
+  },
+  "Appearance": {
+    "value": "Внешний вид"
+  },
+  "Light": {
+    "value": "Светлый"
+  },
+  "Dark": {
+    "value": "Тёмный"
+  },
+  "Stopping...": {
+    "value": "Остановка..."
+  },
+  "System follows the macOS appearance. Light and Dark change the window contents; the window frame itself stays under the system's control.": {
+    "value": "«Системный» следует оформлению macOS. «Светлый» и «Тёмный» меняют содержимое окна; оформление самой рамки остаётся под управлением системы."
   }
 }
