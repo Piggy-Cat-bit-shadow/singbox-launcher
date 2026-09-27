@@ -76,29 +76,37 @@ func DecodeSubscriptionContent(content []byte) ([]byte, error) {
 	// URI list keeps falling through to the plain-text branch, and anything the
 	// classifier does not recognise also lands there — which is why unknown JSON
 	// is rejected explicitly just below rather than passed through.
-	if looksLikeJSON(trimmed) {
-		switch ClassifySubscriptionBody(trimmed) {
-		case BodyKindSingboxOutbound, BodyKindSingboxOutboundArray,
-			BodyKindSingboxConfig, BodyKindSingboxConfigArray,
-			BodyKindXrayConfig, BodyKindXrayArray:
-			debuglog.DebugLog("DecodeSubscriptionContent: structured body (%s) passed through to the parser",
-				ClassifySubscriptionBody(trimmed))
-			return []byte(trimmed), nil
-		case BodyKindVPNLink:
-			// A vpn:// link is not JSON, but the classifier checks it first; it
-			// belongs to the parser too.
-			return []byte(trimmed), nil
-		}
+	// Ask the classifier FIRST, before any local heuristic. It handles the
+	// overlapping prefixes that a "starts with '['" test cannot: a wg-quick body
+	// begins with "[Interface]", which looks like a JSON array but is an INI
+	// file. An earlier version of this code checked the prefix itself and
+	// rejected valid WireGuard configs as malformed JSON — the same
+	// "decoder is narrower than the parser" mistake, one format over.
+	switch kind := ClassifySubscriptionBody(trimmed); kind {
+	case BodyKindSingboxOutbound, BodyKindSingboxOutboundArray,
+		BodyKindSingboxConfig, BodyKindSingboxConfigArray,
+		BodyKindXrayConfig, BodyKindXrayArray:
+		debuglog.DebugLog("DecodeSubscriptionContent: structured body (%s) passed through to the parser", kind)
+		return []byte(trimmed), nil
+	case BodyKindWGConf:
+		debuglog.DebugLog("DecodeSubscriptionContent: wg-quick config passed through to the parser")
+		return []byte(trimmed), nil
+	case BodyKindVPNLink:
+		// Not JSON at all, but the classifier checks it first and the parser
+		// owns it.
+		return []byte(trimmed), nil
+	}
 
-		// Valid JSON that no importer recognises. It must NOT fall through to
-		// the URI branch: a JSON blob is not a link list, and treating it as one
-		// produces zero nodes with no explanation.
+	// Only now consider the JSON-looking prefixes, and only to give a BETTER
+	// error than the generic one at the end. The classifier already declared
+	// these bodies unrecognised, so this branch never overrides a supported
+	// format.
+	if looksLikeJSON(trimmed) {
 		var probe interface{}
 		if json.Unmarshal([]byte(trimmed), &probe) == nil {
 			debuglog.DebugLog("DecodeSubscriptionContent: unrecognised JSON body")
 			return nil, fmt.Errorf("unsupported JSON subscription format")
 		}
-		// Invalid JSON starting with '{' or '[': a truncated or corrupted body.
 		debuglog.DebugLog("DecodeSubscriptionContent: malformed JSON body")
 		return nil, fmt.Errorf("subscription body looks like JSON but is not valid JSON")
 	}
