@@ -876,3 +876,111 @@ func TestReloadConfigExplainsAnUnrebuildableConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestQuitAlwaysSendsTheEOFFallback — closing stdin must not depend on the ACK.
+//
+// The headless backend's read loop blocks on stdin, and GracefulExit cannot stop
+// it: with no UI attached it never signals Serve, so the helper only exits once
+// stdin reaches EOF. That makes EOF the fallback for a broken IPC channel, and
+// gating it on a successful ACK inverted the intent — on a shutdown timeout the
+// pipe stayed open, the wait burned its whole budget, and the process was
+// force-terminated without ever running its graceful teardown.
+//
+// This is a static check because the toolchain ships neither XCTest nor the
+// Swift Testing macro plugin, so `swift test` cannot build here (verified).
+func TestQuitAlwaysSendsTheEOFFallback(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "macos", "Sources",
+		"JiejieBox", "Services", "BackendClient.swift"))
+	if err != nil {
+		t.Skipf("Swift sources not present: %v", err)
+	}
+	text := string(src)
+
+	idx := strings.Index(text, "func shutdownGracefully()")
+	if idx < 0 {
+		t.Fatal("cannot find shutdownGracefully")
+	}
+	body := text[idx:]
+	if end := strings.Index(body, "\n    /// "); end > 0 {
+		body = body[:end]
+	}
+
+	// Find the statement that closes stdin.
+	closeIdx := strings.Index(body, "stdinHandle.close()")
+	if closeIdx < 0 {
+		t.Fatal("shutdownGracefully never closes stdin")
+	}
+	// Its guarding `if` is the line above.
+	before := body[:closeIdx]
+	guardStart := strings.LastIndex(before, "\n        if ")
+	guardLine := before[guardStart:]
+
+	if strings.Contains(guardLine, "acknowledged") {
+		t.Errorf("closing stdin is gated on the ACK (%q); on a shutdown timeout the pipe "+
+			"would stay open and the helper would be killed instead of torn down",
+			strings.TrimSpace(guardLine))
+	}
+	if !strings.Contains(guardLine, "stdinHandle") {
+		t.Errorf("unexpected guard for closing stdin: %q", strings.TrimSpace(guardLine))
+	}
+
+	// The EOF fallback must run BEFORE the last-resort terminate, or it is not a
+	// fallback at all.
+	termIdx := strings.Index(body, "proc.terminate()")
+	if termIdx < 0 {
+		t.Fatal("shutdownGracefully never force-terminates; the bound is missing")
+	}
+	if closeIdx > termIdx {
+		t.Error("stdin is closed only after the force-terminate; EOF is not acting as a fallback")
+	}
+
+	// And the ACK must still be awaited first, since the ordering guarantee
+	// depends on the response being written before teardown starts.
+	ackIdx := strings.Index(body, "requestShutdown()")
+	if ackIdx < 0 || ackIdx > closeIdx {
+		t.Error("the shutdown request must be sent before stdin is closed")
+	}
+}
+
+// TestEOFAloneRunsTheSameTeardownAsTheMethod — the EOF fallback must reach the
+// same exactly-once Shutdown, not a weaker path.
+//
+// This is what the no-ACK quit now relies on: when the shutdown request times
+// out, closing stdin is the only signal the helper gets, so EOF has to perform
+// the full teardown rather than just exiting the process.
+func TestEOFAloneRunsTheSameTeardownAsTheMethod(t *testing.T) {
+	b := backendWithConfig(t)
+	var out bytes.Buffer
+	srv := NewServer(b, &out)
+
+	// EOF only: Serve returns because the reader is exhausted, exactly as main
+	// observes a closed pipe. No shutdown method is ever sent.
+	srv.Serve(strings.NewReader(""))
+
+	if srv.Stopped() {
+		t.Error("plain EOF should not have to go through requestStop")
+	}
+
+	// main then calls Shutdown, which must be the full teardown.
+	var shuttingDown int
+	unsub := b.Subscribe(func(ev protocol.Event) {
+		if ev.Event == protocol.EventShuttingDown {
+			shuttingDown++
+		}
+	})
+	defer unsub()
+
+	b.Shutdown()
+	if shuttingDown != 1 {
+		t.Errorf("EOF-driven Shutdown emitted shutting_down %d times, want 1", shuttingDown)
+	}
+	if !b.IsShuttingDown() {
+		t.Error("EOF-driven Shutdown did not mark the backend as shutting down")
+	}
+
+	// And a later duplicate (the method path racing EOF) must not repeat it.
+	b.Shutdown()
+	if shuttingDown != 1 {
+		t.Errorf("a second Shutdown repeated the teardown: %d events", shuttingDown)
+	}
+}

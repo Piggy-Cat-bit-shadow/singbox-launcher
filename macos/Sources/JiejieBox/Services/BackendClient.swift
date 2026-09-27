@@ -211,20 +211,28 @@ actor BackendClient {
             return
         }
 
-        // Phase 2: close stdin as soon as the ACK is in.
+        // Phase 2: close stdin, whether or not the ACK arrived.
         //
-        // This is the whole point of the ordering. The headless backend's read
-        // loop blocks on stdin, and GracefulExit cannot stop it: with no UI
-        // attached it never signals Serve, so the process stays alive until
-        // stdin reaches EOF. Measured: the backend is still running 6 s after
-        // the ACK with stdin open, and exits 13 ms after it closes.
+        // The headless backend's read loop blocks on stdin, and GracefulExit
+        // cannot stop it: with no UI attached it never signals Serve, so the
+        // process stays alive until stdin reaches EOF. Measured: the backend is
+        // still running 6 s after the ACK with stdin open, and exits 13 ms
+        // after it closes.
         //
         // Waiting for a self-exit before closing stdin therefore waits for
-        // something that cannot happen. The ACK ordering is what makes closing
-        // here safe: the response is written before teardown starts, so it has
-        // already arrived by the time we get here.
+        // something that cannot happen. On the normal path the ACK ordering is
+        // what makes closing here safe — the response is written before teardown
+        // starts, so it has already arrived.
+        //
+        // On the FAILURE path there is no ACK to protect, and stdin was
+        // previously left open: the helper then had no way to be told the
+        // frontend was gone, so the wait burned its full budget and the process
+        // was force-terminated without ever running its graceful teardown. EOF
+        // is precisely the fallback for a broken or unresponsive IPC channel, so
+        // it must be sent here too. The caller's waiter has already been
+        // resumed with the timeout error, so nothing is left awaiting a reply.
         let stdinClosedAt = Date()
-        if acknowledged, let stdinHandle {
+        if let stdinHandle {
             try? stdinHandle.close()
             self.stdinHandle = nil
         }
@@ -256,7 +264,9 @@ actor BackendClient {
         let exitText = ms(Date().timeIntervalSince(stdinClosedAt))
         let totalText = ms(Date().timeIntervalSince(quitStarted))
         let fallbackText = fallbackTerminated ? " (fallback terminate)" : ""
-        let ackNote = acknowledged ? "" : " (no ACK; EOF-only path)"
+        // The no-ACK case has done the same EOF fallback as the normal path, so
+        // the note reports what happened rather than implying a separate route.
+        let ackNote = acknowledged ? "" : " (no ACK; EOF fallback used)"
         log.info("quit: ack \(ackText) stdin \(stdinText) exit \(exitText) total \(totalText)\(fallbackText)\(ackNote)")
     }
 
