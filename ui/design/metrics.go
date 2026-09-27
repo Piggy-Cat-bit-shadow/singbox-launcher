@@ -58,13 +58,13 @@ const (
 	RadiusButton float32 = 10
 	// RadiusNav — подсветка выбранного пункта навигации. Заметно больше
 	// кнопки: это «pill», а не строка таблицы.
-	RadiusNav float32 = 12
+	RadiusNav float32 = 11
 	// RadiusCard — карточки и секции — основной контейнер контента.
-	RadiusCard float32 = 16
+	RadiusCard float32 = 14
 	// RadiusHero — крупная карточка Home: чуть мягче обычной.
-	RadiusHero float32 = 18
+	RadiusHero float32 = 14
 	// RadiusDialog — модальные окна.
-	RadiusDialog float32 = 16
+	RadiusDialog float32 = 14
 )
 
 // Геометрия сайдбара.
@@ -75,48 +75,48 @@ const (
 // обрезает «Diagnostics» и длинные русские подписи.
 const (
 	// SidebarWidth — полная ширина навигационной колонки.
-	SidebarWidth float32 = 224
+	SidebarWidth float32 = 212
 	// SidebarPadding — внутренние отступы сайдбара по горизонтали.
 	SidebarPadding float32 = 14
 	// SidebarIdentityHeight — высота блока с именем приложения.
-	SidebarIdentityHeight float32 = 68
+	SidebarIdentityHeight float32 = 58
 	// SidebarTopGap — отступ от верха окна до первого пункта.
 	SidebarTopGap float32 = SpaceS
 	// NavItemHeight — высота пункта навигации.
-	NavItemHeight float32 = 46
+	NavItemHeight float32 = 41
 	// NavIconSize — размер иконки пункта.
-	NavIconSize float32 = 20
+	NavIconSize float32 = 18
 	// NavIconGap — зазор между иконкой и текстом.
-	NavIconGap float32 = SpaceM
+	NavIconGap float32 = SpaceS + 2
 	// NavItemGap — вертикальный зазор между пунктами.
 	NavItemGap float32 = 2
 	// NavSectionGap — зазор перед заголовком группы.
-	NavSectionGap float32 = SpaceL
+	NavSectionGap float32 = SpaceS
 	// NavSectionLabelHeight — высота заголовка группы.
-	NavSectionLabelHeight float32 = 24
+	NavSectionLabelHeight float32 = 20
 )
 
 // Геометрия контентной области.
 const (
 	// ContentPaddingH — горизонтальные поля страницы.
-	ContentPaddingH float32 = Space4XL
+	ContentPaddingH float32 = Space3XL
 	// ContentPaddingV — вертикальные поля страницы.
-	ContentPaddingV float32 = Space3XL
+	ContentPaddingV float32 = Space2XL + SpaceXS
 	// PageHeaderHeight — высота шапки страницы.
-	PageHeaderHeight float32 = 72
+	PageHeaderHeight float32 = 62
 	// CardPadding — внутренние отступы карточки.
-	CardPadding float32 = SpaceXL
+	CardPadding float32 = SpaceL
 	// CardGap — зазор между карточками в колонке.
 	CardGap float32 = SpaceL
 	// RowHeight — минимальная высота строки настроек.
 	RowHeight float32 = 48
 	// RowMinHeight — высота строки карточки с двумя строками текста.
-	RowMinHeight float32 = 52
+	RowMinHeight float32 = 46
 	// ToolbarHeight — высота панели инструментов.
 	ToolbarHeight float32 = 44
 	// MaxContentWidth — предел ширины контентной колонки. Карточка шириной
 	// 1400 выглядит сломанной; на широком окне контент центрируется.
-	MaxContentWidth float32 = 860
+	MaxContentWidth float32 = 780
 	// SegmentedHeight — высота сегментированного переключателя.
 	SegmentedHeight float32 = 34
 )

@@ -116,7 +116,9 @@ func (c *ClickableCard) CreateRenderer() fyne.WidgetRenderer {
 		inner = append(inner, CardCaption(c.summary))
 	}
 
-	content := container.New(&paddedBox{l: CardPadding, t: SpaceL, r: CardPadding, b: SpaceL},
+	// Сводная карточка ниже обычной: внутри две строки текста, и большие
+	// поля делали её похожей на пустую панель.
+	content := container.New(&paddedBox{l: CardPadding, t: SpaceM, r: CardPadding, b: SpaceM},
 		container.NewVBox(inner...))
 	// Слои: фон → граница → содержимое. Прозрачного слоя сверху НЕТ.
 	return widget.NewSimpleRenderer(container.NewStack(c.bg, c.border, content))

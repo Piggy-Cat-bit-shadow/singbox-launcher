@@ -32,8 +32,17 @@ import (
 func PrimaryAction(label string, onTapped func()) *widget.Button {
 	b := widget.NewButton(label, onTapped)
 	b.Importance = widget.HighImportance
+	// Компактная высота: дефолтная кнопка Fyne с нашей темой (padding 8)
+	// выглядит «блоком». 38 — высота кнопок в десктопных клиентах.
+	b.Resize(fyne.NewSize(b.MinSize().Width, PrimaryButtonHeight))
 	return b
 }
+
+// PrimaryButtonHeight — высота главной кнопки страницы.
+//
+// Вынесена в токен: Start/Stop и прочие primary-действия обязаны совпадать по
+// высоте, иначе ряд «заголовок + кнопка» разъезжается.
+const PrimaryButtonHeight float32 = 38
 
 // SecondaryAction — обычная кнопка: заметная, но не конкурирующая с главной.
 func SecondaryAction(label string, onTapped func()) *widget.Button {
