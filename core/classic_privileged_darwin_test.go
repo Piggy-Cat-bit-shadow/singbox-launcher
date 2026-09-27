@@ -184,7 +184,15 @@ func TestPrivilegedCoreCopyGate(t *testing.T) {
 	// Команда: без службы — copy, при plist службы — install (она обновляет
 	// ту же копию). Путь с пробелом и апострофом разбирается sh ровно в
 	// задуманные аргументы.
-	bin := "/Users/o'brien/My Apps/sing-box"
+	//
+	// Версия ядра на выбор команды больше не влияет (гейт снят): решает
+	// проба бинаря на `--service=copy`. Поэтому здесь нужен НАСТОЯЩИЙ файл,
+	// который эту сабкоманду объявляет, — иначе лаунчер положит копию сам.
+	// fakeCoreScript сопоставляет "$1 $2", а лаунчер зовёт
+	// `<core> lxd --service=copy --help`.
+	bin := fakeCoreScript(t, t.TempDir(), "o'brien sing-box", map[string]string{
+		"lxd --service=copy": "--service",
+	})
 	for _, tc := range []struct {
 		withPlist   bool
 		wantService bool
@@ -212,6 +220,29 @@ func TestPrivilegedCoreCopyGate(t *testing.T) {
 		}
 		if got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); strings.Join(got, "|") != strings.Join(tc.wantArgs, "|") {
 			t.Fatalf("%q parsed as %q, want %q", command, got, tc.wantArgs)
+		}
+	}
+
+	// И это НЕ зависит от версии: ядро, умеющее копировать себя, получает
+	// свою сабкоманду при любой строке версии — кастомной, неразбираемой,
+	// пустой и «старой» lx-релизной alike.
+	for _, version := range []string{
+		"1.15.0-jiejie-masquerade.5",
+		"custom-build",
+		"unknown",
+		"",
+		"1.14.1-lx.8",
+		constants.RequiredCoreVersion,
+	} {
+		if err := os.Remove(l.PlistPath); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		command, _, err := privilegedCopyCommandFor(l.daemonServiceLayout, bin, version)
+		if err != nil {
+			t.Fatalf("version %q: %v", version, err)
+		}
+		if !strings.Contains(command, "--service=copy") {
+			t.Fatalf("version %q: command %q does not use the core's own copy subcommand", version, command)
 		}
 	}
 }
