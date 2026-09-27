@@ -124,11 +124,16 @@ func sectionPage(id SectionID) SectionID {
 	}
 }
 
-// selectSection — единая точка выбора раздела.
+// selectSection — смена БИЗНЕС-домена: с каким ядром идёт разговор.
 //
-// Тело метода — механически перенесённое содержимое `app.tabs.OnSelected`.
-// Правки логики здесь допустимы только вместе с пониманием, что тот же путь
-// исполняется и при переключении через сайдбар, и при программной навигации.
+// Отвечает только за scope, владельца слотов панелей и транспорт. Порядок
+// шагов значим и унаследован от `app.tabs.OnSelected`: сначала область, потом
+// активация панели и транспорт, иначе обновление списка уйдёт не в ту область.
+//
+// Видимость страниц (какие опросы активны, нужно ли перечитать Settings)
+// сюда НЕ входит — этим занимается applyRouteVisibility. Смешивать нельзя:
+// Diagnostics/Settings/About не меняют домен, но обязаны выключать опросы
+// скрытых страниц.
 func (a *App) selectSection(id SectionID) {
 	controller := a.core
 
@@ -159,37 +164,50 @@ func (a *App) selectSection(id SectionID) {
 		// девалось — снимает его только явный Disconnect.
 		ReapplyLxdRemoteTransport(controller)
 		a.remotePanel.Activate(controller)
-	case SectionSettings:
-		// Пути раздела Storage (SPEC 135 §4.1): ядро могли скачать, версия
-		// ядра могла стать известной — перечитываем при входе.
+	}
+
+}
+
+// applyRouteVisibility — слой ВИДИМОСТИ: что должно работать на текущей
+// странице, независимо от бизнес-домена.
+//
+// Вызывается на каждый переход маршрута, включая переходы между страницами
+// без домена (Diagnostics / Settings / About) — именно этот случай раньше
+// выпадал: routeDomain возвращал "", selectSection не вызывался, и опросы
+// скрытых страниц продолжали работать, а Settings не перечитывал Storage.
+//
+// Транспорт здесь не трогается: соединение с удалённой машиной — состояние
+// машины, а не страницы.
+func (a *App) applyRouteVisibility(route RouteID) {
+	controller := a.core
+
+	// Опросы узлов нужны только там, где список узлов виден.
+	localListVisible := route == RouteProxies
+	remoteListVisible := route == RouteRemote
+
+	a.localPanel.EndpointPoll().SetTabActive(localListVisible)
+	a.remotePanel.EndpointPoll().SetTabActive(remoteListVisible)
+	// Автообновление удалённого списка — только на его странице.
+	a.remotePanel.AutoRefresh().SetTabActive(remoteListVisible)
+
+	switch route {
+	case RouteProxies:
+		a.localPanel.RefreshEndpointStates(controller)
+	case RouteRemote:
+		a.remotePanel.RefreshEndpointStates(controller)
+	case RouteSettings:
+		// Пути раздела Storage: ядро могли скачать, версия могла стать
+		// известной — перечитываем при входе.
 		if a.refreshSettings != nil {
 			a.refreshSettings()
 		}
 	}
 
-	// Авто-обновление списка узлов идёт только на видимой странице Remote:
-	// опрашивать машину, пока пользователь смотрит на Local, незачем.
-	a.remotePanel.AutoRefresh().SetTabActive(id == SectionRemote)
-	// Состояния WG/AWG-узлов — у панели на экране; после смены транспорта
-	// выше, чтобы опрос шёл в ядро своей области.
-	a.localPanel.EndpointPoll().SetTabActive(id == SectionLocal)
-	a.remotePanel.EndpointPoll().SetTabActive(id == SectionRemote)
-	switch id {
-	case SectionLocal:
-		a.localPanel.RefreshEndpointStates(controller)
-	case SectionRemote:
-		a.remotePanel.RefreshEndpointStates(controller)
-	}
-
-	// Обновляем список только там, где есть с кем разговаривать.
-	//
-	// На Local это локальное ядро — оно есть всегда (RefreshAPIFunc сам
-	// no-op, если ядро не запущено). На Remote собеседник появляется
-	// только после выбора машины: без него запрос уходил с пустой группой
-	// и возвращал «Daemon: group "" not found». Пустой список до выбора —
-	// это честное состояние, а не сбой.
-	needRefresh := id == SectionLocal
-	if id == SectionRemote {
+	// Обновляем список только там, где есть с кем разговаривать. На Remote
+	// собеседник появляется лишь после выбора машины: без него запрос уходил
+	// с пустой группой. Пустой список до выбора — честное состояние.
+	needRefresh := route == RouteProxies
+	if route == RouteRemote {
 		_, _, hasMachine := GetLxdRemoteOverride()
 		needRefresh = hasMachine
 	}

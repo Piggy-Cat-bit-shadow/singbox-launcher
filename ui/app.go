@@ -9,6 +9,7 @@ import (
 
 	"singbox-launcher/core"
 	"singbox-launcher/core/events"
+	"singbox-launcher/core/services"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/ui/components"
 	"singbox-launcher/ui/design"
@@ -96,9 +97,11 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// стоять там же, где человек его увидит. Контейнер отдаём пустым и
 	// скрытым — до первого выключения места он не занимает.
 	localContent, localPanel := CreateLocalTab(controller, app.coreRejectedBar())
-	remoteContent, remotePanel := CreateRemoteTab(controller)
-	_ = remoteContent
-	app.localPanel, app.remotePanel = localPanel, remotePanel
+	// Remote: stateful-объекты создаются ОДИН РАЗ и переиспользуются
+	// современной страницей и compatibility-оболочкой.
+	remoteProxyPanel := CreateProxyListPanel(controller, services.ScopeRemote)
+	parts := createRemoteParts(controller, remoteProxyPanel)
+	app.localPanel, app.remotePanel = localPanel, remoteProxyPanel
 	// SPEC 100 §3.8: Debug API получает Connect/Disconnect вкладки Remote.
 	// Строго после создания вкладок — подписчики OnOverrideChanged уже стоят.
 	RegisterOverrideAPIHooks(controller)
@@ -133,7 +136,7 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 		RouteHome:        homePage.Object(),
 		RouteProxies:     proxiesPage,
 		RouteTraffic:     trafficPage,
-		RouteRemote:      remoteContent,
+		RouteRemote:      buildRemotePage(parts),
 		RouteDiagnostics: diagnosticsPage,
 		RouteSettings:    settingsPage,
 		RouteAbout:       helpPage,
@@ -143,7 +146,7 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// (updateClashAPITabState). Стрип остаётся построенным, но не попадает
 	// в визуальное дерево — навигацию теперь несёт сайдбар.
 	coreTabItem := container.NewTabItem(locale.T("Local"), localContent)
-	app.clashAPITab = container.NewTabItem(locale.T("Remote"), remoteContent)
+	app.clashAPITab = container.NewTabItem(locale.T("Remote"), buildLegacyRemoteShell(parts))
 	settingsTabItem := container.NewTabItem(locale.T("Settings"), settingsPage)
 	app.tabs = container.NewAppTabs(
 		coreTabItem,
@@ -399,7 +402,7 @@ func (a *App) navigationEntries() []design.NavEntry {
 		// видел одно слово дважды и логично пробовал кликнуть по верхнему.
 		// Теперь группы описывают область, а не пункт.
 		{ID: design.NavID(RouteHome), Title: locale.T("Home"), Icon: icons.NavHome, Section: locale.T("Overview")},
-		{ID: design.NavID(RouteProxies), Title: locale.T("Proxies"), Icon: icons.NavLocal, Section: locale.T("Network")},
+		{ID: design.NavID(RouteProxies), Title: locale.T("Proxies"), Icon: icons.NavProxies, Section: locale.T("Network")},
 		{ID: design.NavID(RouteRemote), Title: locale.T("Remote"), Icon: icons.NavRemote},
 		{ID: design.NavID(RouteTraffic), Title: locale.T("Traffic"), Icon: icons.NavTraffic},
 		{ID: design.NavID(RouteDiagnostics), Title: locale.T("Diagnostics"), Icon: icons.NavDiagnostics, Section: locale.T("Tools")},
@@ -423,11 +426,15 @@ func (a *App) showRoute(r RouteID) {
 	if !ok {
 		return
 	}
+	// Два независимых слоя: смена домена (транспорт/scope) и видимость
+	// страницы (опросы, refresh). Страницы без домена — Diagnostics,
+	// Settings, About — домен не меняют, но обязаны пройти слой видимости.
 	domain := routeDomain(r)
 	if domain != "" && a.currentSection != domain {
 		a.currentSection = domain
 		a.selectSection(domain)
 	}
+	a.applyRouteVisibility(r)
 	if a.contentHost != nil {
 		a.contentHost.Objects = []fyne.CanvasObject{page}
 		a.contentHost.Refresh()
