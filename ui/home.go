@@ -42,6 +42,10 @@ type HomePage struct {
 
 	// pendingGen — поколение операции Start/Stop (см. core_actions.go).
 	pendingGen uint64
+	// awaiting — операция в полёте: кнопка погашена до смены состояния.
+	awaiting bool
+	// awaitingFor — какого состояния ждём (true — running).
+	awaitingFor bool
 	// navigate — переход на другую страницу (ставится оболочкой).
 	navigate func(RouteID)
 }
@@ -66,10 +70,15 @@ func NewHomePage(ac *core.AppController, controller *core.AppController) *HomePa
 		locale.T("Remote"), locale.T("Manage other machines"),
 		func() { h.goTo(RouteRemote) })
 
+	// Карточки разделены ровно одним интервалом: раньше между ними было
+	// «пусто» больше, чем внутри карточек, и страница выглядела разряженной.
 	h.root = container.NewVBox(
 		hero,
+		design.SpacerV(design.CardGap),
 		design.NewCard("", "", nil, runtimeCard).Object(),
+		design.SpacerV(design.CardGap),
 		proxiesCard,
+		design.SpacerV(design.CardGap),
 		remoteCard,
 	)
 	return h
@@ -94,22 +103,73 @@ func (h *HomePage) actionButtons() []*widget.Button {
 	return []*widget.Button{h.primaryBtn}
 }
 
-// setPendingStatus — показать, что операция идёт.
-func (h *HomePage) setPendingStatus(text string) {
+// setPendingStatus — показать, что операция идёт, и запомнить ожидаемое
+// состояние: по нему refresh понимает, когда кнопку можно вернуть.
+func (h *HomePage) setPendingStatus(text string, wantRunning bool) {
+	h.awaiting = true
+	h.awaitingFor = wantRunning
 	if h.statusBadge != nil {
 		h.statusBadge.Set(text, design.StatusInfo)
 	}
 }
 
 // releasePending — отпустить кнопку и вернуться к реальному состоянию.
-func (h *HomePage) releasePending() { h.refresh() }
+func (h *HomePage) releasePending() {
+	h.awaiting = false
+	h.refresh()
+}
+
+// pendingDone сообщает, что операция Start/Stop завершилась и кнопку можно
+// вернуть в рабочее состояние.
+//
+// Операция считается завершённой, когда состояние ядра перестало быть
+// «начальным» для неё: после Start это running, после Stop — не running.
+// Пока состояние не изменилось, кнопка остаётся погашенной (как в панели
+// Core), но не дольше потолка ожидания: его снимает releasePending.
+func (h *HomePage) pendingDone() bool {
+	if !h.awaiting {
+		return true
+	}
+	var running bool
+	if h.ac != nil && h.ac.RunningState != nil {
+		running = h.ac.RunningState.IsRunning()
+	} else {
+		// Контроллера нет — ждать нечего, отпускаем: кнопка не должна
+		// остаться мёртвой навсегда.
+		h.awaiting = false
+		return true
+	}
+	if pendingSettled(h.awaiting, h.awaitingFor, running) {
+		h.awaiting = false
+	}
+	return !h.awaiting
+}
+
+// pendingSettled — чистое решении о снятии блокировки.
+//
+// Вынесено отдельно, чтобы проверялось тестом без живого контроллера:
+// RunningState.Set тянет за собой UpdateUI и требует собранного приложения,
+// а сама логика тривиальна и именно её важно зафиксировать.
+//
+// awaiting — операция в полёте; wantRunning — какого состояния ждём;
+// running — текущее состояние ядра.
+func pendingSettled(awaiting, wantRunning, running bool) bool {
+	if !awaiting {
+		return true
+	}
+	return running == wantRunning
+}
 
 // buildHero — верхний блок: состояние и главное действие.
 func (h *HomePage) buildHero() fyne.CanvasObject {
 	title := design.PageTitle(locale.T("Local"))
 	subtitle := design.PageSubtitle(locale.T("Local sing-box core"))
 
-	left := container.NewVBox(title, subtitle, h.statusBadge.Object())
+	// Заголовок и подзаголовок — вплотную, статус — с небольшим отступом:
+	// три строки одного блока не должны разъезжаться на пол-экрана.
+	head := container.NewVBox(title, subtitle)
+	left := container.NewVBox(head, design.SpacerV(design.SpaceS), h.statusBadge.Object())
+
 	return container.NewBorder(nil, nil, left, container.NewCenter(h.primaryBtn))
 }
 
@@ -154,6 +214,19 @@ func (h *HomePage) refresh() {
 			StartCoreAction(h, &h.pendingGen)
 			h.refresh()
 		}
+	}
+
+	// Кнопку ОБЯЗАТЕЛЬНО вернуть в рабочее состояние.
+	//
+	// beginCoreOp гасит её на время операции (защита от двойного нажатия), а
+	// снимает блокировку только releasePending — то есть по таймауту 12 с.
+	// Из-за этого после успешного Start кнопка оставалась disabled: подпись
+	// менялась на «Stop», обработчик подменялся, но нажать её было нельзя.
+	//
+	// Панель Core делает то же самое в updateRunningStatus (Enable для
+	// start/stop/restart) — здесь это упустили.
+	if h.pendingDone() {
+		h.primaryBtn.Enable()
 	}
 	h.primaryBtn.Refresh()
 

@@ -59,8 +59,9 @@ func (tab *CoreDashboardTab) actionButtons() []*widget.Button {
 }
 
 // setPendingStatus — «Starting…» / «Stopping…» в подписи состояния.
-func (tab *CoreDashboardTab) setPendingStatus(text string) {
+func (tab *CoreDashboardTab) setPendingStatus(text string, wantRunning bool) {
 	tab.pendingOp = true
+	tab.pendingOpWantRun = wantRunning
 	tab.pendingOpMismatchTicks = 0
 	if tab.statusLabel != nil {
 		tab.statusLabel.SetText(text)

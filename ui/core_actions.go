@@ -38,8 +38,9 @@ const pendingOpTimeout = 12 * time.Second
 type coreActionTarget interface {
 	// actionButtons — кнопки, которые надо погасить на время операции.
 	actionButtons() []*widget.Button
-	// setPendingStatus — показать «Starting…» / «Stopping…».
-	setPendingStatus(text string)
+	// setPendingStatus — показать «Starting…» / «Stopping…» и запомнить,
+	// какого состояния мы ждём (wantRunning: true — Start).
+	setPendingStatus(text string, wantRunning bool)
 	// releasePending — отпустить кнопки (по таймауту).
 	releasePending()
 }
@@ -50,7 +51,7 @@ type coreActionTarget interface {
 //
 // Генерация операций отсекает просроченный таймаут: если состояние успело
 // смениться, старый таймер ничего не трогает.
-func beginCoreOp(t coreActionTarget, statusText string, gen *uint64) {
+func beginCoreOp(t coreActionTarget, statusText string, wantRunning bool, gen *uint64) {
 	*gen++
 	myGen := *gen
 
@@ -61,7 +62,7 @@ func beginCoreOp(t coreActionTarget, statusText string, gen *uint64) {
 			b.Refresh()
 		}
 	}
-	t.setPendingStatus(statusText)
+	t.setPendingStatus(statusText, wantRunning)
 
 	go func() {
 		time.Sleep(pendingOpTimeout)
@@ -82,7 +83,7 @@ func beginCoreOp(t coreActionTarget, statusText string, gen *uint64) {
 // тогда выполняется только сам запуск.
 func StartCoreAction(t coreActionTarget, gen *uint64) {
 	if t != nil && gen != nil {
-		beginCoreOp(t, locale.T("Starting..."), gen)
+		beginCoreOp(t, locale.T("Starting..."), true, gen)
 	}
 	core.StartSingBoxProcess()
 }
@@ -90,7 +91,7 @@ func StartCoreAction(t coreActionTarget, gen *uint64) {
 // StopCoreAction — единая точка остановки ядра для UI.
 func StopCoreAction(t coreActionTarget, gen *uint64) {
 	if t != nil && gen != nil {
-		beginCoreOp(t, locale.T("Stopping..."), gen)
+		beginCoreOp(t, locale.T("Stopping..."), false, gen)
 	}
 	core.StopSingBoxProcess()
 }
