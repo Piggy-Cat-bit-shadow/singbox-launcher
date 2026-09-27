@@ -240,17 +240,25 @@ func NewAppController(layout paths.Layout, appIconData, greyIconData, greenIconD
 	ac.RunningState = &RunningState{controller: ac}
 	ac.RunningState.Set(false)
 
-	// Initialize UIService
-	uiService, err := uiservice.NewUIService(
-		appIconData, greyIconData, greenIconData, redIconData,
-		func() bool { return ac.RunningState.IsRunning() },
-		ac.FileService.SingboxPath,
-		func() { ac.UpdateUI() },
-	)
-	if err != nil {
-		return nil, fmt.Errorf("NewAppController: cannot create UIService: %w", err)
+	// Initialize UIService.
+	//
+	// Nil icon data means "headless": no Fyne application is created and
+	// UIService stays nil. Every UI touchpoint in this package already checks
+	// hasUI() or `UIService != nil` before dereferencing, so the headless
+	// path is a supported mode rather than a special case bolted on later.
+	// The SwiftUI frontend uses it; the Fyne build passes real icons.
+	if appIconData != nil {
+		uiService, err := uiservice.NewUIService(
+			appIconData, greyIconData, greenIconData, redIconData,
+			func() bool { return ac.RunningState.IsRunning() },
+			ac.FileService.SingboxPath,
+			func() { ac.UpdateUI() },
+		)
+		if err != nil {
+			return nil, fmt.Errorf("NewAppController: cannot create UIService: %w", err)
+		}
+		ac.UIService = uiService
 	}
-	ac.UIService = uiService
 	ac.ConsecutiveCrashAttempts = 0
 	ac.ProcessService = NewProcessService(ac)
 	ac.ConfigService = NewConfigService(ac)
@@ -973,6 +981,21 @@ type VPNButtonState struct {
 	IsRunning    bool
 	StartEnabled bool
 	StopEnabled  bool
+}
+
+// DaemonEngineAvailable reports whether the lxd daemon engine can run on this
+// platform and build.
+//
+// Exported for the headless backend, which advertises it as a capability so
+// the frontend can hide daemon-only settings instead of guessing from the OS.
+func DaemonEngineAvailable() bool {
+	return daemonEngineAvailable() == nil
+}
+
+// ElevationSupported reports whether the backend can request privileges on
+// this platform.
+func ElevationSupported() bool {
+	return ElevateAtStartSupported || runtime.GOOS == "darwin"
 }
 
 // GetVPNButtonState returns the current state for VPN buttons (used by both Core Dashboard and Tray Menu)
