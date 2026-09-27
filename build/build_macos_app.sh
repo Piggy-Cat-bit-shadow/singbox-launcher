@@ -21,8 +21,20 @@ fi
 
 echo "=== Building SwiftUI frontend ($CONFIG, arm64) ==="
 cd macos
-swift build -c "$CONFIG" --arch arm64 2>&1 | tail -5
+# Keep the full output: `| tail -5` hid the compiler's `error:` lines and showed
+# only the trailing "note", which made a CI build failure unreadable. The exit
+# status also has to survive the pipe, hence PIPESTATUS.
+set -o pipefail
+swift build -c "$CONFIG" --arch arm64 2>&1 | tee "${TMPDIR:-/tmp}/jiejiebox-swift-build.log"
+SWIFT_STATUS=${PIPESTATUS[0]}
 cd ..
+if [ "$SWIFT_STATUS" -ne 0 ]; then
+    echo "ERROR: swift build failed (status $SWIFT_STATUS). Full log:"
+    echo "       ${TMPDIR:-/tmp}/jiejiebox-swift-build.log"
+    # Show only the errors, so the failure is visible without scrolling.
+    grep -E "error:" "${TMPDIR:-/tmp}/jiejiebox-swift-build.log" | head -20 >&2 || true
+    exit 1
+fi
 
 # SwiftPM puts the product under .build/out/Products/<Config>/ on this
 # toolchain; fall back to the conventional path for other layouts.
