@@ -280,15 +280,15 @@ func BuildSettingsContent(ac *core.AppController) (fyne.CanvasObject, func()) {
 	content := container.NewVBox(
 		design.NewCard(locale.T("Appearance"), "", nil, appearanceRow).Object(),
 		design.NewCard(locale.T("Language"), "", nil, langRow).Object(),
-		design.NewCard(locale.T("Connection"),
-			locale.T("How the launcher brings the core up."), nil, connBlock).Object(),
-		design.NewCard(locale.T("Subscriptions"),
-			locale.T("How subscription data is fetched and identified."), nil,
+		// Подписи разделов короткие и без пояснений: описание, дублирующее
+		// заголовок, только занимает место. Пояснения живут рядом с конкретным
+		// контролом, где они действительно нужны.
+		design.NewCard(locale.T("Connection"), "", nil, connBlock).Object(),
+		design.NewCard(locale.T("Subscriptions"), "", nil,
 			container.NewVBox(autoUpdateCheck, uaRow, uaHint, subDefaultsBlock,
 				design.SpacerV(design.SpaceM), subIDBlock)).Object(),
 		design.NewCard(locale.T("Debug API"), "", nil, debugAPIBlock).Object(),
-		design.NewCard(locale.T("Storage"),
-			locale.T("Where the launcher keeps its data."), nil, storageBlock).Object(),
+		design.NewCard(locale.T("Storage"), "", nil, storageBlock).Object(),
 	)
 	// refresh при входе на страницу перечитывает и внешний вид: его могли
 	// сменить в другой сессии или изменить settings.json вручную.

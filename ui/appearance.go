@@ -52,11 +52,15 @@ func buildAppearanceSection(ac *core.AppController) (fyne.CanvasObject, func()) 
 		ApplyAppearance(ac, mode)
 	}
 
-	row := container.NewBorder(nil, nil,
-		container.NewVBox(
-			widget.NewLabel(locale.T("Appearance")),
-			design.CaptionWrap(locale.T("System follows the macOS appearance. Light and Dark change the window contents; the window frame itself stays under the system's control.")),
-		), nil, sel)
+	// Короткая подпись под контролом вместо абзаца: ограничение macOS
+	// (рамку окна задаёт система) стоит одной строкой, а не тремя.
+	hint := design.CaptionWrap(locale.T("System follows the OS. The window frame is always controlled by the system."))
+	hint.Importance = widget.LowImportance
+
+	row := container.NewVBox(
+		container.NewBorder(nil, nil, widget.NewLabel(locale.T("Appearance")), nil, sel),
+		hint,
+	)
 
 	return row, func() {
 		sel.SetSelected(appearanceLabel(locale.LoadSettings(binDir).AppearanceMode))

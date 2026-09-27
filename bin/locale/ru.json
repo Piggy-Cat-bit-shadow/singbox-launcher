@@ -4913,9 +4913,6 @@
   "Inspect what the launcher and the core are doing.": {
     "value": "Что делают лаунчер и ядро."
   },
-  "Where the launcher keeps its data.": {
-    "value": "Где лаунчер хранит данные."
-  },
   "Verify how traffic leaves this machine.": {
     "value": "Как трафик покидает эту машину."
   },
@@ -4924,12 +4921,6 @@
   },
   "Switch between hardware OpenGL and the Mesa3D software renderer.": {
     "value": "Переключение между аппаратным OpenGL и программным рендерером Mesa3D."
-  },
-  "How the launcher brings the core up.": {
-    "value": "Как лаунчер поднимает ядро."
-  },
-  "How subscription data is fetched and identified.": {
-    "value": "Как загружаются и идентифицируются подписки."
   },
   "Appearance": {
     "value": "Внешний вид"
@@ -4943,7 +4934,13 @@
   "Stopping...": {
     "value": "Остановка..."
   },
-  "System follows the macOS appearance. Light and Dark change the window contents; the window frame itself stays under the system's control.": {
-    "value": "«Системный» следует оформлению macOS. «Светлый» и «Тёмный» меняют содержимое окна; оформление самой рамки остаётся под управлением системы."
+  "Core settings: engine and daemon pairing": {
+    "value": "Настройки ядра: движок и сопряжение с демоном"
+  },
+  "System follows the OS. The window frame is always controlled by the system.": {
+    "value": "«Системный» следует оформлению ОС. Рамку окна всегда задаёт система."
+  },
+  "Where the launcher keeps its data.": {
+    "value": "Где лаунчер хранит данные."
   }
 }
