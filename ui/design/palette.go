@@ -85,20 +85,27 @@ type Palette struct {
 // карточка перестаёт читаться и всё «висит в воздухе». Здесь фон чуть
 // темнее поверхности — именно это создаёт слоистость без теней.
 var lightPalette = Palette{
-	Background: color.NRGBA{R: 0xF7, G: 0xF7, B: 0xF9, A: 0xFF},
-	Sidebar:    color.NRGBA{R: 0xF1, G: 0xF1, B: 0xF3, A: 0xFF},
+	// Фон чуть темнее, чем в первой редакции: на светлой поверхности карточки
+	// «белое на почти белом» читалось как отсутствие слоёв.
+	Background: color.NRGBA{R: 0xF4, G: 0xF4, B: 0xF7, A: 0xFF},
+	Sidebar:    color.NRGBA{R: 0xEC, G: 0xEC, B: 0xF0, A: 0xFF},
 	Surface:    color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF},
 
-	SurfaceAlt:      color.NRGBA{R: 0xF5, G: 0xF5, B: 0xF7, A: 0xFF},
-	SurfaceHover:    color.NRGBA{R: 0xEC, G: 0xEC, B: 0xEF, A: 0xFF},
-	SurfaceSelected: color.NRGBA{R: 0xE6, G: 0xEF, B: 0xFD, A: 0xFF},
+	SurfaceAlt: color.NRGBA{R: 0xF2, G: 0xF2, B: 0xF5, A: 0xFF},
+	// Hover ощутимее: раньше он был практически невидим.
+	SurfaceHover: color.NRGBA{R: 0xE3, G: 0xE3, B: 0xE8, A: 0xFF},
+	// Выбранный пункт: заметная, но не «синяя заливка» — accent tint ~12 %.
+	SurfaceSelected: color.NRGBA{R: 0xDC, G: 0xE8, B: 0xFB, A: 0xFF},
 
-	Border:       color.NRGBA{R: 0xE2, G: 0xE2, B: 0xE6, A: 0xFF},
-	BorderStrong: color.NRGBA{R: 0xD4, G: 0xD4, B: 0xD8, A: 0xFF},
+	// Границы видны: раньше карточка почти не отделялась от фона.
+	Border:       color.NRGBA{R: 0xDC, G: 0xDC, B: 0xE1, A: 0xFF},
+	BorderStrong: color.NRGBA{R: 0xC8, G: 0xC8, B: 0xCF, A: 0xFF},
 
 	TextPrimary:   color.NRGBA{R: 0x1C, G: 0x1C, B: 0x1E, A: 0xFF},
-	TextSecondary: color.NRGBA{R: 0x6E, G: 0x6E, B: 0x73, A: 0xFF},
-	TextMuted:     color.NRGBA{R: 0x98, G: 0x98, B: 0x9D, A: 0xFF},
+	TextSecondary: color.NRGBA{R: 0x5A, G: 0x5A, B: 0x60, A: 0xFF},
+	// Muted только для действительно второстепенного: 0x98 был почти нечитаем
+	// на белом и делал подписи карточек похожими на disabled.
+	TextMuted: color.NRGBA{R: 0x7C, G: 0x7C, B: 0x82, A: 0xFF},
 
 	Primary:      color.NRGBA{R: 0x00, G: 0x7A, B: 0xFF, A: 0xFF},
 	PrimaryHover: color.NRGBA{R: 0x00, G: 0x6C, B: 0xE0, A: 0xFF},
