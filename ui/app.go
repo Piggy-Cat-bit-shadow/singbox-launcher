@@ -9,9 +9,10 @@ import (
 
 	"singbox-launcher/core"
 	"singbox-launcher/core/events"
-	"singbox-launcher/core/services"
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/ui/components"
+	"singbox-launcher/ui/design"
+	"singbox-launcher/ui/icons"
 )
 
 // App manages the UI structure and tabs.
@@ -32,7 +33,24 @@ type App struct {
 	// активной панели при переключении вкладки.
 	localPanel  *ProxyListPanel
 	remotePanel *ProxyListPanel
-	content     fyne.CanvasObject
+	// refreshSettings перечитывает раздел Storage при входе в Settings
+	// (SPEC 135 §4.1). Живёт здесь, потому что вызывается из навигации:
+	// раньше — из app.tabs.OnSelected, теперь — из selectSection.
+	refreshSettings func()
+	// sidebar — навигационная колонка (SPEC 144). Заменяет горизонтальный
+	// таб-стрип как основную навигацию, но исполняет ТУ ЖЕ логику выбора
+	// через selectSection.
+	sidebar *design.Sidebar
+	// pages — содержимое страниц по идентификатору раздела.
+	pages map[SectionID]fyne.CanvasObject
+	// contentHost — контейнер, в который подставляется активная страница.
+	// Один объект на все страницы: смена раздела не пересобирает дерево и не
+	// сбрасывает состояние виджетов внутри страниц.
+	contentHost *fyne.Container
+	// currentSection — активный раздел. Единственный источник истины для
+	// подсветки навигации; состояние ядра/машин здесь не хранится.
+	currentSection SectionID
+	content        fyne.CanvasObject
 	// overlay is a concrete ClickRedirect component from `ui/components`.
 	// nil when `wizardOverlayEnabled` is false (current default).
 	overlay *components.ClickRedirect
@@ -72,9 +90,8 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// SPEC 100 §3.8: Debug API получает Connect/Disconnect вкладки Remote.
 	// Строго после создания вкладок — подписчики OnOverrideChanged уже стоят.
 	RegisterOverrideAPIHooks(controller)
-	coreTabItem := container.NewTabItem(locale.T("Local"), localContent)
-	app.clashAPITab = container.NewTabItem(locale.T("🌐 Remote"), remoteContent)
-	// Settings — обычная вкладка со своим содержимым.
+
+	// Settings — обычная страница со своим содержимым.
 	//
 	// Раньше она была кнопкой-подделкой: пустая вкладка, чей OnSelected
 	// открывал отдельное окно и тут же откатывал выбор назад. Это стоило
@@ -83,136 +100,71 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// содержимое рендерится на месте, отдельное окно удалено за
 	// ненадобностью.
 	settingsContent, refreshSettings := BuildSettingsContent(controller)
-	settingsTabItem := container.NewTabItem(locale.T("⚙️ Settings"),
-		components.WrapInScrollWithGutter(container.NewPadded(settingsContent)))
-	// Tab order: Core | Servers | 🔍 Diagnostics | ⚙️ Settings | ❓ Help.
-	// Settings sits between Diagnostics and Help — close to other
-	// "launcher behavior" controls and one click away from Help.
+	app.refreshSettings = refreshSettings
+	settingsPage := components.WrapInScrollWithGutter(container.NewPadded(settingsContent))
+	diagnosticsPage := components.WrapInScrollWithGutter(container.NewPadded(CreateDiagnosticsTab(controller)))
+	helpPage := components.WrapInScrollWithGutter(container.NewPadded(CreateHelpTab(controller)))
+
+	app.pages = map[SectionID]fyne.CanvasObject{
+		SectionLocal:       localContent,
+		SectionRemote:      remoteContent,
+		SectionDiagnostics: diagnosticsPage,
+		SectionSettings:    settingsPage,
+		SectionHelp:        helpPage,
+	}
+
+	// Совместимость: часть кода и тестов обращается к AppTabs напрямую
+	// (updateClashAPITabState). Стрип остаётся построенным, но не попадает
+	// в визуальное дерево — навигацию теперь несёт сайдбар.
+	coreTabItem := container.NewTabItem(locale.T("Local"), localContent)
+	app.clashAPITab = container.NewTabItem(locale.T("Remote"), remoteContent)
+	settingsTabItem := container.NewTabItem(locale.T("Settings"), settingsPage)
 	app.tabs = container.NewAppTabs(
 		coreTabItem,
 		app.clashAPITab,
-		container.NewTabItem(locale.T("🔍 Diagnostics"), CreateDiagnosticsTab(controller)),
+		container.NewTabItem(locale.T("Diagnostics"), diagnosticsPage),
 		settingsTabItem,
-		container.NewTabItem(locale.T("❓ Help"), CreateHelpTab(controller)),
+		container.NewTabItem(locale.T("Help"), helpPage),
 	)
 
-	// Set tab selection handler
+	// Навигация: сайдбар — основная, и он исполняет ту же логику, что
+	// раньше исполнял OnSelected (selectSection в ui/navigation.go).
+	app.sidebar = design.NewSidebar(app.navigationEntries(), func(id design.SidebarItemID) {
+		app.navigateTo(SectionID(id))
+	})
+	// AppTabs оставлен как программный путь и как страховка совместимости:
+	// его обработчик вызывает ровно тот же selectSection.
 	app.tabs.OnSelected = func(item *container.TabItem) {
 		app.currentTab = item
-
-		// SPEC 098: вкладка определяет, с КАКИМ ядром идёт разговор.
-		//
-		// Local — всегда своё ядро: транспорт удалённой машины снимается при
-		// входе. Без этого список на Local показывал узлы роутера, выбранного
-		// на Remote, — то есть чужие данные под именем локального ядра, и
-		// вернуться к своему было нечем (дропдаун с пунктом Local убран
-		// вместе с шапкой).
-		//
-		// Remote — выбранная машина либо ничего. Транспорт там ставит клик по
-		// строке; сама вкладка ничего не восстанавливает, потому что выбор
-		// эфемерный (SPEC 097 §4.3): после перезапуска активной машины нет, и
-		// список пуст до первого клика.
-		// Панели Local и Remote независимы, но слоты UIService рассчитаны на
-		// одного владельца — отдаём их той, что сейчас на экране.
 		switch item {
 		case coreTabItem:
-			// Порядок важен: сначала область, потом снятие транспорта. Оба
-			// шага дёргают обновление списка, и оно должно писать уже в
-			// local-состояние, а не в remote.
-			if controller.APIService != nil {
-				controller.APIService.SetProxyScope(services.ScopeLocal)
-			}
-			app.localPanel.Activate(controller)
-			// Транспорт МАШИНЫ не снимаем: соединение — состояние самой
-			// машины, а не вкладки. Рвать его при взгляде на своё ядро значит
-			// заставлять жать Connect после каждого переключения. Связь
-			// разрывает только явный Disconnect (или удаление машины).
-			//
-			// Чтобы Local при этом говорил со СВОИМ ядром, ставим его
-			// транспорт: SetTransport(nil) означал бы «никакого», а в
-			// lxd-режиме Clash HTTP нет — панель падала бы в
-			// «connection refused» на 9190.
-			controller.RestoreOwnTransport()
+			app.selectSection(SectionLocal)
 		case app.clashAPITab:
-			if controller.APIService != nil {
-				controller.APIService.SetProxyScope(services.ScopeRemote)
-			}
-			// Возвращаем транспорт выбранной машины: пока смотрели Local, его
-			// место занимал транспорт своего движка. Само соединение никуда не
-			// девалось — снимает его только явный Disconnect.
-			ReapplyLxdRemoteTransport(controller)
-			app.remotePanel.Activate(controller)
+			app.selectSection(SectionRemote)
 		case settingsTabItem:
-			// Пути раздела Storage (SPEC 135 §4.1): ядро могли скачать,
-			// версия ядра могла стать известной — перечитываем при входе.
-			refreshSettings()
-		}
-		// Авто-обновление списка узлов идёт только на видимой вкладке Remote:
-		// опрашивать машину, пока пользователь смотрит на Local, незачем.
-		app.remotePanel.AutoRefresh().SetTabActive(item == app.clashAPITab)
-		// Состояния WG/AWG-узлов — у панели на экране; после смены транспорта
-		// выше, чтобы опрос шёл в ядро своей области.
-		app.localPanel.EndpointPoll().SetTabActive(item == coreTabItem)
-		app.remotePanel.EndpointPoll().SetTabActive(item == app.clashAPITab)
-		switch item {
-		case coreTabItem:
-			app.localPanel.RefreshEndpointStates(controller)
-		case app.clashAPITab:
-			app.remotePanel.RefreshEndpointStates(controller)
-		}
-		// Обновляем список только там, где есть с кем разговаривать.
-		//
-		// На Local это локальное ядро — оно есть всегда (RefreshAPIFunc сам
-		// no-op, если ядро не запущено). На Remote собеседник появляется
-		// только после выбора машины: без него запрос уходил с пустой группой
-		// и возвращал «Daemon: group "" not found». Пустой список до выбора —
-		// это честное состояние, а не сбой.
-		needRefresh := item == coreTabItem
-		if item == app.clashAPITab {
-			_, _, hasMachine := GetLxdRemoteOverride()
-			needRefresh = hasMachine
-		}
-		if needRefresh && controller.UIService != nil && controller.UIService.RefreshAPIFunc != nil {
-			controller.UIService.RefreshAPIFunc()
+			app.selectSection(SectionSettings)
 		}
 	}
 
 	// Сохраняем оригинальный callback, который был установлен в CreateCoreDashboardTab
 	originalUpdateCoreStatusFunc := controller.UIService.UpdateCoreStatusFunc
 
-	// refreshCoreTabIcon — динамический emoji в табе Local по состоянию
-	// sing-box. Перерисовывает label + дёргает AppTabs.Refresh чтобы
-	// табстрип реально перечитал текст. Безопасно вызывать с UI-thread
-	// (caller wrap'ит в fyne.Do).
+	// refreshCoreStatus — статус ядра в нижней строке сайдбара.
 	//
-	// Status-indicator paradigm (как у media-плеера):
-	//   ⏸️ Local  — stopped / idle (sing-box не запущен)
-	//   ▶️ Local  — running (sing-box активен)
+	// Раньше состояние показывал emoji в заголовке вкладки Local (▶️/⏸️).
+	// Emoji-индикатор зависел от системного emoji-шрифта и в сайдбаре был бы
+	// чужеродным, поэтому статус переехал в отдельную строку внизу колонки:
+	// точка нужного цвета плюс текст. Цвет и текст берутся из темы и локали.
 	//
-	// Индикатор остался на Local, потому что показывает ЛОКАЛЬНОЕ ядро;
-	// состояние удалённых машин видно в их строках на вкладке Remote.
-	//
-	// База берётся из локали (`Local` / `Локально` / etc), эмодзи приклеивается
-	// тут чтобы не плодить per-state ключи в каждой локали.
-	coreLabelBase := locale.T("Local")
-	// Strip leading emoji + space from the locale base — text after the
-	// first space character. Locale strings ship with a default ▶️ (or
-	// previous attempt's icon) for the never-changed startup case; we
-	// override per-state below so the leading emoji from locale gets
-	// stripped to avoid double-icon.
-	if i := indexEmojiSep(coreLabelBase); i > 0 {
-		coreLabelBase = coreLabelBase[i:]
-	}
-	refreshCoreTabIcon := func() {
-		var icon string
-		switch {
-		case controller.RunningState != nil && controller.RunningState.IsRunning():
-			icon = "▶️"
-		default:
-			icon = "⏸️"
+	// Источник истины не меняется: RunningState контроллера. Здесь только
+	// проекция его значения в presentation-слой.
+	refreshCoreStatus := func() {
+		running := controller.RunningState != nil && controller.RunningState.IsRunning()
+		if running {
+			app.sidebar.SetStatus(locale.T("Connected"), design.StatusSuccess)
+			return
 		}
-		coreTabItem.Text = icon + " " + coreLabelBase
-		app.tabs.Refresh()
+		app.sidebar.SetStatus(locale.T("Disconnected"), design.StatusNeutral)
 	}
 
 	// Регистрируем комбинированный callback для обновления состояния вкладки Servers
@@ -236,7 +188,7 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// логика. Subscribe идемпотентен (одна handler-регистрация на NewApp).
 	if controller.EventBus != nil {
 		controller.EventBus.Subscribe(events.VpnStateChanged, func(_ events.Event) {
-			fyne.Do(refreshCoreTabIcon)
+			fyne.Do(refreshCoreStatus)
 		})
 
 		// Направление, добавленное в визарде, приезжает в config.json
@@ -283,6 +235,20 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	OnOverrideChanged(func() {
 		fyne.Do(app.updateClashAPITabState)
 	})
+
+	// Собираем оболочку: навигация слева, активная страница справа.
+	//
+	// Страницы созданы заранее и живут в a.pages; contentHost лишь
+	// подставляет нужную. Так переход не пересобирает дерево виджетов и не
+	// теряет их состояние (позиция скролла, введённый текст, раскрытые
+	// секции) — иначе каждое переключение раздела выглядело бы как
+	// перезагрузка страницы.
+	app.contentHost = container.NewStack()
+	app.content = container.NewBorder(nil, nil, app.sidebar, nil, app.contentHost)
+	// Первая страница — Local. Побочные эффекты её выбора исполняет
+	// showSection ниже (ровно те же, что раньше исполнял OnSelected).
+	app.currentSection = ""
+	app.showSection(SectionLocal)
 
 	// Local открыта на старте, но её слоты UIService перетёр конструктор
 	// Remote (панели строятся обе, а слот один). Возвращаем владение той
@@ -331,10 +297,10 @@ func NewApp(window fyne.Window, controller *core.AppController) *App {
 	// вели себя как фоновые — шли молча до жёсткого потолка.
 	app.installCoreRejectHooks(controller)
 
-	// Инициализируем состояние вкладки + первичный рендер иконки Core.
+	// Инициализируем состояние вкладки + первичный рендер статуса ядра.
 	// EventBus.Subscribe не fires backfill — рендерим вручную для startup'а.
 	app.updateClashAPITabState()
-	refreshCoreTabIcon()
+	refreshCoreStatus()
 
 	// Инициализируем overlay для перенаправления кликов на визард.
 	// Поведение зависит от `wizardOverlayEnabled` (см. ui/wizard_overlay.go) —
@@ -376,6 +342,92 @@ func (a *App) registerShortcuts() {
 	})
 }
 
+// navigationEntries — структура навигации (SPEC 144).
+//
+// Подпункты выведены из РЕАЛЬНЫХ разделов страниц, а не придуманы ради
+// наполнения сайдбара: у каждой страницы ниже есть соответствующее
+// содержимое. Пункты верхнего уровня ведут на страницу целиком (её первый
+// подраздел), подпункты — на конкретную секцию внутри неё.
+func (a *App) navigationEntries() []design.SidebarEntry {
+	return []design.SidebarEntry{
+		{
+			ID:      design.SidebarItemID(SectionLocal),
+			Title:   locale.T("Local"),
+			Icon:    icons.NavLocal,
+			Section: locale.T("Core"),
+			Children: []design.SidebarEntry{
+				{ID: design.SidebarItemID(sectionLocalOverview), Title: locale.T("Overview")},
+				{ID: design.SidebarItemID(sectionLocalProxies), Title: locale.T("Proxies")},
+				{ID: design.SidebarItemID(sectionLocalTraffic), Title: locale.T("Traffic")},
+			},
+		},
+		{
+			ID:    design.SidebarItemID(SectionRemote),
+			Title: locale.T("Remote"),
+			Icon:  icons.NavRemote,
+			Children: []design.SidebarEntry{
+				{ID: design.SidebarItemID(sectionRemoteMachines), Title: locale.T("Machines")},
+				{ID: design.SidebarItemID(sectionRemoteProxies), Title: locale.T("Proxies")},
+			},
+		},
+		{
+			ID:    design.SidebarItemID(SectionDiagnostics),
+			Title: locale.T("Diagnostics"),
+			Icon:  icons.NavDiagnostics,
+		},
+		{
+			ID:    design.SidebarItemID(SectionSettings),
+			Title: locale.T("Settings"),
+			Icon:  icons.NavSettings,
+			Children: []design.SidebarEntry{
+				{ID: design.SidebarItemID(sectionSettingsConnection), Title: locale.T("Connection")},
+				{ID: design.SidebarItemID(sectionSettingsSubscriptions), Title: locale.T("Subscriptions")},
+				{ID: design.SidebarItemID(sectionSettingsLanguage), Title: locale.T("Language")},
+				{ID: design.SidebarItemID(sectionSettingsStorage), Title: locale.T("Storage")},
+			},
+		},
+		{
+			ID:    design.SidebarItemID(SectionHelp),
+			Title: locale.T("Help"),
+			Icon:  icons.NavHelp,
+		},
+	}
+}
+
+// navigateTo — переход по навигации.
+//
+// Подраздел живёт на той же странице, что и его родитель: отдельной
+// страницы у «Proxies» нет, есть блок внутри Local. Поэтому подраздел
+// открывает страницу-владельца, а сам остаётся подсвеченным в колонке.
+func (a *App) navigateTo(id SectionID) {
+	a.showSection(id)
+}
+
+// showSection переключает видимую страницу и исполняет побочные эффекты
+// выбора. Единственный путь смены раздела для сайдбара.
+func (a *App) showSection(id SectionID) {
+	pageID := sectionPage(id)
+	page, ok := a.pages[pageID]
+	if !ok {
+		return
+	}
+	// Побочные эффекты исполняются по СТРАНИЦЕ: переход Local → Local.Proxies
+	// не должен заново снимать транспорт и перезагружать список — это стоило
+	// бы лишнего запроса и мигания списка.
+	firstVisit := a.currentSection != pageID
+	a.currentSection = pageID
+	if firstVisit {
+		a.selectSection(pageID)
+	}
+	if a.contentHost != nil {
+		a.contentHost.Objects = []fyne.CanvasObject{page}
+		a.contentHost.Refresh()
+	}
+	if a.sidebar != nil {
+		a.sidebar.SetSelected(design.SidebarItemID(id))
+	}
+}
+
 // GetContent returns the root content for the main window (tabs alone when
 // the overlay is disabled, tabs+overlay when enabled — see
 // `wizardOverlayEnabled`).
@@ -409,18 +461,4 @@ func (a *App) updateClashAPITabState() {
 	}
 	// SPEC 064: всегда enabled. Никаких DisableItem'ов больше нет.
 	a.tabs.EnableItem(a.clashAPITab)
-}
-
-// indexEmojiSep — returns the byte index just AFTER the first ASCII
-// space following an emoji prefix in s ("🚀 Core" → 5, "Core" → 0).
-// Used to strip a baked-in emoji from the locale's app.tab.core string
-// so we can substitute a state-driven one at runtime without each
-// locale carrying separate `app.tab.core.running` keys.
-func indexEmojiSep(s string) int {
-	for i, r := range s {
-		if r == ' ' {
-			return i + 1 // byte index after the space
-		}
-	}
-	return 0
 }

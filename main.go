@@ -747,14 +747,18 @@ func main() {
 	app := ui.NewApp(controller.UIService.MainWindow, controller)
 	controller.UIService.MainWindow.SetContent(fynetooltip.AddWindowToolTipLayer(
 		ui.WithMinWindowSize(app.GetContent()), controller.UIService.MainWindow.Canvas()))
-	// SPEC 098 §3.2: 1000×700 — и стартовый размер, и минимум. Растянуть
-	// можно, сжать ниже нельзя: на вкладках Local и Remote две колонки, и
-	// ниже этого они не деградируют, а превращаются в кашу из обрезанных
-	// подписей. Прежние 350×450 остались от одноколоночной эпохи.
+	// SPEC 144: стартовый размер и минимум — из дизайн-токенов
+	// (ui/design/metrics.go). Раньше здесь стоял MinWindowSize, посчитанный
+	// как 395+165 = 560 при комментарии, обещавшем 1000: окно сжималось до
+	// состояния, когда правая колонка схлопывалась. Теперь минимум выведен
+	// из сайдбара плюс две читаемые колонки контента.
+	//
+	// Стартуем с DefaultWindowSize (шире минимума), а не с минимума как
+	// раньше: современный клиент должен открываться в комфортном размере.
 	//
 	// SetFixedSize здесь неприменим (он запрещает и растягивание); нижнюю
 	// границу держит MinSize контента — Fyne не даёт окну стать меньше него.
-	controller.UIService.MainWindow.Resize(ui.MinWindowSize)
+	controller.UIService.MainWindow.Resize(ui.DefaultWindowSize())
 	fynewidget.CenterOnScreen(controller.UIService.MainWindow) // Center the window on the screen
 
 	core.CheckIfLauncherAlreadyRunningUtil()

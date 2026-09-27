@@ -44,3 +44,63 @@ var Link fyne.Resource = theme.NewThemedResource(&fyne.StaticResource{
 	StaticName:    "link.svg",
 	StaticContent: linkSVG,
 })
+
+// Navigation icons (SPEC 144).
+//
+// Why SVG instead of emoji. The old tab strip used emoji as navigation
+// glyphs (🌐 Remote, ⚙️ Settings, 🔍 Diagnostics, ❓ Help). Emoji metrics
+// come from whatever colour-emoji font the OS provides: baseline, optical
+// size and advance width differ between macOS, Windows and Linux, and on a
+// Linux box without an emoji font the glyph is simply missing (the same
+// failure already documented above for ⚡). An SVG vector scales with the
+// canvas, stays crisp at fractional scaling, and inherits the theme's text
+// colour — so a nav item in dark mode is legible without a second asset.
+//
+// All of these are themed (currentColor): they follow the active theme and
+// need no per-variant variants.
+//
+//go:embed nav_local.svg
+var navLocalSVG []byte
+
+//go:embed nav_remote.svg
+var navRemoteSVG []byte
+
+//go:embed nav_diagnostics.svg
+var navDiagnosticsSVG []byte
+
+//go:embed nav_settings.svg
+var navSettingsSVG []byte
+
+//go:embed nav_help.svg
+var navHelpSVG []byte
+
+//go:embed chevron_right.svg
+var chevronRightSVG []byte
+
+//go:embed chevron_down.svg
+var chevronDownSVG []byte
+
+func themed(name string, raw []byte) fyne.Resource {
+	return theme.NewThemedResource(&fyne.StaticResource{StaticName: name, StaticContent: raw})
+}
+
+// NavLocal — local sing-box instance (map pin).
+var NavLocal = themed("nav_local.svg", navLocalSVG)
+
+// NavRemote — remote machines (grid).
+var NavRemote = themed("nav_remote.svg", navRemoteSVG)
+
+// NavDiagnostics — logs and maintenance (pulse).
+var NavDiagnostics = themed("nav_diagnostics.svg", navDiagnosticsSVG)
+
+// NavSettings — launcher preferences (gear).
+var NavSettings = themed("nav_settings.svg", navSettingsSVG)
+
+// NavHelp — about and links (question mark in a circle).
+var NavHelp = themed("nav_help.svg", navHelpSVG)
+
+// ChevronRight — collapsed parent row in the sidebar.
+var ChevronRight = themed("chevron_right.svg", chevronRightSVG)
+
+// ChevronDown — expanded parent row in the sidebar.
+var ChevronDown = themed("chevron_down.svg", chevronDownSVG)
