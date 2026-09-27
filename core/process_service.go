@@ -824,6 +824,15 @@ func (svc *ProcessService) CheckIfRunningAtStart() {
 func (svc *ProcessService) checkAndShowSingBoxRunningWarning(ctx string) bool {
 	found, foundPID := svc.isSingBoxProcessRunning()
 	if found {
+		// Своё ядро из прошлой сессии — не «чужой sing-box» (SPEC 144).
+		// Убивать его нельзя: это работающий VPN пользователя. Вместо
+		// диалога с предложением снять процесс лаунчер его ПРИЗНАЁТ и
+		// показывает как работающий, чтобы Stop/Restart работали штатно.
+		if own := svc.ownCorePID(); own > 0 && own == foundPID {
+			debuglog.InfoLog("%s: adopting this launcher's own core from a previous session (PID=%d)", ctx, own)
+			svc.adoptRunningCore(own)
+			return false
+		}
 		debuglog.DebugLog("%s: Found sing-box process already running (PID=%d). Showing warning dialog.", ctx, foundPID)
 		if svc.ac.hasUI() {
 			dialogs.ShowProcessKillConfirmation(svc.ac.UIService.MainWindow, func() {
@@ -912,6 +921,47 @@ func (svc *ProcessService) IsSingBoxProcessRunningOnSystem() (bool, int) {
 
 // isSingBoxProcessRunning checks if sing-box process is running on the system.
 // Returns (isRunning, pid) tuple.
+// pidFilePath — pid-файл привилегированного запуска (SPEC 137): лаунчер
+// пишет его сам как пользователь, там же его читает (SPEC 144). Пусто на
+// платформах без привилегированного classic-запуска.
+func (svc *ProcessService) pidFilePath() string {
+	if platform.PrivilegedPidFileName == "" || svc.ac == nil || svc.ac.FileService == nil {
+		return ""
+	}
+	return filepath.Join(svc.ac.FileService.Layout.Data.Bin(), platform.PrivilegedPidFileName)
+}
+
+// ownCorePID — PID ядра, запущенного этим лаунчером в прошлой сессии, или -1.
+func (svc *ProcessService) ownCorePID() int {
+	if runtime.GOOS != "darwin" {
+		return -1
+	}
+	return findOwnPrivilegedCorePID(svc.pidFilePath())
+}
+
+// adoptRunningCore признаёт живое ядро прошлой сессии своей работой
+// (SPEC 144): без этого после перезапуска GUI лаунчер считал состояние
+// «остановлен», хотя ядро с TUN работало, и Stop/Restart были неактуальны.
+//
+// Заполняются только те поля, которых не хватает: PID ядра и путь pid-файла
+// (их использует Stop, чтобы снять процесс). Cmd не подделываем — процесса,
+// порождённого этим процессом, не существует, и Wait по нему невозможен;
+// поэтому сироту снимает privileged-путь по PID/шаблону.
+func (svc *ProcessService) adoptRunningCore(pid int) {
+	svc.ac.CmdMutex.Lock()
+	defer svc.ac.CmdMutex.Unlock()
+	if svc.ac.RunningState.IsRunning() {
+		return
+	}
+	svc.ac.SingboxPrivilegedMode = true
+	svc.ac.SingboxPrivilegedPID = pid
+	svc.ac.SingboxPrivilegedPIDFile = svc.pidFilePath()
+	svc.ac.RunningState.Set(true)
+	debuglog.InfoLog("adoptRunningCore: adopted PID %d as the running core (pid file %s)", pid, svc.ac.SingboxPrivilegedPIDFile)
+}
+
+// isSingBoxProcessRunning проверяет, запущен ли sing-box, который лаунчер
+// должен учитывать.
 func (svc *ProcessService) isSingBoxProcessRunning() (bool, int) {
 	ourPID := svc.getTrackedPID()
 
@@ -922,7 +972,20 @@ func (svc *ProcessService) isSingBoxProcessRunning() (bool, int) {
 		// Имя-ориентированный скан (go-ps) ловил бы демона и предлагал его
 		// убить — что противоречит всему daemon-режиму.
 		if found, pid, err := findSingboxRunProcessDarwin(); err == nil {
-			return found, pid
+			if !found {
+				return false, -1
+			}
+			// Ядро, запущенное ЭТИМ лаунчером в прошлой сессии, — не чужой
+			// процесс (SPEC 144). После перезапуска GUI в памяти нет ни Cmd,
+			// ни privileged-PID, и раньше живое ядро с TUN принималось за
+			// чужое: пользователю предлагали его убить, то есть снести
+			// работающий VPN при обычном открытии клиента. Узнаём своё по
+			// pid-файлу, который лаунчер сам и пишет.
+			if own := findOwnPrivilegedCorePID(svc.pidFilePath()); own > 0 {
+				debuglog.DebugLog("isSingBoxProcessRunning: PID %d is this launcher's own core from a previous session", own)
+				return true, own
+			}
+			return true, pid
 		}
 		// pgrep недоступен/сломан. В daemon-режиме имя-ориентированный
 		// fallback поймал бы демона `sing-box lxd` и предложил его убить —
