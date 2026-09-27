@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"singbox-launcher/internal/locale"
@@ -203,16 +204,18 @@ func buildLiveView(deps WindowDeps) *liveView {
 	// current snapshot without it scrolling away. The background profiler
 	// keeps recording (the rolling buffer + any active session continue);
 	// only the in-tab append is gated. Toggle flips on each click.
-	pauseBtn := widget.NewButton(locale.T("⏸ Pause"), nil)
+	pauseBtn := widget.NewButtonWithIcon(locale.T("Pause"), theme.MediaPauseIcon(), nil)
 	pauseBtn.OnTapped = func() {
 		v.mu.Lock()
 		v.paused = !v.paused
 		paused := v.paused
 		v.mu.Unlock()
 		if paused {
-			pauseBtn.SetText(locale.T("▶ Resume"))
+			pauseBtn.SetText(locale.T("Resume"))
+			pauseBtn.SetIcon(theme.MediaPlayIcon())
 		} else {
-			pauseBtn.SetText(locale.T("⏸ Pause"))
+			pauseBtn.SetText(locale.T("Pause"))
+			pauseBtn.SetIcon(theme.MediaPauseIcon())
 		}
 	}
 	// Clear — drops local view buffer (does NOT touch profiler's rolling

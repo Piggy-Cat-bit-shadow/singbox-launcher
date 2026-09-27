@@ -468,7 +468,7 @@ func (tab *CoreDashboardTab) createConfigBlock() fyne.CanvasObject {
 	tab.updateConfigButton.Importance = widget.MediumImportance
 	tab.updateConfigButton.SetToolTip(fmt.Sprintf(locale.T("Update subscriptions (%s+U)"), platform.ShortcutModifierLabel()))
 
-	tab.wizardButton = widget.NewButton(locale.T("⚙️ Configurator"), func() {
+	tab.wizardButton = widget.NewButtonWithIcon(locale.T("Configurator"), theme.SettingsIcon(), func() {
 		// Get parent window from AppController
 		ac := core.GetController()
 		parentWindow := ac.GetMainWindow()

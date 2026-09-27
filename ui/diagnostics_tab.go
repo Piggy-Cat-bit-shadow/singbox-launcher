@@ -342,9 +342,10 @@ func CreateDiagnosticsTab(ac *core.AppController) fyne.CanvasObject {
 			ShowError(ac.UIService.MainWindow, err)
 		}
 	})
-	// Без иконки — в locale string уже есть 🛑 (по требованию юзера).
-	// MediaStopIcon (⏹) дублировал бы visual.
-	killSingBoxButton := widget.NewButton(locale.T("🛑 Kill Sing-Box"), func() {
+	// SPEC 144: emoji убран из подписи, иконка — themed SVG темы. Emoji в
+	// кнопке зависит от системного emoji-шрифта: на Linux без него глиф
+	// отсутствует, а метрики различаются между ОС.
+	killSingBoxButton := widget.NewButtonWithIcon(locale.T("Kill Sing-Box"), theme.ContentClearIcon(), func() {
 		go func() {
 			if !killSingBoxPanic(ac) {
 				return

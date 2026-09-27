@@ -269,12 +269,6 @@
   "Core Status 🔄 Restarting...": {
     "value": "Статус ядра 🔄 Перезапуск..."
   },
-  "Core Status ✅ Running": {
-    "value": "Статус ядра ✅ Работает"
-  },
-  "Core Status ⏸️ Stopped": {
-    "value": "Статус ядра ⏸️ Остановлен"
-  },
   "Start": {
     "value": "Запустить",
     "special": {
@@ -389,9 +383,6 @@
   },
   "A new Debug API token is active. Use “Copy token” to grab it.": {
     "value": "Новый токен Debug API активен. Нажмите «Копировать токен», чтобы скопировать."
-  },
-  "⚙️ Configurator": {
-    "value": "⚙️ Конфигуратор"
   },
   "Download Config Template": {
     "value": "Скачать шаблон конфига"
@@ -542,23 +533,11 @@
   "Config folder": {
     "value": "Папка конфига"
   },
-  "🛑 Kill Sing-Box": {
-    "value": "🛑 Завершить Sing-Box"
-  },
   "Kill": {
     "value": "Завершение"
   },
   "Sing-Box killed if running.": {
     "value": "Sing-Box завершён (если был запущен)."
-  },
-  "📦 Version: %s": {
-    "value": "📦 Версия: %s"
-  },
-  "💬 Telegram Channel": {
-    "value": "💬 Telegram-канал"
-  },
-  "🐙 GitHub Repository": {
-    "value": "🐙 Репозиторий GitHub"
   },
   "Language:": {
     "value": "Язык:"
@@ -2644,9 +2623,6 @@
   "The core inside the daemon failed: %s. Click for connection settings.": {
     "value": "Ядро внутри демона упало: %s. Нажмите для настроек подключения."
   },
-  "The daemon is not answering. Check that the service is running (⚙).": {
-    "value": "Демон не отвечает. Проверьте, что служба запущена (⚙)."
-  },
   "✅ gRPC (daemon) · core stopped": {
     "value": "✅ gRPC (демон) · ядро остановлено"
   },
@@ -3160,12 +3136,6 @@
   },
   "Search domain / IP / process…": {
     "value": "Поиск домена / IP / процесса…"
-  },
-  "⏸ Pause": {
-    "value": "⏸ Пауза"
-  },
-  "▶ Resume": {
-    "value": "▶ Продолжить"
   },
   "🗑 Clear": {
     "value": "🗑 Очистить"
@@ -4834,5 +4804,50 @@
   },
   "About this build and where to find us": {
     "value": "О сборке и где нас найти"
+  },
+  "Running": {
+    "value": "Работает"
+  },
+  "Stopped": {
+    "value": "Остановлено"
+  },
+  "Core not found": {
+    "value": "Ядро не найдено"
+  },
+  "Configurator": {
+    "value": "Конфигуратор"
+  },
+  "Kill Sing-Box": {
+    "value": "Завершить Sing-Box"
+  },
+  "Pause": {
+    "value": "Пауза"
+  },
+  "Resume": {
+    "value": "Продолжить"
+  },
+  "About": {
+    "value": "О программе"
+  },
+  "Links": {
+    "value": "Ссылки"
+  },
+  "Version: %s": {
+    "value": "Версия: %s"
+  },
+  "Bundle identifier: %s": {
+    "value": "Идентификатор бандла: %s"
+  },
+  "Telegram Channel": {
+    "value": "Канал в Telegram"
+  },
+  "GitHub Repository": {
+    "value": "Репозиторий на GitHub"
+  },
+  "Launcher version and support links.": {
+    "value": "Версия лаунчера и ссылки поддержки."
+  },
+  "The daemon is not answering. Check that the service is running.": {
+    "value": "Демон не отвечает. Проверьте, что служба запущена."
   }
 }

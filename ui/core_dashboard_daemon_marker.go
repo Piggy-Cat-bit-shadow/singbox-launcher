@@ -62,7 +62,7 @@ func daemonMarkerTooltip(state markerState, link core.DaemonLinkState, coreRunni
 		if link.CoreFatal {
 			return fmt.Sprintf(locale.T("The core inside the daemon failed: %s. Click for connection settings."), link.FatalErr)
 		}
-		return locale.T("The daemon is not answering. Check that the service is running (⚙).")
+		return locale.T("The daemon is not answering. Check that the service is running.")
 	default:
 		return locale.T("Connecting to the daemon…")
 	}

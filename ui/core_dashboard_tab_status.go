@@ -131,15 +131,20 @@ func (tab *CoreDashboardTab) updateRunningStatus() {
 		restartInfo = fmt.Sprintf(" [restart %d/%d]", tab.controller.ConsecutiveCrashAttempts, 3)
 	}
 
-	if !buttonState.BinaryExists {
-		tab.statusLabel.SetText(locale.T("Core Status ❌ Error: sing-box not found") + restartInfo)
-		tab.statusLabel.Importance = widget.MediumImportance // Текст всегда черный
-	} else if buttonState.IsRunning {
-		tab.statusLabel.SetText(locale.T("Core Status ✅ Running") + restartInfo)
-		tab.statusLabel.Importance = widget.MediumImportance // Текст всегда черный
-	} else {
-		tab.statusLabel.SetText(locale.T("Core Status ⏸️ Stopped") + restartInfo)
-		tab.statusLabel.Importance = widget.MediumImportance // Текст всегда черный
+	// SPEC 144: статус — текстом, без emoji. Emoji-индикатор (✅/⏸️/❌)
+	// выглядел по-разному в зависимости от системного emoji-шрифта, а цвет
+	// нёс единственную смысловую нагрузку — теперь она выражена словом
+	// («Running» / «Stopped») и Importance, что читается и в скринридере.
+	switch {
+	case !buttonState.BinaryExists:
+		tab.statusLabel.SetText(locale.T("Core not found") + restartInfo)
+		tab.statusLabel.Importance = widget.DangerImportance
+	case buttonState.IsRunning:
+		tab.statusLabel.SetText(locale.T("Running") + restartInfo)
+		tab.statusLabel.Importance = widget.SuccessImportance
+	default:
+		tab.statusLabel.SetText(locale.T("Stopped") + restartInfo)
+		tab.statusLabel.Importance = widget.MediumImportance
 	}
 
 	// Кружок канала к демону стоит в той же строке и обновляется вместе с
