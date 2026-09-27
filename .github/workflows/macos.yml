@@ -170,12 +170,22 @@ jobs:
         shell: bash
         run: go test ./core/config/ -run 'Registry' -count=1
 
+      # The backend/service package is the IPC contract the SwiftUI frontend
+      # decodes, and internal/paths decides where user data lives. Both are
+      # cheap and fast, so they run on every push rather than only in deep
+      # checks: a rename in a wire field breaks the app at runtime with no
+      # compile error on either side, and a layout regression silently points
+      # the app at the wrong data directory.
+      - name: Backend protocol + layout tests
+        shell: bash
+        run: go test ./backend/... ./internal/paths/ -count=1
+
       - name: Race detector (deep)
         if: inputs.deep_checks
         env:
           CGO_ENABLED: 1
         shell: bash
-        run: go test -race ./core/... ./api/... ./internal/platform/... ./core/services/... -count=1
+        run: go test -race ./core/... ./api/... ./internal/platform/... ./core/services/... ./backend/... ./internal/paths/... -count=1
 
   # ---------------------------------------------------------------------------
   # build-macos — собирает ЕДИНСТВЕННЫЙ клиент и отдаёт один ZIP.
