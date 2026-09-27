@@ -73,6 +73,7 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,6 +118,7 @@ const (
 	privilegedShell     = "/bin/sh"
 	privilegedKillTool  = "/bin/kill"
 	privilegedPkillTool = "/usr/bin/pkill"
+	privilegedPgrepTool = "/usr/bin/pgrep"
 	// privilegedShellPrivilegedFlag — флаги шелла для постоянного тела
 	// (SPEC 143 §5.1): `-p` сохраняет effective root, `-c` передаёт тело.
 	//
@@ -327,12 +329,49 @@ func KillPrivilegedProcess(scriptPID, singboxPID int, pidFile string) error {
 	return nil
 }
 
-// KillPrivilegedByPattern — SIGTERM всем процессам привилегированного
-// запуска по командной строке (`/usr/bin/pkill -f PrivilegedPkillPattern`,
-// без шелла): ядро `sing-box run` и шелл-обёртка. Для диалога «Sing-Box
-// already running» и Kill в Diagnostics. Darwin only.
+// KillPrivilegedPIDsByPattern — SIGTERM конкретным PID, найденным по
+// шаблону командной строки. Шаблон используется ТОЛЬКО для поиска
+// кандидатов; решение убивать принимает caller, проверив личность каждого
+// PID (executable path = наша копия/ядро) — см. SPEC 145.
+//
+// Почему не `pkill -f <шаблон>` напрямую: `pkill -f` бьёт по подстроке
+// командной строки, а `sing-box run` — это и чужая сборка, и ядро другого
+// профиля пользователя, и ядро, запущенное не этим лаунчером. Один такой
+// вызов снимал чужой работающий VPN. Здесь убиваем по PID и только те,
+// которые caller подтвердил.
+func KillPrivilegedPIDs(scriptPID, corePID int, pidFile string) error {
+	return KillPrivilegedProcess(scriptPID, corePID, pidFile)
+}
+
+// FindPrivilegedCandidatePIDs — PID-кандидаты привилегированного запуска по
+// шаблону командной строки (`/usr/bin/pgrep -f`, абсолютный путь: PATH
+// пользователя не участвует). Возвращает только PID, без решения об
+// убийстве; puстой результат — совпадений нет.
+func FindPrivilegedCandidatePIDs() ([]int, error) {
+	out, err := exec.Command(privilegedPgrepTool, "-f", PrivilegedPkillPattern).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return nil, nil // нет совпадений
+		}
+		return nil, err
+	}
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if pid, convErr := strconv.Atoi(strings.TrimSpace(line)); convErr == nil && pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+// KillPrivilegedByPattern — ОСТАВЛЕНО только для совместимости и явно
+// ограничено: снимает процессы по шаблону. Новый код должен искать
+// кандидатов через FindPrivilegedCandidatePIDs и подтверждать личность по
+// executable path, а затем снимать конкретные PID через
+// KillPrivilegedProcess (SPEC 145). Здесь шаблон сужен до имени
+// root-шелла-обёртки, которое посторонний sing-box не содержит.
 func KillPrivilegedByPattern() error {
-	_, _, err := RunWithPrivileges(privilegedPkillTool, []string{"-TERM", "-f", PrivilegedPkillPattern})
+	_, _, err := RunWithPrivileges(privilegedPkillTool, []string{"-TERM", "-f", PrivilegedStartName})
 	return err
 }
 

@@ -9,68 +9,170 @@ import (
 	"testing"
 )
 
-// TestFindOwnPrivilegedCorePID — ядро, запущенное этим лаунчером в прошлой
-// сессии, узнаётся по pid-файлу (SPEC 144). Это то, что отличает «своё
-// работающее ядро» от «чужого sing-box»: первое нельзя предлагать убить.
-func TestFindOwnPrivilegedCorePID(t *testing.T) {
+// procInfoFrom создаёт список процессов для теста без запуска ps.
+func procInfoFrom(pairs ...interface{}) []procInfo {
+	var out []procInfo
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out = append(out, procInfo{PID: pairs[i].(int), Path: pairs[i+1].(string)})
+	}
+	return out
+}
+
+// TestOwnCorePID_RequiresPathMatch — главный инвариант SPEC 145: PID из
+// pid-файла принимается только если executable path этого процесса —
+// наша копия или наше ядро. Одного «PID жив» недостаточно: номера
+// переиспользуются, и старый файл легко указывает на посторонний процесс.
+func TestOwnCorePID_RequiresPathMatch(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "singbox.pid")
+	ourCopy := filepath.Join(dir, "sing-box-lxd")
+	launcherCore := filepath.Join(dir, "sing-box")
+	foreign := filepath.Join(dir, "other", "sing-box")
 
-	// Живой процесс — сам тест.
-	alive := os.Getpid()
-	// Заведомо мёртвый PID: верхняя граница pid_t в macOS.
-	dead := 999999
+	self := os.Getpid()
+	id := coreIdentity{CopyPath: ourCopy, LauncherCorePath: launcherCore}
 
-	tests := []struct {
-		name      string
-		content   string
-		want      int
-		skipWrite bool
-	}{
-		{name: "no file", content: "", want: -1, skipWrite: true},
-		{name: "empty file", content: "", want: -1},
-		{name: "whitespace only", content: "  \n\n ", want: -1},
-		{name: "garbage", content: "not-a-pid\n", want: -1},
-		{name: "zero is not a process", content: "0\n", want: -1},
-		{name: "negative is not a process", content: "-5\n", want: -1},
-		{name: "dead pid", content: strconv.Itoa(dead) + "\n", want: -1},
-		{name: "alive pid", content: strconv.Itoa(alive) + "\n", want: alive},
-		{
-			// Формат привилегированного запуска: PID шелла, затем PID ядра.
-			name:    "shell and core pids, core alive",
-			content: strconv.Itoa(dead) + "\n" + strconv.Itoa(alive),
-			want:    alive,
-		},
-		{
-			// Шелл пережил ядро — берём живой (обёртка ждёт ядро, поэтому
-			// на практике они живут вместе).
-			name:    "shell alive, core dead",
-			content: strconv.Itoa(alive) + "\n" + strconv.Itoa(dead),
-			want:    alive,
-		},
-		{name: "both dead", content: strconv.Itoa(dead) + "\n" + strconv.Itoa(dead-1), want: -1},
+	write := func(pid int) {
+		t.Helper()
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_ = os.Remove(pidFile)
-			if !tt.skipWrite {
-				if err := os.WriteFile(pidFile, []byte(tt.content), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if got := findOwnPrivilegedCorePID(pidFile); got != tt.want {
-				t.Fatalf("findOwnPrivilegedCorePID(%q) = %d, want %d", tt.content, got, tt.want)
-			}
-		})
+	t.Run("alive PID whose path is our root copy is claimed", func(t *testing.T) {
+		write(self)
+		got := ownCorePID(pidFile, id, procInfoFrom(self, ourCopy), nil)
+		if got != self {
+			t.Fatalf("got %d, want %d", got, self)
+		}
+	})
+
+	t.Run("alive PID whose path is the launcher core is claimed", func(t *testing.T) {
+		write(self)
+		got := ownCorePID(pidFile, id, procInfoFrom(self, launcherCore), nil)
+		if got != self {
+			t.Fatalf("got %d, want %d", got, self)
+		}
+	})
+
+	t.Run("PID REUSE: alive but foreign path is NOT claimed", func(t *testing.T) {
+		write(self)
+		got := ownCorePID(pidFile, id, procInfoFrom(self, foreign), nil)
+		if got != -1 {
+			t.Fatalf("a foreign process must never be claimed, got %d", got)
+		}
+	})
+
+	t.Run("PID REUSE: alive with unknown path is NOT claimed", func(t *testing.T) {
+		write(self)
+		got := ownCorePID(pidFile, id, nil, nil)
+		if got != -1 {
+			t.Fatalf("an unidentified process must never be claimed, got %d", got)
+		}
+	})
+
+	t.Run("process list unavailable means unknown, not ours", func(t *testing.T) {
+		write(self)
+		got := ownCorePID(pidFile, id, nil, os.ErrPermission)
+		if got != -1 {
+			t.Fatalf("without a process list nothing may be claimed, got %d", got)
+		}
+	})
+
+	t.Run("dead PID is not claimed", func(t *testing.T) {
+		write(999999)
+		got := ownCorePID(pidFile, id, procInfoFrom(999999, ourCopy), nil)
+		if got != -1 {
+			t.Fatalf("a dead PID must not be claimed, got %d", got)
+		}
+	})
+
+	t.Run("no pid file means nothing to claim", func(t *testing.T) {
+		got := ownCorePID(filepath.Join(dir, "absent.pid"), id, procInfoFrom(self, ourCopy), nil)
+		if got != -1 {
+			t.Fatalf("got %d, want -1", got)
+		}
+	})
+}
+
+// TestOwnCorePID_WrapperThenCore — формат pid-файла: строка шелла, строка
+// ядра. Предпочтение отдаётся ядру (последняя строка), но обе личности
+// законны.
+func TestOwnCorePID_WrapperThenCore(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "singbox.pid")
+	ourCopy := filepath.Join(dir, "sing-box-lxd")
+	self := os.Getpid()
+
+	// Шелл мёртв, ядро живо и опознано.
+	content := strconv.Itoa(999999) + "\n" + strconv.Itoa(self)
+	if err := os.WriteFile(pidFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := coreIdentity{CopyPath: ourCopy}
+	got := ownCorePID(pidFile, id, procInfoFrom(self, ourCopy), nil)
+	if got != self {
+		t.Fatalf("got %d, want %d (the live core line must be used)", got, self)
 	}
 }
 
-// TestFindOwnPrivilegedCorePID_EmptyPath — пустой путь (платформа без
-// привилегированного запуска) не паникует и не считает ядро своим.
-func TestFindOwnPrivilegedCorePID_EmptyPath(t *testing.T) {
-	if got := findOwnPrivilegedCorePID(""); got != -1 {
-		t.Fatalf("empty path = %d, want -1", got)
+// TestPidMatchesCoreCopy — сравнение идёт по разрешённым путям, поэтому
+// симлинк не позволяет выдать чужой бинарь за нашу копию.
+func TestPidMatchesCoreCopy(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-core")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link-core")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if !pidMatchesCoreCopy(real, real) {
+		t.Fatal("identical paths must match")
+	}
+	if !pidMatchesCoreCopy(link, real) {
+		t.Fatal("a symlink to our core must match (paths are resolved before comparison)")
+	}
+	if pidMatchesCoreCopy(real, filepath.Join(dir, "other")) {
+		t.Fatal("different paths must not match")
+	}
+	if pidMatchesCoreCopy("", real) || pidMatchesCoreCopy(real, "") {
+		t.Fatal("empty paths must never match")
+	}
+}
+
+// TestReadPrivilegedPidFile — разбор pid-файла: несколько PID, мусор
+// игнорируется.
+func TestReadPrivilegedPidFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "p.pid")
+	if err := os.WriteFile(p, []byte("12 34\n56\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readPrivilegedPidFile(p)
+	want := []int{12, 34, 56}
+	if len(got) != len(want) {
+		t.Fatalf("readPrivilegedPidFile = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("readPrivilegedPidFile = %v, want %v", got, want)
+		}
+	}
+	// Мусор, нули и отрицательные не попадают в результат.
+	if err := os.WriteFile(p, []byte("abc 0 -5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readPrivilegedPidFile(p); len(got) != 0 {
+		t.Fatalf("garbage must be ignored, got %v", got)
+	}
+	if got := readPrivilegedPidFile(filepath.Join(dir, "absent")); got != nil {
+		t.Fatalf("missing file = %v, want nil", got)
+	}
+	if got := readPrivilegedPidFile(""); got != nil {
+		t.Fatalf("empty path = %v, want nil", got)
 	}
 }
 
@@ -87,30 +189,29 @@ func TestProcessAlive(t *testing.T) {
 	}
 }
 
-// TestReadPrivilegedPidFile — разбор pid-файла: несколько PID, мусор
-// игнорируется.
-func TestReadPrivilegedPidFile(t *testing.T) {
+// TestCoreIdentity_Matches — личность нашего ядра: копия либо ядро лаунчера.
+func TestCoreIdentity_Matches(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "p.pid")
+	ourCopy := filepath.Join(dir, "sing-box-lxd")
+	launcherCore := filepath.Join(dir, "sing-box")
+	foreign := filepath.Join(dir, "elsewhere", "sing-box")
+	id := coreIdentity{CopyPath: ourCopy, LauncherCorePath: launcherCore}
 
-	if err := os.WriteFile(p, []byte("12 34\n56\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if !id.matches(ourCopy) {
+		t.Fatal("our copy must match")
 	}
-	got := readPrivilegedPidFile(p)
-	want := []int{12, 34, 56}
-	if len(got) != len(want) {
-		t.Fatalf("readPrivilegedPidFile = %v, want %v", got, want)
+	if !id.matches(launcherCore) {
+		t.Fatal("the launcher core must match")
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("readPrivilegedPidFile = %v, want %v", got, want)
-		}
+	if id.matches(foreign) {
+		t.Fatal("a foreign sing-box must not match")
 	}
-
-	if got := readPrivilegedPidFile(filepath.Join(dir, "absent")); got != nil {
-		t.Fatalf("missing file = %v, want nil", got)
+	if id.matches("") {
+		t.Fatal("an empty path must not match")
 	}
-	if got := readPrivilegedPidFile(""); got != nil {
-		t.Fatalf("empty path = %v, want nil", got)
+	// Пустая личность (не знаем путей) не совпадает ни с чем.
+	empty := coreIdentity{}
+	if empty.matches(ourCopy) || empty.matches(foreign) {
+		t.Fatal("an empty identity must not match anything")
 	}
 }

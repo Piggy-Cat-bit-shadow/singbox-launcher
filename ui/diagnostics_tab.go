@@ -50,11 +50,15 @@ const (
 // RunningState не сбрасывается вслепую (SPEC 139 §6 п. 7).
 func killSingBoxPanic(ac *core.AppController) bool {
 	if runtime.GOOS == "darwin" {
-		if err := platform.KillPrivilegedByPattern(); err != nil {
-			debuglog.WarnLog("killSingBoxPanic: privileged pkill failed (%v); falling back to non-privileged", err)
-			_ = platform.KillProcess(platform.GetProcessNameForCheck())
+		if ac.ProcessService != nil {
+			// Снимаются только процессы с подтверждённой личностью
+			// (SPEC 145): шаблон используется для поиска кандидатов, а не
+			// для убийства.
+			ac.ProcessService.KillVerifiedCores()
+			return true
 		}
-		return true
+		debuglog.WarnLog("killSingBoxPanic: no ProcessService; refusing a pattern-based kill")
+		return false
 	}
 	err := platform.KillProcess(platform.GetProcessNameForCheck())
 	if ac.KillNeedsElevation(err) {

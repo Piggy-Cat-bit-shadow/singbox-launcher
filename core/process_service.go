@@ -126,6 +126,11 @@ type ProcessService struct {
 	// coreLogUnknown до первого старта в сессии, coreLogUser — лог в
 	// каталоге пользователя, coreLogPrivileged — лог старта с TUN в root-owned каталоге.
 	coreLog atomic.Int32
+	// pidFileWriteFailed — pid-файл последнего привилегированного старта
+	// записать не удалось (SPEC 145). Ядро при этом работает: файл нужен лишь
+	// для опознания после перезапуска лаунчера, поэтому старт не отменяется,
+	// но состояние видно UI и логу.
+	pidFileWriteFailed atomic.Bool
 }
 
 // Куда пишет вывод classic-ядро (ProcessService.coreLog).
@@ -420,37 +425,52 @@ func (svc *ProcessService) startSingBoxPrivileged() error {
 		Script, Singbox int
 		Err             error
 	}
+	// Канал без буфера намеренно: горутина не может «отдать PID и убежать».
+	// Она обязана сперва зафиксировать состояние, и только потом вызывающий
+	// получит PID. Иначе Start() возвращал успех при RunningState == false
+	// (SPEC 145) — процесс уже работал, а лаунчер считал ядро остановленным.
 	pidCh := make(chan privilegedPids, 1)
 	go func() {
 		scriptPID, singboxPID, runErr := platform.StartPrivilegedCore(corePath, binDir, configName)
 		if runErr != nil {
 			pidCh <- privilegedPids{Err: runErr}
 			ac.CmdMutex.Lock()
-			if ac.SingboxPrivilegedMode {
-				ac.CmdMutex.Unlock()
-				return
-			}
+			alreadyStopped := ac.SingboxPrivilegedMode
 			ac.CmdMutex.Unlock()
-			debuglog.WarnLog("startSingBox: privileged run failed: %v", runErr)
+			if !alreadyStopped {
+				debuglog.WarnLog("startSingBox: privileged run failed: %v", runErr)
+			}
 			return
+		}
+		// Состояние фиксируется ДО отдачи PID и под CmdMutex, который
+		// вызывающий отпустит только после получения PID из канала. Порядок
+		// «коммит состояния → публикация PID» и есть инвариант:
+		// успешный Start() ⇒ состояние уже отражает живой процесс.
+		committed := false
+		if scriptPID > 0 {
+			ac.CmdMutex.Lock()
+			svc.coreLog.Store(coreLogPrivileged)
+			ac.SingboxCmd = nil
+			ac.SingboxPrivilegedMode = true
+			ac.SingboxPrivilegedPID = scriptPID
+			ac.SingboxPrivilegedSingboxPID = singboxPID
+			ac.SingboxPrivilegedPIDFile = pidFilePath
+			ac.StoppedByUser = false
+			ac.ConsecutiveCrashAttempts = 0
+			if ac.StateService != nil {
+				ac.StateService.ResetAutoUpdateFailedAttempts() // auto-update may retry after a successful start
+			}
+			ac.RunningState.Set(true)
+			ac.CmdMutex.Unlock()
+			svc.writePIDFile(pidFilePath, scriptPID, singboxPID)
+			committed = true
+			debuglog.DebugLog("startSingBox: Sing-Box started with privileges (script PID=%d, sing-box PID=%d).", scriptPID, singboxPID)
 		}
 		pidCh <- privilegedPids{Script: scriptPID, Singbox: singboxPID}
-		if scriptPID <= 0 {
+		if !committed {
 			return
 		}
-		svc.coreLog.Store(coreLogPrivileged)
-		ac.CmdMutex.Lock()
-		ac.SingboxCmd = nil
-		ac.SingboxPrivilegedMode = true
-		ac.SingboxPrivilegedPID = scriptPID
-		ac.SingboxPrivilegedSingboxPID = singboxPID
-		ac.SingboxPrivilegedPIDFile = pidFilePath
-		ac.RunningState.Set(true)
-		ac.StoppedByUser = false
-		ac.StateService.ResetAutoUpdateFailedAttempts() // Reset so auto-update can retry after successful Start
-		ac.CmdMutex.Unlock()
-		_ = os.WriteFile(pidFilePath, []byte(fmt.Sprintf("%d\n%d", scriptPID, singboxPID)), platform.DefaultFileMode)
-		debuglog.DebugLog("startSingBox: Sing-Box started with privileges (script PID=%d, sing-box PID=%d).", scriptPID, singboxPID)
+		// Долгое ожидание выхода root-процесса — уже вне пути старта.
 		platform.WaitForPrivilegedExit(scriptPID)
 		svc.onPrivilegedScriptExited()
 	}()
@@ -837,10 +857,10 @@ func (svc *ProcessService) checkAndShowSingBoxRunningWarning(ctx string) bool {
 		if svc.ac.hasUI() {
 			dialogs.ShowProcessKillConfirmation(svc.ac.UIService.MainWindow, func() {
 				if runtime.GOOS == "darwin" {
-					// On macOS the process may have been started with privileges (root); kill with elevated rights
-					if err := platform.KillPrivilegedByPattern(); err != nil {
-						debuglog.WarnLog("%s: Privileged kill failed (user may have cancelled): %v", ctx, err)
-					}
+					// Снимаем только те PID, чью личность подтвердили по
+					// executable path (SPEC 145): широкий `pkill -f` снял бы
+					// и чужой sing-box, и ядро другого профиля пользователя.
+					svc.killVerifiedCores()
 				} else {
 					processName := platform.GetProcessNameForCheck()
 					var err error
@@ -931,12 +951,156 @@ func (svc *ProcessService) pidFilePath() string {
 	return filepath.Join(svc.ac.FileService.Layout.Data.Bin(), platform.PrivilegedPidFileName)
 }
 
-// ownCorePID — PID ядра, запущенного этим лаунчером в прошлой сессии, или -1.
+// writePIDFile сохраняет PID привилегированного запуска и НЕ глотает ошибку
+// (SPEC 145).
+//
+// Файл — единственный способ опознать своё ядро после перезапуска лаунчера.
+// Если запись не удалась, ядро всё равно уже работает и снимать его нельзя;
+// но пользователь обязан об этом узнать, а сессия — сохранить возможность
+// штатной остановки. Поэтому ошибка логируется как WARN, состояние
+// помечается, и Stop продолжает работать по PID в памяти.
+func (svc *ProcessService) writePIDFile(path string, scriptPID, corePID int) {
+	if path == "" {
+		return
+	}
+	content := fmt.Sprintf("%d\n%d", scriptPID, corePID)
+	if err := os.WriteFile(path, []byte(content), platform.DefaultFileMode); err != nil {
+		debuglog.WarnLog("startSingBox: cannot write the pid file %s: %v; "+
+			"cross-session recovery of the privileged core will not be possible this time", path, err)
+		svc.pidFileWriteFailed.Store(true)
+		return
+	}
+	svc.pidFileWriteFailed.Store(false)
+	debuglog.DebugLog("startSingBox: wrote the pid file %s", path)
+}
+
+// PIDFileWriteFailed — сообщает, что pid-файл последнего привилегированного
+// старта записать не удалось. UI может показать предупреждение.
+func (svc *ProcessService) PIDFileWriteFailed() bool {
+	return svc.pidFileWriteFailed.Load()
+}
+
+// clearPIDFileIfStale удаляет pid-файл, только если ни один из записанных в
+// нём PID больше не принадлежит нашему ядру (SPEC 145).
+//
+// Безусловное удаление опасно: файл мог быть уже перезаписан новым стартом,
+// и снос стёр бы актуальную запись работающего ядра.
+func (svc *ProcessService) clearPIDFileIfStale() {
+	path := svc.pidFilePath()
+	if path == "" {
+		return
+	}
+	if svc.ownCorePID() > 0 {
+		debuglog.DebugLog("clearPIDFileIfStale: %s still describes a live core; keeping it", path)
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		debuglog.WarnLog("clearPIDFileIfStale: remove %s: %v", path, err)
+		return
+	}
+	debuglog.DebugLog("clearPIDFileIfStale: removed stale %s", path)
+}
+
+// coreIdentity — чем должно быть наше ядро: защищённая root-owned копия и
+// ядро лаунчера. Сравниваются executable path, а не подстрока командной
+// строки, поэтому чужой sing-box (другая сборка, другой пользователь, другой
+// путь установки) никогда не сойдёт за наш (SPEC 145).
+func (svc *ProcessService) coreIdentity() coreIdentity {
+	id := coreIdentity{}
+	if svc.ac == nil || svc.ac.FileService == nil {
+		return id
+	}
+	id.LauncherCorePath = svc.ac.FileService.SingboxPath
+	id.CopyPath = systemDaemonServiceLayout().CorePath
+	return id
+}
+
+// ownCorePID — PID нашего ядра среди процессов системы, или -1.
+//
+// Подтверждается и PID (из нашего pid-файла), и executable path (наша копия
+// или ядро лаунчера). Одного «PID жив» мало: номера переиспользуются, и
+// старый pid-файл легко указывает на посторонний процесс.
 func (svc *ProcessService) ownCorePID() int {
 	if runtime.GOOS != "darwin" {
 		return -1
 	}
-	return findOwnPrivilegedCorePID(svc.pidFilePath())
+	procs, err := listProcessDetailsDarwin()
+	return ownCorePID(svc.pidFilePath(), svc.coreIdentity(), procs, err)
+}
+
+// verifyPIDIsOurCore — подтверждает личность конкретного PID перед тем, как
+// его снимать. Возвращает false, если путь процесса не совпал с нашей
+// копией/ядром: убивать такой процесс нельзя, даже если PID взят из
+// pid-файла или найден по argv.
+func (svc *ProcessService) verifyPIDIsOurCore(pid int) bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	if pid <= 0 {
+		return false
+	}
+	procs, err := listProcessDetailsDarwin()
+	if err != nil {
+		debuglog.WarnLog("verifyPIDIsOurCore: cannot list processes (%v); refusing to kill PID %d", err, pid)
+		return false
+	}
+	path, ok := pidExecutablePath(pid, procs)
+	if !ok {
+		debuglog.WarnLog("verifyPIDIsOurCore: PID %d executable path unknown; refusing to kill it", pid)
+		return false
+	}
+	if !svc.coreIdentity().matches(path) {
+		debuglog.WarnLog("verifyPIDIsOurCore: PID %d is %q, not our core; refusing to kill it", pid, path)
+		return false
+	}
+	return true
+}
+
+// KillVerifiedCores — публичная обёртка для аварийного снятия ядра
+// (Diagnostics). Снимает только процессы с подтверждённой личностью
+// (SPEC 145), поэтому чужой sing-box не затрагивается.
+func (svc *ProcessService) KillVerifiedCores() { svc.killVerifiedCores() }
+
+// killVerifiedCores снимает процессы нашего ядра из прошлой сессии,
+// подтверждая личность каждого PID (SPEC 145).
+//
+// Берём объединение двух источников кандидатов: наш pid-файл и поиск по
+// argv. Ни один кандидат не убивается без проверки executable path, поэтому
+// чужой sing-box (другая сборка, другой пользователь, другой путь) остаётся
+// нетронутым — раньше именно он и попадал под `pkill -f`.
+func (svc *ProcessService) killVerifiedCores() {
+	candidates := map[int]struct{}{}
+	for _, pid := range readPrivilegedPidFile(svc.pidFilePath()) {
+		candidates[pid] = struct{}{}
+	}
+	if pids, err := platform.FindPrivilegedCandidatePIDs(); err != nil {
+		debuglog.WarnLog("killVerifiedCores: cannot enumerate candidates: %v", err)
+	} else {
+		for _, pid := range pids {
+			candidates[pid] = struct{}{}
+		}
+	}
+	if len(candidates) == 0 {
+		debuglog.DebugLog("killVerifiedCores: no candidate processes")
+		return
+	}
+	killed := 0
+	for pid := range candidates {
+		if !svc.verifyPIDIsOurCore(pid) {
+			continue // не наш — не трогаем
+		}
+		if err := platform.KillPrivilegedProcess(pid, 0, ""); err != nil {
+			debuglog.WarnLog("killVerifiedCores: kill PID %d: %v", pid, err)
+			continue
+		}
+		killed++
+		debuglog.InfoLog("killVerifiedCores: stopped our core PID %d", pid)
+	}
+	// pid-файл описывал именно эти процессы: после снятия он неактуален.
+	if killed > 0 {
+		svc.clearPIDFileIfStale()
+	}
+	debuglog.InfoLog("killVerifiedCores: stopped %d of %d candidates", killed, len(candidates))
 }
 
 // adoptRunningCore признаёт живое ядро прошлой сессии своей работой
@@ -979,9 +1143,11 @@ func (svc *ProcessService) isSingBoxProcessRunning() (bool, int) {
 			// процесс (SPEC 144). После перезапуска GUI в памяти нет ни Cmd,
 			// ни privileged-PID, и раньше живое ядро с TUN принималось за
 			// чужое: пользователю предлагали его убить, то есть снести
-			// работающий VPN при обычном открытии клиента. Узнаём своё по
-			// pid-файлу, который лаунчер сам и пишет.
-			if own := findOwnPrivilegedCorePID(svc.pidFilePath()); own > 0 {
+			// работающий VPN при обычном открытии клиента.
+			//
+			// Личность подтверждается по executable path (SPEC 145), а не по
+			// одному «PID жив»: номера переиспользуются.
+			if own := svc.ownCorePID(); own > 0 {
 				debuglog.DebugLog("isSingBoxProcessRunning: PID %d is this launcher's own core from a previous session", own)
 				return true, own
 			}
