@@ -39,6 +39,18 @@ func TestCorpusBodiesPassSingboxCheck(t *testing.T) {
 	t.Cleanup(func() { CoreVersionProbe = prev })
 	t.Logf("ядро проверки: %s", version)
 
+	// Ядро форка собирается с разными наборами тегов, и корпус шире любого
+	// одного набора: в нём есть, например, endpoints типа wireguard. Ядро
+	// без with_wireguard отвергнет такой конфиг — и это НЕ дефект генератора,
+	// а свойство конкретной сборки. Раньше тест падал с `unknown endpoint
+	// type: wireguard`, что читается как поломка кода; теперь он честно
+	// пропускается, называя недостающую возможность. Проверка остаётся
+	// строгой: если ядро возможность поддерживает, тест обязан пройти.
+	if missing := missingCorpusCapabilities(t, binary); len(missing) > 0 {
+		t.Skipf("ядро %s не поддерживает возможности корпуса: %s — сборка без нужных тегов; укажите ядро через SINGBOX_TEST_CORE",
+			version, strings.Join(missing, ", "))
+	}
+
 	root := filepath.Join(contractCorpusRelPath, "uri")
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		t.Skipf("корпус контракта не найден: %s", root)
@@ -181,6 +193,38 @@ func uniqueTag(tag string, used map[string]bool) string {
 
 // coreVersionOfBinary — версия ядра из `sing-box version`.
 var coreVersionLine = regexp.MustCompile(`sing-box version (\S+)`)
+
+// corpusRequiredTags — build-теги, без которых собранный из корпуса конфиг
+// ядро не примет. Список узкий и обоснованный: это те возможности, чьи
+// фикстуры реально лежат в корпусе. Если корпус расширят типом, требующим
+// нового тега, сюда добавляется одна строка.
+var corpusRequiredTags = []string{
+	"with_wireguard", // endpoints типа wireguard
+}
+
+// missingCorpusCapabilities сообщает, каких тегов сборки не хватает ядру
+// для проверки корпуса. Пустой результат — ядро подходит.
+//
+// Нужно, чтобы различие сборок не выглядело дефектом кода: кастомное ядро
+// без with_wireguard отвергает конфиг с wireguard-endpoint, и тест падал с
+// «unknown endpoint type: wireguard» там, где на самом деле надо взять
+// другое ядро (SINGBOX_TEST_CORE) или собрать своё с нужными тегами.
+func missingCorpusCapabilities(t *testing.T, binary string) []string {
+	t.Helper()
+	out, err := exec.Command(binary, "version").CombinedOutput()
+	if err != nil {
+		// Версию уже читали выше; сюда попадаем только при странной ошибке.
+		return nil
+	}
+	text := string(out)
+	var missing []string
+	for _, tag := range corpusRequiredTags {
+		if !strings.Contains(text, tag) {
+			missing = append(missing, tag)
+		}
+	}
+	return missing
+}
 
 func coreVersionOfBinary(t *testing.T, binary string) string {
 	t.Helper()
