@@ -5,7 +5,7 @@ Fork-only delivery. Everything below is produced and kept in
 
 - Repository: `https://github.com/Piggy-Cat-bit-shadow/singbox-launcher`
 - Branch: `fix/macos-custom-core-reliability`
-- Commit: `cd7000bf261ff105d91ee2905522f8d005c36fe5`
+- Commit: `e1b84c7e996e1454aaf28d2b4088a8710e5cc619`
 - Baseline the branch is built on: `58f3eb47ed015c984b7d8fff3fd97f5494a793c8` (`v2.3.2`)
 
 The `upstream` git remote was removed, so `git remote -v` shows `origin` only.
@@ -18,9 +18,9 @@ The `upstream` git remote was removed, so `git remote -v` shows `origin` only.
 | Executable | `singbox-launcher.app/Contents/MacOS/singbox-launcher` |
 | Size | `39 275 474` bytes |
 | Architecture | Mach-O 64-bit executable **arm64** |
-| SHA256 | `ea516cf13a852b1b0d631d05b86141df7fc6ab88b98e3024e41f99d83d35c865` |
+| SHA256 | `5f591837bcdc865beebb418d572bfd6dc3550aaec9c06bfe216deef1dbe851fd` |
 | Signature | ad-hoc (`Signature=adhoc`, `TeamIdentifier=not set`) — **not notarized** |
-| Embedded commit | `cd7000bf…` (the build stamps `RequiredTemplateRef` from `HEAD`) |
+| Embedded commit | `e1b84c7e…` (the build stamps `RequiredTemplateRef` from `HEAD`) |
 
 Rebuild with:
 
@@ -77,7 +77,11 @@ bundle; it does **not** touch your data, your core, or your config.
 # 3.1 Back up the currently installed launcher executable
 cp /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher \
    ~/singbox-launcher.backup.$(date +%Y%m%d-%H%M%S)
-shasum -a 256 ~/singbox-launcher.backup.*    # record this
+shasum -a 256 ~/singbox-launcher.backup.*
+# The installed build at the time of writing is
+#   7f3e961d194fe27443d2b84720120ca9765b2c625c2dd961e6d53bece3b94954
+# (38 453 312 bytes). If your copy still hashes to that, this backup restores exactly
+# the build that is installed today.
 
 # 3.2 Record the current core / root copy / config hashes (no secret is printed)
 shasum -a 256 \
@@ -114,7 +118,7 @@ want it started automatically.
 ```bash
 cd "<working copy>"
 shasum -a 256 /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher
-# must equal: ea516cf13a852b1b0d631d05b86141df7fc6ab88b98e3024e41f99d83d35c865
+# must equal: 5f591837bcdc865beebb418d572bfd6dc3550aaec9c06bfe216deef1dbe851fd
 file /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher   # must say arm64
 codesign --verify /Applications/singbox-launcher.app && echo "seal OK"
 /Applications/singbox-launcher.app/Contents/MacOS/singbox-launcher -paths
