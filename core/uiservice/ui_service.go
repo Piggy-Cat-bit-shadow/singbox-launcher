@@ -98,8 +98,7 @@ type UIService struct {
 	LxdOverrideConnectFunc    func(id string) error
 	LxdOverrideDisconnectFunc func()
 	LxdOverrideStateFunc      func() (id, name string, active bool)
-	FocusOpenChildWindows     func()                                     // Focus one of wizard child windows (View, Outbound Edit, rule dialog) when user clicks wizard
-	ShowUpdatePopupFunc       func(currentVersion, latestVersion string) // Called to show update popup
+	FocusOpenChildWindows     func() // Focus one of wizard child windows (View, Outbound Edit, rule dialog) when user clicks wizard
 
 	// Dependencies (passed from AppController)
 	RunningStateIsRunning func() bool
@@ -195,9 +194,6 @@ func NewUIService(appIconData, greyIconData, greenIconData, redIconData []byte,
 	}
 	ui.AutoPingAfterConnectFunc = func() {
 		debuglog.DebugLog("AutoPingAfterConnectFunc handler is not set yet.")
-	}
-	ui.ShowUpdatePopupFunc = func(currentVersion, latestVersion string) {
-		debuglog.DebugLog("ShowUpdatePopupFunc handler is not set yet. Current: %s, Latest: %s", currentVersion, latestVersion)
 	}
 
 	return ui, nil

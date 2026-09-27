@@ -483,21 +483,6 @@
   "Download Complete": {
     "value": "Загрузка завершена"
   },
-  "Update Available": {
-    "value": "Доступно обновление"
-  },
-  "A new version of the application is available": {
-    "value": "Доступна новая версия приложения"
-  },
-  "Current version: %s": {
-    "value": "Текущая версия: %s"
-  },
-  "New version: %s": {
-    "value": "Новая версия: %s"
-  },
-  "Download from GitHub": {
-    "value": "Скачать с GitHub"
-  },
   "Configuration Not Found": {
     "value": "Конфигурация не найдена"
   },
@@ -580,21 +565,6 @@
   },
   "📦 Version: %s": {
     "value": "📦 Версия: %s"
-  },
-  "Checking for updates...": {
-    "value": "Проверка обновлений..."
-  },
-  "Unable to check for updates": {
-    "value": "Не удалось проверить обновления"
-  },
-  "🆕 Update available: %s\nCurrent: %s": {
-    "value": "🆕 Доступно обновление: %s\nТекущая: %s"
-  },
-  "✅ You are using a development build\nCurrent: %s\nLatest release: %s": {
-    "value": "✅ Вы используете сборку разработчика\nТекущая: %s\nПоследний релиз: %s"
-  },
-  "✅ You are using the latest version\nCurrent: %s": {
-    "value": "✅ Вы используете последнюю версию\nТекущая: %s"
   },
   "💬 Telegram Channel": {
     "value": "💬 Telegram-канал"

@@ -498,8 +498,16 @@ func main() {
 	}
 	debuglog.WarnLog("Locale: language set to %q, available: %v", locale.GetLang(), locale.Languages())
 
-	// Check launcher version on startup (always checks, popup shown on first window display)
-	controller.CheckLauncherVersionOnStartup()
+	// Application self-update check is deliberately absent (SPEC 147).
+	//
+	// JiejieBox is a custom build whose version has no relationship to the
+	// upstream release stream: `dev.main.<sha>-jiejiebox` can never compare
+	// meaningfully against the upstream `vX.Y.Z` tags, so a check could only
+	// ever report a bogus "update available" and send the user to a download
+	// that is not this application. The whole self-update path was removed
+	// rather than short-circuited, so no request to the GitHub releases API is
+	// made at startup either. Resource updates (sing-box core, config
+	// template, rule-sets, subscriptions) are unrelated and unaffected.
 
 	// SPEC 059: spin up the always-on Traffic Profiler service. It tails
 	// sing-box.log + polls Clash /connections in the background so when

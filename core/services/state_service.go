@@ -18,19 +18,13 @@ import (
 // button is unaffected — only the timer-driven path is gated.
 const DefaultAutoPingMaxProxies = 150
 
-// StateService manages application state including version caches and auto-update state.
+// StateService manages application state including subscription auto-update.
 // It encapsulates state management to reduce AppController complexity.
 //
 // Sing-box version is NOT cached here: the launcher pins it via
-// constants.RequiredCoreVersion (SPEC 046). The cache below is only for the
-// **launcher**'s own self-update check.
+// constants.RequiredCoreVersion (SPEC 046). The launcher's own version is not
+// cached either — application self-update was removed (SPEC 147).
 type StateService struct {
-	// Launcher version check caching
-	LauncherVersionCheckCache      string
-	LauncherVersionCheckCacheTime  time.Time
-	LauncherVersionCheckMutex      sync.RWMutex
-	LauncherVersionCheckInProgress bool
-
 	// Auto-update configuration
 	AutoUpdateEnabled        bool
 	AutoUpdateFailedAttempts int
@@ -216,42 +210,6 @@ func (s *StateService) RecordUpdateSuccess() {
 	s.LastUpdateMutex.Lock()
 	defer s.LastUpdateMutex.Unlock()
 	s.LastUpdateSucceededAt = time.Now()
-}
-
-// GetCachedLauncherVersion safely gets the cached launcher version with mutex protection.
-func (s *StateService) GetCachedLauncherVersion() string {
-	s.LauncherVersionCheckMutex.RLock()
-	defer s.LauncherVersionCheckMutex.RUnlock()
-	return s.LauncherVersionCheckCache
-}
-
-// SetCachedLauncherVersion safely sets the cached launcher version with mutex protection.
-func (s *StateService) SetCachedLauncherVersion(version string) {
-	s.LauncherVersionCheckMutex.Lock()
-	defer s.LauncherVersionCheckMutex.Unlock()
-	s.LauncherVersionCheckCache = version
-	s.LauncherVersionCheckCacheTime = time.Now()
-}
-
-// GetCachedLauncherVersionTime safely gets the cached launcher version time.
-func (s *StateService) GetCachedLauncherVersionTime() time.Time {
-	s.LauncherVersionCheckMutex.RLock()
-	defer s.LauncherVersionCheckMutex.RUnlock()
-	return s.LauncherVersionCheckCacheTime
-}
-
-// SetLauncherVersionCheckInProgress safely sets the launcher version check in progress flag.
-func (s *StateService) SetLauncherVersionCheckInProgress(inProgress bool) {
-	s.LauncherVersionCheckMutex.Lock()
-	defer s.LauncherVersionCheckMutex.Unlock()
-	s.LauncherVersionCheckInProgress = inProgress
-}
-
-// IsLauncherVersionCheckInProgress safely checks if launcher version check is in progress.
-func (s *StateService) IsLauncherVersionCheckInProgress() bool {
-	s.LauncherVersionCheckMutex.RLock()
-	defer s.LauncherVersionCheckMutex.RUnlock()
-	return s.LauncherVersionCheckInProgress
 }
 
 // IsAutoUpdateEnabled safely checks if auto-update is enabled.

@@ -237,11 +237,8 @@ func CreateCoreDashboardTab(ac *core.AppController) fyne.CanvasObject {
 	tab.updateConfigInfo()
 
 	// Sing-box version is pinned via constants.RequiredCoreVersion (SPEC 046)
-	// — no background latest-version polling here. Launcher self-update check
-	// is independent (CheckLauncherVersionOnStartup, called from main.go).
-
-	// Регистрируем callback для показа попапа обновления
-	tab.controller.UIService.ShowUpdatePopupFunc = tab.showUpdatePopup
+	// — no background latest-version polling here. The launcher's own
+	// self-update check was removed entirely (SPEC 147).
 
 	return content
 }
@@ -1156,47 +1153,4 @@ func (tab *CoreDashboardTab) handleWintunDownload() {
 			})
 		}
 	}()
-}
-
-// showUpdatePopup показывает попап с информацией об обновлении
-func (tab *CoreDashboardTab) showUpdatePopup(currentVersion, latestVersion string) {
-	if tab.controller == nil || tab.controller.UIService == nil || tab.controller.UIService.MainWindow == nil {
-		debuglog.WarnLog("showUpdatePopup: UIService or MainWindow not available")
-		return
-	}
-
-	// Устанавливаем флаг, что попап был показан
-	tab.controller.SetUpdatePopupShown(true)
-
-	// Создаем содержимое попапа
-	fyne.Do(func() {
-		downloadURL := "https://github.com/Leadaxe/singbox-launcher/releases/latest"
-
-		// Создаем ссылку на скачивание
-		downloadLink := widget.NewHyperlink(locale.T("Download from GitHub"), nil)
-		if err := downloadLink.SetURLFromString(downloadURL); err != nil {
-			debuglog.ErrorLog("showUpdatePopup: Failed to set URL: %v", err)
-		}
-		downloadLink.OnTapped = func() {
-			if err := platform.OpenURL(downloadURL); err != nil {
-				debuglog.ErrorLog("showUpdatePopup: Failed to open download URL: %v", err)
-				dialogs.ShowError(tab.controller.UIService.MainWindow, fmt.Errorf("failed to open link: %w", err))
-			}
-		}
-
-		// Создаем контейнер с информацией
-		mainContent := container.NewVBox(
-			widget.NewLabel(locale.T("A new version of the application is available")),
-			widget.NewLabel(""),
-			widget.NewLabel(locale.Tf("Current version: %s", currentVersion)),
-			widget.NewLabel(locale.Tf("New version: %s", latestVersion)),
-			widget.NewLabel(""),
-			downloadLink,
-		)
-
-		d := dialogs.NewCustom(locale.T("Update Available"), mainContent, nil, locale.T("Close"), tab.controller.UIService.MainWindow)
-
-		// Показываем диалог
-		d.Show()
-	})
 }

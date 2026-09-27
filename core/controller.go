@@ -120,8 +120,6 @@ type AppController struct {
 	storageSwitching atomic.Bool
 
 	// --- Update popup state ---
-	updatePopupShown bool         // Флаг, что попап обновления уже был показан в этой сессии
-	updatePopupMutex sync.RWMutex // Мьютекс для защиты updatePopupShown
 
 	// --- Installed core version cache (one successful check per run) ---
 	installedCoreVersionCache   string // после первой успешной проверки — без повторных запусков sing-box version
@@ -211,20 +209,6 @@ func GetControllerOrPanic() *AppController {
 	return instance
 }
 
-// SetUpdatePopupShown устанавливает флаг, что попап обновления был показан
-func (ac *AppController) SetUpdatePopupShown(shown bool) {
-	ac.updatePopupMutex.Lock()
-	defer ac.updatePopupMutex.Unlock()
-	ac.updatePopupShown = shown
-}
-
-// isUpdatePopupShown возвращает, был ли попап обновления показан
-func (ac *AppController) isUpdatePopupShown() bool {
-	ac.updatePopupMutex.RLock()
-	defer ac.updatePopupMutex.RUnlock()
-	return ac.updatePopupShown
-}
-
 // GetURLBytes loads url via the standard app HTTP client (timeouts, HTTP(S)_PROXY).
 // UI and other layers should use this instead of calling CreateHTTPClient directly.
 func (*AppController) GetURLBytes(ctx context.Context, url string, timeout time.Duration) ([]byte, int, error) {
@@ -299,10 +283,10 @@ func NewAppController(layout paths.Layout, appIconData, greyIconData, greenIconD
 	subscription.NodeIdentityFunc = config.NodeIdentity
 	subscription.LegacyNodeIdentityHashFunc = config.LegacyNodeIdentityHash
 
-	// Устанавливаем callback для проверки обновлений при открытии окна
-	ac.UIService.OnWindowShown = func() {
-		ac.ShowUpdatePopupIfAvailable()
-	}
+	// OnWindowShown намеренно НЕ занимается проверкой обновлений приложения
+	// (SPEC 147): self-update удалён целиком, см. комментарий в main.go.
+	// Сам хук остаётся — им пользуются другие подписчики (показ окна,
+	// уведомление о отклонённых ядром узлах, сброс состояния при показе).
 
 	// Initialize APIService
 	apiService, err := services.NewAPIService(
