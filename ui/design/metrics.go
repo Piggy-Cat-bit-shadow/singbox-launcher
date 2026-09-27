@@ -55,14 +55,14 @@ const (
 	// RadiusControl — мелкие элементы: бейджи-плашки, чипы.
 	RadiusControl float32 = 8
 	// RadiusButton — кнопки и поля ввода.
-	RadiusButton float32 = 10
+	RadiusButton float32 = 9
 	// RadiusNav — подсветка выбранного пункта навигации. Заметно больше
 	// кнопки: это «pill», а не строка таблицы.
-	RadiusNav float32 = 11
+	RadiusNav float32 = 10
 	// RadiusCard — карточки и секции — основной контейнер контента.
-	RadiusCard float32 = 14
+	RadiusCard float32 = 12
 	// RadiusHero — крупная карточка Home: чуть мягче обычной.
-	RadiusHero float32 = 14
+	RadiusHero float32 = 12
 	// RadiusDialog — модальные окна.
 	RadiusDialog float32 = 14
 )
@@ -75,50 +75,71 @@ const (
 // обрезает «Diagnostics» и длинные русские подписи.
 const (
 	// SidebarWidth — полная ширина навигационной колонки.
-	SidebarWidth float32 = 212
+	SidebarWidth float32 = 200
 	// SidebarPadding — внутренние отступы сайдбара по горизонтали.
-	SidebarPadding float32 = 14
+	SidebarPadding float32 = 10
 	// SidebarIdentityHeight — высота блока с именем приложения.
-	SidebarIdentityHeight float32 = 58
+	SidebarIdentityHeight float32 = 54
 	// SidebarTopGap — отступ от верха окна до первого пункта.
 	SidebarTopGap float32 = SpaceS
 	// NavItemHeight — высота пункта навигации.
-	NavItemHeight float32 = 41
+	NavItemHeight float32 = 37
 	// NavIconSize — размер иконки пункта.
 	NavIconSize float32 = 18
 	// NavIconGap — зазор между иконкой и текстом.
-	NavIconGap float32 = SpaceS + 2
+	NavIconGap float32 = SpaceS
 	// NavItemGap — вертикальный зазор между пунктами.
-	NavItemGap float32 = 2
+	NavItemGap float32 = 1
 	// NavSectionGap — зазор перед заголовком группы.
 	NavSectionGap float32 = SpaceS
 	// NavSectionLabelHeight — высота заголовка группы.
-	NavSectionLabelHeight float32 = 20
+	NavSectionLabelHeight float32 = 26
+	// NavSectionLabelTopGap — отступ над заголовком группы. Заголовок — это
+	// подпись-ориентир, а не пункт: он должен «прилипать» к своей группе и
+	// не спорить за внимание с nav item'ами.
+	NavSectionLabelTopGap float32 = SpaceS
+	// NavSectionLabelIndent — отступ текста заголовка от левого края колонки.
+	//
+	// БОЛЬШЕ, чем левый отступ текста nav item (SpaceM + SidebarPadding).
+	// Это и есть визуальный признак «здесь не кликается»: подпись выровнена
+	// не по иконкам пунктов, а левее/правее сетки пунктов так, что не читается
+	// как ещё один пункт списка.
+	NavSectionLabelIndent float32 = SidebarPadding + SpaceS
 )
 
 // Геометрия контентной области.
 const (
 	// ContentPaddingH — горизонтальные поля страницы.
-	ContentPaddingH float32 = Space3XL
+	ContentPaddingH float32 = 26
 	// ContentPaddingV — вертикальные поля страницы.
-	ContentPaddingV float32 = Space2XL + SpaceXS
+	ContentPaddingV float32 = 22
 	// PageHeaderHeight — высота шапки страницы.
-	PageHeaderHeight float32 = 62
-	// CardPadding — внутренние отступы карточки.
-	CardPadding float32 = SpaceL
+	PageHeaderHeight float32 = 58
+	// CardPadding — внутренние отступы карточки по горизонтали.
+	CardPadding float32 = 16
+	// CardPaddingY — вертикальные отступы карточки. Меньше горизонтальных:
+	// карточка-список не должна «пухнуть» по высоте.
+	CardPaddingY float32 = 14
 	// CardGap — зазор между карточками в колонке.
-	CardGap float32 = SpaceL
+	CardGap float32 = SpaceM
 	// RowHeight — минимальная высота строки настроек.
 	RowHeight float32 = 48
 	// RowMinHeight — высота строки карточки с двумя строками текста.
-	RowMinHeight float32 = 46
+	RowMinHeight float32 = 42
 	// ToolbarHeight — высота панели инструментов.
-	ToolbarHeight float32 = 44
+	ToolbarHeight float32 = 40
 	// MaxContentWidth — предел ширины контентной колонки. Карточка шириной
 	// 1400 выглядит сломанной; на широком окне контент центрируется.
-	MaxContentWidth float32 = 780
+	MaxContentWidth float32 = 740
 	// SegmentedHeight — высота сегментированного переключателя.
-	SegmentedHeight float32 = 34
+	SegmentedHeight float32 = 30
+	// IconButtonSize — квадрат icon-кнопки (обновить, шестерёнка).
+	IconButtonSize float32 = 30
+	// PrimaryButtonHeight — высота главной кнопки.
+	PrimaryButtonHeight float32 = 36
+	// PrimaryButtonMinWidth — минимальная ширина главной кнопки: Start и Stop
+	// разной длины, и без общей ширины кнопка «дёргается» при смене подписи.
+	PrimaryButtonMinWidth float32 = 88
 )
 
 // Размеры окна.
@@ -130,15 +151,15 @@ const (
 // колонки контента.
 const (
 	// DefaultWindowWidth / Height — стартовый размер главного окна.
-	DefaultWindowWidth  float32 = 1220
-	DefaultWindowHeight float32 = 800
+	DefaultWindowWidth  float32 = 1160
+	DefaultWindowHeight float32 = 760
 
 	// MinWindowWidth / Height — нижняя граница. Ниже сайдбар + две колонки
 	// перестают помещаться, и вместо деградации получается каша из
 	// обрезанных подписей. 960 проверено на самой длинной локализации
 	// (русской) и на узких подписях кнопок.
-	MinWindowWidth  float32 = 1000
-	MinWindowHeight float32 = 680
+	MinWindowWidth  float32 = 980
+	MinWindowHeight float32 = 660
 )
 
 // Доли колонок на страницах Local и Remote.

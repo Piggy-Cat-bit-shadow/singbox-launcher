@@ -394,7 +394,11 @@ func (a *App) registerShortcuts() {
 // presentation-маршрута внутри локального домена.
 func (a *App) navigationEntries() []design.NavEntry {
 	return []design.NavEntry{
-		{ID: design.NavID(RouteHome), Title: locale.T("Home"), Icon: icons.NavHome, Section: locale.T("Home")},
+		// Заголовок группы НЕ повторяет название пункта: раньше первая группа
+		// называлась «Home» и стояла прямо над пунктом «Home» — пользователь
+		// видел одно слово дважды и логично пробовал кликнуть по верхнему.
+		// Теперь группы описывают область, а не пункт.
+		{ID: design.NavID(RouteHome), Title: locale.T("Home"), Icon: icons.NavHome, Section: locale.T("Overview")},
 		{ID: design.NavID(RouteProxies), Title: locale.T("Proxies"), Icon: icons.NavLocal, Section: locale.T("Network")},
 		{ID: design.NavID(RouteRemote), Title: locale.T("Remote"), Icon: icons.NavRemote},
 		{ID: design.NavID(RouteTraffic), Title: locale.T("Traffic"), Icon: icons.NavTraffic},

@@ -30,6 +30,9 @@ package design
 
 import (
 	"image/color"
+	"strings"
+
+	"fyne.io/fyne/v2/theme"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -321,11 +324,35 @@ func (h *navRowHolder) MouseOut() { h.row.applyHover(false) }
 // navSectionLabel — заголовок группы. Мелкий, приглушённый, без начертания:
 // он ориентирует, но не конкурирует с пунктами за внимание.
 func navSectionLabel(text string) fyne.CanvasObject {
-	l := widget.NewLabel(text)
-	l.Importance = widget.LowImportance
+	// Заголовок группы обязан читаться как ПОДПИСЬ, а не как пункт меню.
+	//
+	// Признаки, отличающие его от nav item (все обязательны — одного мало,
+	// иначе пользователь всё равно пробует кликнуть):
+	//
+	//   1. НЕТ плашки, hover и selected-состояния — в отличие от пунктов,
+	//      которые подсвечиваются при наведении. Отсутствие реакции на
+	//      курсор — главный сигнал.
+	//   2. Мелкий текст: canvas.Text с уменьшенным кеглем, а не widget.Label
+	//      того же размера, что и подписи пунктов.
+	//   3. Другой отступ от края: подпись выровнена не по иконкам пунктов,
+	//      поэтому не встаёт в их вертикальную сетку.
+	//   4. Верхний отступ больше нижнего: заголовок «прилипает» к своей
+	//      группе, а не висит между группами.
+	//
+	// Отдельный объект — canvas.Text, а не Label: только так можно задать
+	// кегль мельче обычного, не вводя новый уровень в типографику.
+	t := canvas.NewText(strings.ToUpper(text), TextMuted())
+	t.TextSize = theme.TextSize() * 0.72
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	t.Alignment = fyne.TextAlignLeading
+
+	top := NavSectionLabelTopGap
+	if top < 0 {
+		top = 0
+	}
 	return container.New(&minHeight{min: NavSectionLabelHeight, max: NavSectionLabelHeight},
-		container.New(&paddedBox{l: SidebarPadding + SpaceM, t: 0, r: SidebarPadding, b: 0},
-			container.NewCenter(l)))
+		container.New(&paddedBox{l: NavSectionLabelIndent, t: top, r: SidebarPadding, b: 0},
+			container.NewCenter(container.NewHBox(t))))
 }
 
 // sidebarIdentityLabel — имя приложения.
