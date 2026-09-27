@@ -22,15 +22,39 @@ type Server struct {
 	backend *Backend
 	out     io.Writer
 
-	mu   sync.Mutex
-	enc  *json.Encoder
-	stop func()
+	mu  sync.Mutex
+	enc *json.Encoder
+
+	// stopOnce closes stopCh exactly once, letting the read loop finish
+	// without waiting for stdin to reach EOF. A normal quit still closes the
+	// pipe, but the backend no longer DEPENDS on that: the process can end on
+	// its own once teardown has been requested.
+	stopOnce sync.Once
+	stopCh   chan struct{}
 }
 
 // NewServer wires a backend to its output stream.
 func NewServer(b *Backend, out io.Writer) *Server {
 	enc := json.NewEncoder(out)
-	return &Server{backend: b, out: out, enc: enc}
+	return &Server{backend: b, out: out, enc: enc, stopCh: make(chan struct{})}
+}
+
+// requestStop tells the read loop to finish.
+//
+// Called only AFTER the shutdown ACK has been written, so the client is never
+// left waiting for a reply that a stopping loop will not send.
+func (s *Server) requestStop() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
+}
+
+// Stopped reports whether the read loop has been asked to finish.
+func (s *Server) Stopped() bool {
+	select {
+	case <-s.stopCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // write sends one protocol value as a single line.
@@ -59,11 +83,45 @@ func (s *Server) Serve(in io.Reader) {
 	// Requests can carry config fragments; raise the default 64 KiB limit.
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
-	for sc.Scan() {
-		line := sc.Bytes()
+	// A blocked Scan cannot be interrupted, so lines are delivered through a
+	// channel: the reader goroutine owns stdin, and this loop keeps the ability
+	// to finish on the stop signal without waiting for EOF.
+	lines := make(chan []byte)
+	go func() {
+		defer close(lines)
+		for sc.Scan() {
+			// Copy: Scanner reuses its buffer on the next Scan.
+			buf := make([]byte, len(sc.Bytes()))
+			copy(buf, sc.Bytes())
+			select {
+			case lines <- buf:
+			case <-s.stopCh:
+				return
+			}
+		}
+	}()
+
+	for {
+		var line []byte
+		select {
+		case <-s.stopCh:
+			if err := sc.Err(); err != nil {
+				debuglog.WarnLog("backend ipc: read failed: %v", err)
+			}
+			return
+		case next, ok := <-lines:
+			if !ok {
+				if err := sc.Err(); err != nil {
+					debuglog.WarnLog("backend ipc: read failed: %v", err)
+				}
+				return
+			}
+			line = next
+		}
 		if len(line) == 0 {
 			continue
 		}
+
 		var req protocol.Request
 		if err := json.Unmarshal(line, &req); err != nil {
 			// No id is recoverable, so reply with an empty one; the client
@@ -81,9 +139,6 @@ func (s *Server) Serve(in io.Reader) {
 		if resp.ID != "" {
 			s.write(resp)
 		}
-	}
-	if err := sc.Err(); err != nil {
-		debuglog.WarnLog("backend ipc: read failed: %v", err)
 	}
 }
 
@@ -351,6 +406,10 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		// scheduling.
 		s.write(protocol.Response{ID: req.ID, Result: map[string]any{"shutting_down": true}})
 		go s.backend.Shutdown()
+		// Let the read loop finish on its own. The ACK is already on the wire,
+		// so this cannot strand the client, and the backend no longer needs the
+		// frontend to close the pipe before it can exit.
+		s.requestStop()
 		// Zero ID: Serve must not write this one again.
 		return protocol.Response{}
 	}

@@ -61,8 +61,15 @@ func main() {
 	srv := service.NewServer(backend, os.Stdout)
 	srv.Serve(os.Stdin)
 
-	// stdin closed: the frontend is gone. Stop the core according to the
-	// existing graceful-exit policy rather than leaving it running unowned.
-	debuglog.InfoLog("backend: stdin closed, shutting down")
+	// Serve returns for either reason, and both are legitimate:
+	//
+	//   1. the frontend asked us to shut down (it also stopped the loop), or
+	//   2. stdin reached EOF, the safety net for a frontend that died without
+	//      asking — this must not leave an orphan helper owning the core.
+	//
+	// Shutdown is exactly-once, so reaching it from both paths in one quit is
+	// safe and expected. The core's fate follows the existing graceful-exit
+	// policy: classic stops it, daemon keeps it unless stop-on-exit is set.
+	debuglog.InfoLog("backend: ipc finished, shutting down")
 	backend.Shutdown()
 }

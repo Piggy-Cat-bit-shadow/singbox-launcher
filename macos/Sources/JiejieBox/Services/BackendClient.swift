@@ -197,44 +197,72 @@ actor BackendClient {
     /// exit, must never prevent the app from quitting.
     func shutdownGracefully() async {
         terminationIntent = .requested
+        let quitStarted = Date()
 
-        // Phase 1: ask, and let the backend acknowledge. The ACK means the
-        // request was accepted, not that teardown has finished.
-        try? await requestShutdown()
+        // Phase 1: ask. The ACK means "shutdown accepted", NOT "teardown
+        // finished" — the backend deliberately does not wait for the core to
+        // stop before answering, so the UI can start exiting promptly.
+        let ackStart = Date()
+        let acknowledged = (try? await requestShutdown()) != nil
+        let ackLatency = Date().timeIntervalSince(ackStart)
 
         guard let proc = process else {
             await cleanupAfterExit()
             return
         }
 
-        // Phase 2: let it leave on its own. This is the normal path, and the
-        // core teardown gets its full budget here.
-        for _ in 0..<50 where proc.isRunning {   // up to ~5 s
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-
-        // Phase 3: still here — it did not honour the request, so close stdin.
-        // EOF is the safety net for a frontend that vanished, not the mechanism
-        // a normal quit relies on, so it is only reached after phase 2 failed.
-        if proc.isRunning, let stdinHandle {
-            log.warning("backend did not exit after shutdown; closing stdin")
+        // Phase 2: close stdin as soon as the ACK is in.
+        //
+        // This is the whole point of the ordering. The headless backend's read
+        // loop blocks on stdin, and GracefulExit cannot stop it: with no UI
+        // attached it never signals Serve, so the process stays alive until
+        // stdin reaches EOF. Measured: the backend is still running 6 s after
+        // the ACK with stdin open, and exits 13 ms after it closes.
+        //
+        // Waiting for a self-exit before closing stdin therefore waits for
+        // something that cannot happen. The ACK ordering is what makes closing
+        // here safe: the response is written before teardown starts, so it has
+        // already arrived by the time we get here.
+        let stdinClosedAt = Date()
+        if acknowledged, let stdinHandle {
             try? stdinHandle.close()
             self.stdinHandle = nil
+        }
 
-            // Phase 4: the EOF path gets its own budget rather than being
-            // assumed instantaneous.
-            for _ in 0..<20 where proc.isRunning {   // up to ~2 s
+        // Phase 3: wait for the process to leave, with a bounded deadline. The
+        // loop returns the moment it exits — the budget is a ceiling, not a
+        // sleep, so the common case costs milliseconds.
+        if proc.isRunning {
+            for _ in 0..<30 where proc.isRunning {   // ceiling ~3 s
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
 
-        // Phase 5: last resort. Terminating mid-teardown can leave the core
-        // inconsistent, so it is logged as the anomaly it is.
+        // Phase 4: last resort. Terminating mid-teardown can leave the core
+        // inconsistent, so reaching this is logged as the anomaly it is.
+        var fallbackTerminated = false
         if proc.isRunning {
-            log.error("backend still running after shutdown and stdin close; terminating")
+            log.error("backend still running after stdin close; terminating")
             proc.terminate()
+            fallbackTerminated = true
         }
         await cleanupAfterExit()
+
+        // Timings go to the log only, never the UI: the goal is to keep
+        // "is this wait necessary?" answerable from evidence rather than
+        // guesswork.
+        let ackText = ms(ackLatency)
+        let stdinText = ms(stdinClosedAt.timeIntervalSince(ackStart))
+        let exitText = ms(Date().timeIntervalSince(stdinClosedAt))
+        let totalText = ms(Date().timeIntervalSince(quitStarted))
+        let fallbackText = fallbackTerminated ? " (fallback terminate)" : ""
+        let ackNote = acknowledged ? "" : " (no ACK; EOF-only path)"
+        log.info("quit: ack \(ackText) stdin \(stdinText) exit \(exitText) total \(totalText)\(fallbackText)\(ackNote)")
+    }
+
+    /// Milliseconds, for the quit timing line.
+    private func ms(_ interval: TimeInterval) -> String {
+        String(format: "%.0fms", interval * 1000)
     }
 
     /// Release every handle and callback the process owned.
@@ -478,9 +506,16 @@ actor BackendClient {
             // Local state reads. Two seconds would be generous; eight allows
             // for a busy machine without hiding a wedged backend.
             seconds = 8
+        case BackendMethod.shutdown:
+            // Its own budget, deliberately not the 20 s command budget. The
+            // reply is a local IPC acknowledgement of "shutdown accepted", not
+            // completion: the backend writes it before teardown starts, so it
+            // arrives in milliseconds. Waiting 20 s for it would only delay a
+            // quit when something is already wrong.
+            seconds = 2
         case BackendMethod.switchProxy, BackendMethod.setCoreMode,
              BackendMethod.restartCore, BackendMethod.startCore,
-             BackendMethod.stopCore, BackendMethod.shutdown,
+             BackendMethod.stopCore,
              BackendMethod.addSubscription, BackendMethod.updateSubscription,
              BackendMethod.removeSubscription, BackendMethod.setSubscriptionEnabled,
              BackendMethod.setAutoPing, BackendMethod.setAutoUpdate,

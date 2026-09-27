@@ -422,7 +422,9 @@ func (b *Backend) Shutdown() {
 		if b.ac == nil {
 			return
 		}
+		started := time.Now()
 		debuglog.InfoLog("backend: shutdown requested")
+
 		if b.cancelCoreWatch != nil {
 			b.cancelCoreWatch()
 			b.cancelCoreWatch = nil
@@ -431,7 +433,18 @@ func (b *Backend) Shutdown() {
 			b.traffic.Stop()
 		}
 		b.emit(protocol.EventShuttingDown, nil)
+		watchersDone := time.Now()
+
 		b.ac.GracefulExit()
+		// Per-phase timings go to the log only. They exist so "is this wait
+		// necessary?" can be answered from evidence: a teardown that always
+		// costs exactly the configured ceiling means the core stop is not being
+		// observed, which is a state-transition bug rather than a timeout that
+		// needs shortening.
+		debuglog.InfoLog("backend: shutdown complete in %s (watchers %s, teardown %s)",
+			time.Since(started).Round(time.Millisecond),
+			watchersDone.Sub(started).Round(time.Millisecond),
+			time.Since(watchersDone).Round(time.Millisecond))
 	})
 }
 

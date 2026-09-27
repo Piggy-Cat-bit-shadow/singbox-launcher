@@ -3,12 +3,15 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
@@ -577,5 +580,216 @@ func TestShutdownAckIsWrittenBeforeTeardown(t *testing.T) {
 	result, _ := m["result"].(map[string]any)
 	if result["shutting_down"] != true {
 		t.Errorf("ACK result = %v, want shutting_down:true", m["result"])
+	}
+}
+
+// TestShutdownOnceBlocksUntilFirstCompletes — the second caller must WAIT for
+// the first teardown to finish, not run a second one and not return early.
+//
+// This is the property the quit path depends on: after the ACK, the client
+// closes stdin immediately, so the EOF path in main calls Shutdown while the
+// method path is very likely still inside its own Do. sync.Once blocks the
+// loser until the winner completes, and that is what we assert rather than
+// merely "no second teardown happened".
+func TestShutdownOnceBlocksUntilFirstCompletes(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// Hold the first teardown inside Do so the second must wait for it.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	firstDone := make(chan struct{})
+
+	go func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+		close(firstDone)
+	}()
+	<-entered
+
+	secondReturned := make(chan struct{})
+	go func() {
+		once.Do(func() { t.Error("second Do ran the body: teardown executed twice") })
+		close(secondReturned)
+	}()
+
+	// The second caller must still be blocked while the first is inside Do.
+	select {
+	case <-secondReturned:
+		t.Fatal("second caller returned before the first teardown completed")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-secondReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second caller never returned after the first completed")
+	}
+	<-firstDone
+
+	// The same property on the real Backend: the observable effect is one event.
+	var mu sync.Mutex
+	events := 0
+	unsub := b.Subscribe(func(ev protocol.Event) {
+		if ev.Event == protocol.EventShuttingDown {
+			mu.Lock()
+			events++
+			mu.Unlock()
+		}
+	})
+	defer unsub()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); b.Shutdown() }()
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if events != 1 {
+		t.Errorf("shutting_down emitted %d times, want exactly 1", events)
+	}
+}
+
+// TestServeExitsOnShutdownWithoutEOF — the read loop must be able to finish
+// without the client closing the pipe.
+//
+// Before this, the headless backend's Serve blocked on stdin forever:
+// GracefulExit only signals a UI-frontend quit, and with no UI attached it never
+// stops the loop. Measured before the fix: the process was still running 6 s
+// after the ACK with stdin open, which is exactly what made Quit feel slow —
+// the frontend waited for an exit that could not happen until it closed the
+// pipe itself.
+func TestServeExitsOnShutdownWithoutEOF(t *testing.T) {
+	b := backendWithConfig(t)
+	var out bytes.Buffer
+	srv := NewServer(b, &out)
+
+	// A reader that never reaches EOF: the loop must still return.
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	defer func() { _ = pr.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		srv.Serve(pr)
+		close(done)
+	}()
+
+	if _, err := pw.Write([]byte(`{"id":"1","method":"shutdown"}` + "\n")); err != nil {
+		t.Fatalf("write shutdown: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not finish after shutdown while stdin stayed open")
+	}
+
+	if !srv.Stopped() {
+		t.Error("server does not report itself stopped")
+	}
+	// The ACK must still be in the stream: stopping must never overtake it.
+	if !strings.Contains(out.String(), "shutting_down") {
+		t.Errorf("ACK missing from the stream after self-stop: %q", out.String())
+	}
+}
+
+// TestServeStillServesAfterShutdownRequestedForOtherRequests is a guard against
+// requestStop being wired too early: only shutdown ends the loop.
+func TestServeStillServesAfterShutdownRequestedForOtherRequests(t *testing.T) {
+	b := backendWithConfig(t)
+	var out bytes.Buffer
+	srv := NewServer(b, &out)
+
+	in := strings.NewReader(`{"id":"1","method":"handshake"}` + "\n" +
+		`{"id":"2","method":"get_app_snapshot"}` + "\n")
+	srv.Serve(in)
+
+	if srv.Stopped() {
+		t.Error("server reports stopped after ordinary requests")
+	}
+	for _, id := range []string{`"id":"1"`, `"id":"2"`} {
+		if !strings.Contains(out.String(), id) {
+			t.Errorf("response %s missing: %q", id, out.String())
+		}
+	}
+}
+
+// TestSwiftTimeoutBudgets — the Swift client's per-method timeouts must stay
+// sane, which is not checkable from Swift here: this toolchain ships neither
+// XCTest nor the Swift Testing macro plugin, so `swift test` cannot build at
+// all (verified). The Go suite does run, so the invariant is enforced by reading
+// the Swift source.
+//
+// The property that matters most is the first one: `shutdown` is an IPC
+// acknowledgement, not a completion, so a long budget would only delay quitting.
+func TestSwiftTimeoutBudgets(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "macos", "Sources",
+		"JiejieBox", "Services", "BackendClient.swift"))
+	if err != nil {
+		t.Skipf("Swift sources not present: %v", err)
+	}
+	text := string(src)
+
+	idx := strings.Index(text, "static func timeout(for method: String)")
+	if idx < 0 {
+		t.Fatal("cannot find the timeout function in BackendClient.swift")
+	}
+	body := text[idx:]
+	if end := strings.Index(body, "\n        default:"); end >= 0 {
+		body = body[:end]
+	}
+
+	// Walk the switch: accumulate method names from `case` lines until the
+	// `seconds = N` that terminates the block. The cases wrap across several
+	// lines, so a line-oriented scan is far clearer than one big regexp.
+	secondsOf := map[string]float64{}
+	var pending []string
+	reMethod := regexp.MustCompile(`BackendMethod\.(\w+)`)
+	reSeconds := regexp.MustCompile(`seconds = ([\d.]+)`)
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "case ") || strings.HasPrefix(trimmed, "BackendMethod.") {
+			for _, m := range reMethod.FindAllStringSubmatch(line, -1) {
+				pending = append(pending, m[1])
+			}
+			continue
+		}
+		if m := reSeconds.FindStringSubmatch(line); m != nil {
+			var v float64
+			if _, err := fmt.Sscanf(m[1], "%f", &v); err == nil {
+				for _, name := range pending {
+					secondsOf[name] = v
+				}
+			}
+			pending = nil
+		}
+	}
+
+	shutdown, ok := secondsOf["shutdown"]
+	if !ok {
+		t.Fatalf("shutdown has no explicit timeout; it must not fall through to the default (parsed %d methods)", len(secondsOf))
+	}
+	if shutdown > 2.0 {
+		t.Errorf("shutdown timeout = %.1fs, want <= 2s: the reply is a local ACK, "+
+			"so a long budget only delays quitting", shutdown)
+	}
+	if shutdown < 1.0 {
+		t.Errorf("shutdown timeout = %.1fs, too tight for a healthy round trip", shutdown)
+	}
+
+	if mode, ok := secondsOf["setCoreMode"]; !ok || mode < 5 {
+		t.Errorf("setCoreMode timeout = %.1fs, want >= 5s for a real command", mode)
+	}
+
+	for _, m := range []string{"refreshSubscription", "updateSubscriptions", "testProxyGroup"} {
+		if v, ok := secondsOf[m]; !ok || v < 30 {
+			t.Errorf("%s timeout = %.1fs, want >= 30s for network work", m, v)
+		}
 	}
 }
