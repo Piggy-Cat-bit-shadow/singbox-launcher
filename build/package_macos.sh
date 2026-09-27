@@ -90,6 +90,15 @@ fi
 # и чтобы она не совпадала с версией апстрима (иначе не отличить сборки).
 VERSION="${APP_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}"
 VERSION="${VERSION}-jiejiebox"
+
+# Санитайзинг версии для имени файла: git describe может вернуть имя тега
+# со слэшем (`archive/macos-...`), и тогда «архив» превращается в каталог
+# dist/archive/ с zip внутри — CI ждёт файл и не находит его. Слэши, пробелы
+# и всё, что не буква/цифра/точка/дефис/подчёркивание, заменяем на дефис.
+FILE_VERSION="$(printf '%s' "$VERSION" | sed -E 's|[/ ]+|-|g; s/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+if [ -z "$FILE_VERSION" ]; then
+    FILE_VERSION="dev"
+fi
 TEMPLATE_REF=$(git rev-parse HEAD)
 
 # CFBundleVersion по требованиям macOS — числовая строка (цифры и точки),
@@ -181,7 +190,7 @@ fi
         echo '    <string>app</string>'
     fi
     echo '    <key>CFBundleShortVersionString</key>'
-    echo "    <string>$VERSION</string>"
+    echo "    <string>$FILE_VERSION</string>"
     echo '    <key>CFBundleVersion</key>'
     echo "    <string>$CF_BUNDLE_VERSION</string>"
     echo '    <key>LSMinimumSystemVersion</key>'
@@ -216,8 +225,8 @@ codesign --verify --verbose=1 "$APP_NAME.app"
 
 echo ""
 echo "=== Packaging ==="
-ZIP_NAME="${APP_NAME}-${VERSION}-macos-${BUILD_TYPE}.zip"
-DMG_NAME="${APP_NAME}-${VERSION}-macos-${BUILD_TYPE}.dmg"
+ZIP_NAME="${APP_NAME}-${FILE_VERSION}-macos-${BUILD_TYPE}.zip"
+DMG_NAME="${APP_NAME}-${FILE_VERSION}-macos-${BUILD_TYPE}.dmg"
 
 # zip: ditto сохраняет права и расширенные атрибуты бандла.
 ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$DIST_DIR/$ZIP_NAME"

@@ -253,6 +253,20 @@ jobs:
           cp dist/JiejieBox-*-macos-catalina.zip release/JiejieBox-${VERSION}-macos-catalina.zip
           rm -f dist/*.dmg dist/BUILD_INFO.txt
 
+      # Release-blocking acceptance test on the archives we are about to
+      # publish: allowlist of bundle contents, executable bit, signature,
+      # architectures, numeric CFBundleVersion and no dev/config leftovers.
+      - name: Verify macOS artifacts (acceptance)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for z in release/JiejieBox-*-macos-universal.zip; do
+            ./build/check_macos_artifact.sh "$z" universal
+          done
+          for z in release/JiejieBox-*-macos-catalina.zip; do
+            ./build/check_macos_artifact.sh "$z" catalina
+          done
+
       - name: Upload Catalina package
         uses: actions/upload-artifact@v6
         with:
@@ -431,30 +445,18 @@ jobs:
 
             #### macOS (Universal) - Supports both Apple Silicon and Intel
 
-            **Option 1: Installation Script (Recommended)**
+            **Installation**
 
-            Install with a single command (version ${{ needs.meta.outputs.version }}):
-            ```bash
-            curl -fsSL "https://raw.githubusercontent.com/Piggy-Cat-bit-shadow/singbox-launcher/main/scripts/install-macos.sh" | bash -s -- ${{ needs.meta.outputs.version }}
-            ```
-
-            The script downloads the release archive, extracts it to `/Applications/`,
-            fixes quarantine attributes and permissions, and launches the app.
-
-            **Option 2: Manual Installation**
-
-            1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-macos.zip`
+            1. Download: `JiejieBox-${{ needs.meta.outputs.version }}-macos-universal.zip`
             2. Extract the ZIP file
-            3. Remove the quarantine attribute:
-               ```bash
-               xattr -cr "singbox-launcher.app"
-               ```
-            4. Double-click `singbox-launcher.app` to run
-               - If macOS blocks the app, use **System Settings -> Privacy & Security -> Open Anyway**
+            3. Move `JiejieBox.app` to `/Applications`
+            4. Double-click `JiejieBox.app` to run
+               - The build is ad-hoc signed and not notarized. If macOS blocks it, use **System Settings -> Privacy & Security -> Open Anyway**; do not disable Gatekeeper.
+               - JiejieBox installs beside the original Singbox Launcher (its own bundle id) and reuses the same data directory, so existing config and the custom core are kept.
 
             #### macOS (Catalina, Intel-only)
 
-            1. Download: `singbox-launcher-${{ needs.meta.outputs.version }}-macos-catalina.zip`
+            1. Download: `JiejieBox-${{ needs.meta.outputs.version }}-macos-catalina.zip`
             2. Same installation steps as above; targets macOS 10.15+ on Intel Macs
 
             > This fork builds macOS only. Windows and Linux packages are not produced here.

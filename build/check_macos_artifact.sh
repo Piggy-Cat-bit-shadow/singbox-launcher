@@ -82,7 +82,13 @@ if [ -f "$APP/Contents/Info.plist" ]; then
         fail "CFBundleVersion '$BVER' is not a numeric version (macOS requires digits/dots)"
     fi
     SVER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "")
-    [ -n "$SVER" ] && pass "CFBundleShortVersionString '$SVER' is set" || fail "CFBundleShortVersionString is empty"
+    if [ -z "$SVER" ]; then
+        fail "CFBundleShortVersionString is empty"
+    elif printf '%s' "$SVER" | grep -qE '[/[:space:]]'; then
+        fail "CFBundleShortVersionString '$SVER' contains a slash or space (invalid for macOS)"
+    else
+        pass "CFBundleShortVersionString '$SVER' is well formed"
+    fi
 fi
 
 # --- подпись ---
