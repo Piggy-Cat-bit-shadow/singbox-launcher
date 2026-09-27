@@ -262,7 +262,7 @@ User Agent: `singbox-launcher/<version> (<os> <arch>)`. Privacy controls in Sett
 - **Universal** (recommended): macOS 11+ (Big Sur), supports Apple Silicon and Intel.
 - **Intel-only legacy build**: macOS 10.15+ (Catalina).
 - [sing-box-lx](https://github.com/Leadaxe/sing-box-lx/releases) — fork core (XHTTP + AmneziaWG 2.0) auto-downloaded via the Local tab.
-- **Daemon mode** (optional, macOS only) additionally needs a core built with the `lxd` subcommand (`with_lx_command`). The pinned `RequiredCoreVersion` ships it (the current value lives in `internal/constants/constants.go` — the single source of truth). See [docs/DAEMON_AND_REMOTE.md](docs/DAEMON_AND_REMOTE.md).
+- **Daemon mode** (optional, macOS only) additionally needs a core built with the `lxd` subcommand (`with_lx_command`). The pinned `RequiredCoreVersion` ships it (the current value lives in `internal/constants/constants.go` — the single source of truth). **Bring your own core:** the launcher accepts custom sing-box cores for daemon mode — a version string, a release tag or `sing-box-lx` numbering is *not* a trust or eligibility boundary, so Install / Update / Pair / Start stay available for `1.15.0-jiejie-masquerade.5`, `custom-build`, `unknown` or an unreadable version alike. Daemon installation always uses the bundled launcher core and never downloads or substitutes an upstream release; whether a binary really speaks `lxd` is settled by running it, and its real error is shown. See [docs/DAEMON_AND_REMOTE.md](docs/DAEMON_AND_REMOTE.md).
 
 ### Linux
 

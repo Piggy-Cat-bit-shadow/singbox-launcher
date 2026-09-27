@@ -155,11 +155,15 @@ func TestPrivilegedCopyCommandFor_ForkCoreUsesOwnCopy(t *testing.T) {
 	}
 }
 
-// TestPrivilegedCopyCommandFor_ServiceStillGatedByVersion — установка
-// СЛУЖБЫ остаётся гейтом по версии: это протокол демона, и кастомное
-// ядро без lxd службу установить не может, даже если classic-копия
-// теперь доступна.
-func TestPrivilegedCopyCommandFor_ServiceStillGatedByVersion(t *testing.T) {
+// TestPrivilegedCopyCommandFor_ServiceCommandIsNotVersionGated — установка
+// СЛУЖБЫ больше не гейтится версией ядра.
+//
+// Раньше этот тест требовал обратного: кастомное ядро без опознанного `-lx.N`
+// не получало команду install службы. Гейт снят намеренно — версия не
+// граница доверия, а способность ядра исполнить `lxd` выясняет сам запуск.
+// Здесь проверяем, что кастомная сборка владельца получает штатную команду
+// install, а не отказ, и что служба по-прежнему опознаётся как определённая.
+func TestPrivilegedCopyCommandFor_ServiceCommandIsNotVersionGated(t *testing.T) {
 	dir := t.TempDir()
 	core := fakeCoreScript(t, dir, "sing-box", map[string]string{})
 	plist := filepath.Join(dir, "com.leadaxe.sing-box-lxd.plist")
@@ -172,21 +176,36 @@ func TestPrivilegedCopyCommandFor_ServiceStillGatedByVersion(t *testing.T) {
 		ChainRoot: dir,
 		OwnerUID:  0,
 	}
-	command, viaService, err := privilegedCopyCommandFor(l, core, "1.15.0-jiejie-masquerade.5")
-	if err == nil {
-		t.Fatalf("installing the daemon service must stay gated by version, got command %q", command)
-	}
-	if viaService != true {
-		t.Fatal("the refusal must still report that a service is defined")
+	for _, version := range []string{
+		"1.15.0-jiejie-masquerade.5",
+		"1.15.0-custom",
+		"custom-build",
+		"unknown",
+		"",
+		"1.14.1-lx.8",
+		"1.14.2-lx.4",
+	} {
+		command, viaService, err := privilegedCopyCommandFor(l, core, version)
+		if err != nil {
+			t.Fatalf("version %q: install of the daemon service must not be gated by version, got err %v", version, err)
+		}
+		if !viaService {
+			t.Fatalf("version %q: a service is defined, viaService must be true", version)
+		}
+		if command == "" {
+			t.Fatalf("version %q: no install command", version)
+		}
 	}
 }
 
-// TestPrivilegedCopyCommandFor_OldForkReleaseStillRefused — опознанный, но
-// слишком старый релиз форка (1.14.1-lx.8) команды не получает: его версия
-// обещает свою раскладку копии, и подменять её копией от лаунчера нельзя.
-// Здесь сохраняется прежнее поведение SPEC 137.
-func TestPrivilegedCopyCommandFor_OldForkReleaseStillRefused(t *testing.T) {
+// TestPrivilegedCopyCommandFor_OldForkReleaseGetsLauncherCommand — опознанный,
+// но «старый» релиз форка (1.14.1-lx.8) теперь получает команду: решает не
+// версия, а проба самого бинаря на `--service=copy`.
+//
+// Прежнее поведение (отказ по версии) удалено вместе с гейтом.
+func TestPrivilegedCopyCommandFor_OldForkReleaseGetsLauncherCommand(t *testing.T) {
 	dir := t.TempDir()
+	// Скрипт без поддержки --service=copy: лаунчер кладёт копию сам.
 	core := fakeCoreScript(t, dir, "sing-box", map[string]string{})
 	l := daemonServiceLayout{
 		PlistPath: filepath.Join(dir, "absent.plist"),
@@ -195,11 +214,11 @@ func TestPrivilegedCopyCommandFor_OldForkReleaseStillRefused(t *testing.T) {
 		OwnerUID:  0,
 	}
 	command, _, err := privilegedCopyCommandFor(l, core, "1.14.1-lx.8")
-	if err == nil {
-		t.Fatalf("an old numbered fork release must be refused, got command %q", command)
+	if err != nil {
+		t.Fatalf("an old fork release must still get a command: %v", err)
 	}
-	if command != "" {
-		t.Fatalf("command must be empty for an old fork release, got %q", command)
+	if command == "" {
+		t.Fatal("command must not be empty for an old fork release")
 	}
 }
 

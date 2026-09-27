@@ -84,30 +84,17 @@ func buildDaemonPanel(ac *core.AppController, win fyne.Window, onPaired func()) 
 	// update service», а для NotRunning — загрузка plist (bootstrap). На
 	// вкладке Status, куда смотрят при проблеме; строки команд добавляются
 	// ниже, когда есть ops. Скрыта при OK и без службы.
-	// CoreTooOld — подсказка обновить ядро, без команды (красная, если
-	// служба при этом Unsafe).
 	serviceIcon := widget.NewIcon(theme.WarningIcon())
 	serviceLabel := widget.NewLabel("")
 	serviceLabel.Wrapping = fyne.TextWrapWord
 	serviceBox := container.NewVBox(container.NewBorder(nil, nil, container.NewVBox(serviceIcon), nil, serviceLabel))
 	serviceBox.Hide()
 	var serviceInstallRow, serviceBootstrapRow, installStepRow fyne.CanvasObject
-	// Шаг 1 вкладки Install при ядре без root-owned копии: вместо команды —
-	// подсказка обновить ядро.
-	installCoreHint := widget.NewLabel("")
-	installCoreHint.Wrapping = fyne.TextWrapWord
-	installCoreHint.Importance = widget.WarningImportance
-	installCoreHint.Hide()
 	applyServiceState := func(snap core.DaemonUIStatus) {
 		if installStepRow != nil {
-			if snap.Service.InstallSupported() {
-				installCoreHint.Hide()
-				installStepRow.Show()
-			} else {
-				installStepRow.Hide()
-				installCoreHint.SetText(core.DaemonServiceCoreHint(snap.Service.LauncherVersion))
-				installCoreHint.Show()
-			}
+			// Команда install показывается всегда: версия и происхождение
+			// ядра не влияют на право установить службу (гейт снят).
+			installStepRow.Show()
 		}
 		text, danger := daemonServiceNoticeText(snap.Service)
 		if text == "" {
@@ -363,7 +350,6 @@ func buildDaemonPanel(ac *core.AppController, win fyne.Window, onPaired func()) 
 	installStepRow = ops.row(daemonInstallStepLabel, daemonRunAsAdminKey, ac.DaemonInstallCommand, ac.DaemonInstallOrUpdate)
 	installTab := container.NewVBox(
 		installStepRow,
-		installCoreHint,
 		wrappedLabel(daemonPairStepLabel),
 		container.NewBorder(nil, nil, nil, container.NewHBox(pairBtn, pairHelp), inviteEntry),
 		widget.NewSeparator(),
@@ -481,8 +467,7 @@ func renderDaemonStatusText(ac *core.AppController, snap core.DaemonUIStatus, in
 }
 
 // daemonServiceNoticeText — текст плашки службы по вердикту классификатора
-// (SPEC 136 §6); "" — плашки нет. danger — красная (Unsafe, в том числе
-// CoreTooOld поверх Unsafe), иначе жёлтая.
+// (SPEC 136 §6); "" — плашки нет. danger — красная (Unsafe), иначе жёлтая.
 func daemonServiceNoticeText(c core.DaemonServiceCheck) (text string, danger bool) {
 	switch c.State {
 	case core.DaemonServiceUnsafe:
@@ -502,16 +487,6 @@ func daemonServiceNoticeText(c core.DaemonServiceCheck) (text string, danger boo
 		}
 		return locale.Tf(daemonServiceOtherCoreText,
 			coreBuildLabel(c.CopyVersion, c.CopySHA256), coreBuildLabel(c.LauncherVersion, c.LauncherSHA256)), false
-	case core.DaemonServiceCoreTooOld:
-		// Команды нет: install ядра лаунчера переписал бы plist на его файл.
-		text = core.DaemonServiceCoreHint(c.LauncherVersion)
-		if c.BlockedState == core.DaemonServiceUnsafe {
-			if c.ServicePath != "" {
-				text += "\n" + locale.Tf("Service binary: %s", c.ServicePath)
-			}
-			return text, true
-		}
-		return text, false
 	case core.DaemonServiceNotRunning:
 		text = locale.T("The service is installed but not running.")
 		if c.LaunchdState != "" {

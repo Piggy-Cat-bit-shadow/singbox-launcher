@@ -124,52 +124,29 @@ func checkPrivilegedCoreCopy(l daemonServiceLayout, launcherCore string, hashes 
 // обновляет копию (SPEC 137 §5). Установлена служба демона — её команда
 // install из SPEC 136: она обновляет ту же копию и перезапускает службу.
 //
-// Иначе копию надо положить без демона. Способ зависит от того, что это за
-// ядро (SPEC 143):
+// Иначе копию надо положить без демона. Способ зависит от того, что умеет
+// само ядро (SPEC 143), а не от того, как называется его версия:
 //
-//   - ядро форка с `lxd --service=copy` и опознанной версией — копирует
-//     себя само: штатный путь SPEC 137;
-//   - опознанный релиз форка СТАРШЕ порога (например 1.14.1-lx.8) — команды
-//     нет: такой релиз копию ещё не умеет, версия форка обещает свою
-//     раскладку, и подменять её копией от лаунчера нельзя. Поведение
-//     прежнее: подсказка обновить ядро;
-//   - НЕопознанная версия (кастомная сборка без `-lx.N`, например
-//     1.15.0-jiejie-masquerade.5) — копию кладёт сам лаунчер одной
-//     проверяемой командой. Classic run не требует от ядра поддержки lxd
-//     (SPEC 143 §5.2), а версия о способностях не говорит ничего, поэтому
-//     решает проба бинаря, а не строка.
+//   - ядро форка с `lxd --service=copy` — копирует себя само: штатный путь
+//     SPEC 137. Спрашиваем бинарь, а не строку версии;
+//   - ядро без `--service=copy` — копию кладёт сам лаунчер одной проверяемой
+//     командой.
 //
-// Гейт по версии (serviceCoreGate) остаётся для пути СЛУЖБЫ: установка
-// службы — это протокол демона, и без lxd она невозможна.
+// Версия ядра здесь больше ничего не решает: гейт по версии
+// (serviceCoreGate) снят, поэтому кастомные сборки вроде
+// 1.15.0-jiejie-masquerade.5 и неразбираемые строки («unknown», пусто)
+// проходят наравне с пронумерованными релизами форка.
 func privilegedCopyCommandFor(l daemonServiceLayout, launcherCore, launcherVersion string) (command string, viaService bool, err error) {
 	viaService = daemonServiceDefined(l)
 	if viaService {
-		// Служба установлена: её install — единственный корректный путь,
-		// и он действительно требует lxd у ядра.
-		if err := serviceCoreGate(launcherVersion); err != nil {
-			return "", true, err
-		}
+		// Служба установлена: её install — единственный корректный путь.
 		return daemonServiceCommand(launcherCore, daemonInstallArgs()...), true, nil
 	}
-	// Опознанный релиз форка не старше порога — штатный путь SPEC 137: ядро
-	// копирует себя само (`lxd --service=copy`). Гейт по версии здесь и есть
-	// доказательство способности: порог `minCoreForRootOwnedService` введён
-	// именно как «первое ядро форка, чей lxd умеет --service=copy».
-	if serviceCoreGate(launcherVersion) == nil {
-		return daemonServiceCommand(launcherCore, "lxd", "--service=copy"), false, nil
-	}
-	// Версия опознана, но старше порога: команды нет (прежнее поведение) —
-	// версия форка обещает свою раскладку копии.
-	if _, recognized := parseCoreBuild(launcherVersion); recognized {
-		return "", false, &serviceCoreTooOldError{version: launcherVersion}
-	}
-	// Версия не опознана — кастомная сборка. Classic TUN не требует lxd, а
-	// версия о способностях не говорит: спрашиваем сам бинарь. Умеет
-	// копировать себя — его штатная команда; нет — копию кладём сами.
+	// Умеет копировать себя — его штатная команда; нет — копию кладём сами.
 	if coreSupportsServiceCopy(launcherCore) {
 		return daemonServiceCommand(launcherCore, "lxd", "--service=copy"), false, nil
 	}
-	debuglog.DebugLog("privilegedCopyCommandFor: core %q has an unrecognized version %q and cannot copy itself; using the launcher install command", launcherCore, launcherVersion)
+	debuglog.DebugLog("privilegedCopyCommandFor: core %q (version %q) cannot copy itself; using the launcher install command", launcherCore, launcherVersion)
 	return rootCopyInstallCommand(launcherCore, l.CorePath), false, nil
 }
 

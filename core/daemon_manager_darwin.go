@@ -224,17 +224,22 @@ func (ac *AppController) DaemonUninstallService(keepCopy, purge bool) DaemonRunR
 
 // DaemonCopyOnly — `lxd --service=copy` (копия для старта с TUN, службы
 // нет) в Terminal.
+//
+// Гейта версии ядра нет: любое ядро лаунчера — включая кастомные сборки и
+// неразбираемые версии — получает команду.
 func (ac *AppController) DaemonCopyOnly() DaemonRunResult {
-	err := serviceCoreGate(ac.launcherCoreVersion())
-	return ac.runDaemonOpInTerminal(DaemonOpCopy, daemonServiceCommand(ac.FileService.SingboxPath, "lxd", "--service=copy"), err)
+	return ac.runDaemonOpInTerminal(DaemonOpCopy, daemonServiceCommand(ac.FileService.SingboxPath, "lxd", "--service=copy"), nil)
 }
 
-// runDaemonOpInTerminal — общий путь операций macOS: гейт версии ядра →
-// подсказка без команды, иначе Terminal с командой.
+// runDaemonOpInTerminal — общий путь операций macOS: Terminal с командой.
+// gateErr оставлен параметром ради вызывающих, которые ещё передают вердикт
+// гейта; гейт снят (serviceCoreGate всегда nil), поэтому непустая ошибка
+// больше не появляется. Если она всё же придёт, показываем её как настоящую
+// ошибку операции, а не как «обновите ядро».
 func (ac *AppController) runDaemonOpInTerminal(op DaemonServiceOp, command string, gateErr error) DaemonRunResult {
 	r := DaemonRunResult{Op: op}
 	if gateErr != nil {
-		r.CoreHint = DaemonServiceCoreHint(ac.launcherCoreVersion())
+		r.Err = gateErr
 		return r
 	}
 	r.InTerminal = true

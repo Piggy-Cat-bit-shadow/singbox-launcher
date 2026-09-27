@@ -4,11 +4,9 @@ package core
 
 import (
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
-	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/lxdclient"
 )
 
@@ -61,75 +59,69 @@ func TestDaemonServiceProcessVerdict(t *testing.T) {
 	expect(t, nr, DaemonServiceNotRunning)
 }
 
-// TestServiceCoreVersionGate — сравнение версий ядра форка и граница
-// «ядро умеет root-owned копию» (minCoreForRootOwnedService = lx.12):
-// номер lx числом, пре-релиз ниже релиза той же базы (но rc порогового
-// lx.12 гейт проходит), неразборчивая версия — не умеет.
-func TestServiceCoreVersionGate(t *testing.T) {
-	for _, tc := range []struct {
-		a, b string
-		want int
-	}{
-		{"1.14.1-lx.12-rc1", "1.14.1-lx.8", 1},
-		{"1.14.1-lx.10", "1.14.1-lx.9", 1},
-		{"1.14.1-lx.12-rc1", "1.14.1-lx.12", -1},
-		{"1.14.1-lx.12-rc.1", "1.14.1-lx.12-rc.2", -1},
-		{"1.14.1-lx.11", "1.14.1-lx.11", 0},
-		{"v1.14.1-lx.11", "1.14.1-lx.11", 0},
-		{"1.15.0-lx.1", "1.14.1-lx.40", 1},
-		{"1.14.0-lx.40", "1.14.1-lx.1", -1},
-	} {
-		a, okA := parseCoreBuild(tc.a)
-		b, okB := parseCoreBuild(tc.b)
-		if !okA || !okB {
-			t.Fatalf("parse %q=%v, %q=%v", tc.a, okA, tc.b, okB)
+// TestServiceCoreVersionGateRemoved — гейт по версии ядра снят намеренно:
+// право установить службу больше НЕ зависит от того, как называется версия
+// ядра.
+//
+// Раньше здесь проверялось обратное — что разбор `-lx.N` и порог
+// minCoreForRootOwnedService отсекают кастомные сборки. Теперь такой
+// арифметики в продукте нет вовсе (parseCoreBuild/compareCoreBuilds удалены
+// вместе с гейтом), поэтому тест фиксирует новое поведение: ЛЮБАЯ строка
+// версии, включая пустую и неразбираемую, проходит гейт команд службы.
+//
+// Версия остаётся полезной только для показа и для сравнения ядра лаунчера с
+// ядром демона — как информация, а не как граница допуска.
+func TestServiceCoreVersionGateRemoved(t *testing.T) {
+	versions := []string{
+		// Реальные пользовательские сборки — раньше именно они отвергались.
+		"1.15.0-jiejie-masquerade.5",
+		"1.15.0-jiejie-masquerade.4",
+		"1.15.0-custom",
+		"1.16.0-dev",
+		"1.16.0-nightly",
+		"testing",
+		"main",
+		"git-abcdef",
+		"dirty",
+		"unknown",
+		"custom-build",
+		"jiejie",
+		"",
+		// Прежние пронумерованные релизы — раньше одни проходили, другие нет.
+		"1.14.1-lx.8",
+		"1.14.1-lx.12",
+		"1.14.2-lx.2",
+		"1.14.2-lx.4",
+		"1.15.0-lx.1",
+		// Апстрим без поддержки lxd: лаунчер не гадает, ядро ответит само.
+		"1.14.1",
+		"1.16.0",
+		"1.14.1-lx.",
+		"1.14.1-lx.12x",
+		"v-local-test",
+	}
+	for _, v := range versions {
+		if err := serviceCoreGate(v); err != nil {
+			t.Fatalf("serviceCoreGate(%q) = %v, want nil: no core version may be refused service installation", v, err)
 		}
-		if got := compareCoreBuilds(a, b); got != tc.want {
-			t.Fatalf("compare(%s, %s) = %d, want %d", tc.a, tc.b, got, tc.want)
+		c := DaemonServiceCheck{State: DaemonServiceStale, LauncherVersion: v}
+		if !c.InstallSupported() {
+			t.Fatalf("InstallSupported() = false for version %q: the Install step must always be offered", v)
 		}
-		if got := compareCoreBuilds(b, a); got != -tc.want {
-			t.Fatalf("compare(%s, %s) = %d, want %d", tc.b, tc.a, got, -tc.want)
+		if !c.NeedsInstall() {
+			t.Fatalf("NeedsInstall() = false for a stale service with version %q", v)
 		}
 	}
-	cases := map[string]bool{
-		"1.14.1-lx.8":       false,
-		"1.14.1-lx.10":      false,
-		"1.14.1-lx.11-rc1":  false,
-		"1.14.1-lx.11":      false, // ранняя раскладка — Unsafe (legacy)
-		"1.14.1-lx.12-rc1":  true,
-		"1.14.1-lx.12-rc.2": true,
-		"1.14.1-lx.12":      true,
-		"v1.14.1-lx.12":     true,
-		"1.14.0-lx.40":      false,
-		"1.15.0-lx.1":       true,
-		"1.14.1":            false, // апстрим: lxd нет вовсе
-		"unknown":           false, // dev-сборка
-		"unnamed-dev":       false,
-		"v-local-test":      false,
-		"1.14.1-lx.":        false,
-		"1.14.1-lx.12x":     false,
-		"":                  false,
+
+	// И «пустой» ядро тоже допускается — версия не читается, бинаря нет,
+	// но решение об установке от этого не меняется.
+	if err := serviceCoreGate(""); err != nil {
+		t.Fatalf("serviceCoreGate(\"\") = %v, want nil", err)
 	}
-	if runtime.GOOS == "windows" {
-		// Порог Windows — 1.14.2-lx.2 (служба SCM, SPEC 141 §6.2); его rc
-		// гейт проходит.
-		cases = map[string]bool{
-			"1.14.1-lx.13":     false,
-			"1.14.2-lx.1":      false,
-			"1.14.2-lx.2-rc1":  true,
-			"1.14.2-lx.2-rc.1": true,
-			"1.14.2-lx.2":      true,
-			"1.15.0-lx.1":      true,
-			"unknown":          false,
-			"":                 false,
+	// Подсказки «обновите ядро» больше нет: пустая строка вместо текста.
+	for _, v := range versions {
+		if hint := DaemonServiceCoreHint(v); hint != "" {
+			t.Fatalf("DaemonServiceCoreHint(%q) = %q, want empty: the core-version hint is gone", v, hint)
 		}
-	}
-	for version, want := range cases {
-		if got := coreSupportsRootOwnedCopy(version); got != want {
-			t.Fatalf("coreSupportsRootOwnedCopy(%q) = %v, want %v", version, got, want)
-		}
-	}
-	if !coreSupportsRootOwnedCopy(constants.RequiredCoreVersion) {
-		t.Fatalf("the pinned core %s must support the root-owned copy", constants.RequiredCoreVersion)
 	}
 }

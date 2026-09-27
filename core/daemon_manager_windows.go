@@ -297,12 +297,8 @@ func daemonServiceStatusCode(binary string) (int, error) {
 // классификатора.
 func (ac *AppController) DaemonInstallOrUpdate() DaemonRunResult {
 	r := DaemonRunResult{Op: DaemonOpInstall}
-	version := ac.launcherCoreVersion()
-	if err := serviceCoreGate(version); err != nil {
-		r.CoreHint = DaemonServiceCoreHint(version)
-		debuglog.WarnLog("daemon service: install: %v", err)
-		return r
-	}
+	// Гейта версии нет: команда install доступна для любого ядра лаунчера.
+	_ = ac.launcherCoreVersion()
 	core := ac.FileService.SingboxPath
 	r.Command = DaemonCommand{Binary: core, Args: daemonInstallArgs()}
 	invite, err := ac.daemonInvitePath()
@@ -386,17 +382,12 @@ func waitDaemonServiceRunning(timeout time.Duration) {
 }
 
 // DaemonFreshInvite — `lxd client add --name <клиент> --invite-out <файл>`
-// (копия, если CopyUsable, иначе ядро лаунчера — тогда гейт версии) под
-// runas → код 0: сопряжение по файлу, как у install.
+// (копия, если CopyUsable, иначе ядро лаунчера) под runas → код 0:
+// сопряжение по файлу, как у install. Версия ядра не проверяется.
 func (ac *AppController) DaemonFreshInvite() DaemonRunResult {
 	r := DaemonRunResult{Op: DaemonOpFreshInvite, Command: ac.freshInviteCommand()}
-	if r.Command.Binary == ac.FileService.SingboxPath {
-		version := ac.launcherCoreVersion()
-		if err := serviceCoreGate(version); err != nil {
-			debuglog.WarnLog("daemon service: fresh invite: %v", err)
-			return DaemonRunResult{Op: DaemonOpFreshInvite, CoreHint: DaemonServiceCoreHint(version)}
-		}
-	}
+	// Гейта версии нет: приглашение можно запросить любым ядром лаунчера.
+	_ = ac.FileService.SingboxPath
 	invite, err := ac.daemonInvitePath()
 	if err != nil {
 		r.Err = err
@@ -435,16 +426,12 @@ func (ac *AppController) DaemonUninstallService(keepCopy, purge bool) DaemonRunR
 	return r
 }
 
-// DaemonCopyOnly — гейт версии → `lxd --service=copy` ядром лаунчера под
-// runas (classic с правами, службы нет, SPEC 141 §8), warnings сайдкара.
+// DaemonCopyOnly — `lxd --service=copy` ядром лаунчера под runas
+// (classic с правами, службы нет, SPEC 141 §8), warnings сайдкара.
 func (ac *AppController) DaemonCopyOnly() DaemonRunResult {
 	r := DaemonRunResult{Op: DaemonOpCopy}
-	version := ac.launcherCoreVersion()
-	if err := serviceCoreGate(version); err != nil {
-		r.CoreHint = DaemonServiceCoreHint(version)
-		debuglog.WarnLog("daemon service: copy: %v", err)
-		return r
-	}
+	// Гейта версии нет: copy доступен для любого ядра лаунчера.
+	_ = ac.launcherCoreVersion()
 	r.Command = DaemonCommand{Binary: ac.FileService.SingboxPath, Args: []string{"lxd", "--service=copy"}}
 	code, err := runDaemonCommandElevated(r.Command)
 	if applyElevatedOutcome(&r, code, err) {

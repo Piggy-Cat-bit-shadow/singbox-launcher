@@ -426,12 +426,18 @@ examples lives in [API.md](API.md); this section is about the principles.
   stubs.
 - **The core must support `lxd`** (`with_lx_command`). The pinned
   `constants.RequiredCoreVersion` includes that build (the current pin lives in `internal/constants/constants.go`).
-  Check the feature boundary by running the binary (`sing-box lxd --help`), not by
-  release number.
-- **The root-owned copy needs core lx.12+.** With a launcher core below lx.12 (or of
-  an unknown version) the launcher offers no install or copy command at all — such a
-  core would point the plist back at the launcher's own file (lx.11: at the legacy
-  layout) — and shows "Update the core first: Local tab → Download/Reinstall" instead
-  (`service_state` `core_too_old`).
+  **A release name is not a trust boundary:** the launcher does not check the
+  version string, the tag, or whether the core is a numbered `sing-box-lx`
+  release before offering the service commands. Bring your own core
+  (`1.15.0-jiejie-masquerade.5`, `custom-build`, `unknown`, an empty version) and
+  Install / Update / Pair / Start all stay available. Whether a given binary
+  really implements the `lxd` protocol is decided by *running* it: a core without
+  the subcommand answers `unknown command "lxd"` and that real error is shown.
+  To inspect the feature boundary by hand, run `sing-box lxd --help`.
+- **Daemon installation uses the bundled launcher core.** The daemon page never
+  downloads or substitutes an upstream release, and a version difference between
+  the launcher core and the installed service copy is *status*, not an error: it
+  is reported ("Service core differs from launcher core") together with the
+  Install / Update command that aligns the copy with the launcher's core.
 - **A remote config has no Clash API** by design — hence the gRPC sources for both
   the node list and the profiler.

@@ -23,14 +23,12 @@ import (
 )
 
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
-const (
-	// Подсказка вместо команды install/copy, пока ядро лаунчера не умеет
-	// root-owned копию (serviceCoreGate).
-	// Кнопка ядра на вкладке Local: «Download v…», когда ядра нет, и
-	// «Reinstall v…», когда стоит другая версия (core_dashboard_tab_status.go).
-	daemonServiceCoreTooOldText  = "The launcher core (%s) is older than %s and cannot install a root-owned service. Update the core first: Local tab → Download/Reinstall v%s, then install or update the service."
-	daemonServiceCoreUnknownText = "The launcher core (%s) is not a numbered sing-box-lx release, so the launcher cannot confirm it installs a root-owned service. Update the core first: Local tab → Download/Reinstall v%s, then install or update the service."
-)
+//
+// Текстов «ядро не подходит для службы / обновите ядро» здесь больше нет:
+// лаунчер не проверяет происхождение и версию ядра, а сразу показывает
+// команду install. Прежние ключи (daemonServiceCoreTooOldText,
+// daemonServiceCoreUnknownText) удалены вместе с гейтом — см.
+// serviceCoreGate.
 
 // Менеджер службы демона `sing-box lxd`, общая часть: снимок состояния для
 // UI и Debug API, сопряжение, подготовка конфига к доставке демону, сборка
@@ -325,7 +323,7 @@ func (ac *AppController) DaemonStatusSnapshot() DaemonUIStatus {
 		status.StateDir = passport.StateDir
 		addDaemonProcessVerdict(&status.Service, passport, cfg.Addr)
 	}
-	if status.Service.NeedsInstall() || status.Service.NeedsBootstrap() || status.Service.State == DaemonServiceCoreTooOld {
+	if status.Service.NeedsInstall() || status.Service.NeedsBootstrap() {
 		debuglog.DebugLog("DaemonStatusSnapshot: daemon service %s: %s", status.Service.State, status.Service.Detail)
 	}
 	return status
@@ -370,18 +368,17 @@ func (ac *AppController) launcherCoreVersion() string {
 	return version
 }
 
-// DaemonServiceCoreHint — подсказка вместо команды install/copy, пока ядро
-// лаунчера версии version не умеет root-owned копию: обновить ядро кнопкой
-// на вкладке Local (закреплённая версия), затем установить службу. Без
-// команды.
+// DaemonServiceCoreHint — пустая строка: подсказки «обновите ядро» больше
+// нет.
+//
+// Функция сохранена как no-op, потому что её зовут несколько платформ и UI
+// в ветках, которые раньше означали «команды install нет». Теперь команда
+// есть всегда: версия ядра не влияет на право установить службу. Если
+// ядро действительно не умеет `lxd`, это выяснится при запуске команды и
+// пользователь увидит настоящую ошибку ядра, а не догадку лаунчера.
 func DaemonServiceCoreHint(version string) string {
-	if _, ok := parseCoreBuild(version); ok {
-		return locale.Tf(daemonServiceCoreTooOldText, version, minCoreForRootOwnedService, constants.RequiredCoreVersion)
-	}
-	if version == "" {
-		version = "?"
-	}
-	return locale.Tf(daemonServiceCoreUnknownText, version, constants.RequiredCoreVersion)
+	debuglog.DebugLog("daemon service: no core-version gate; install command is available for core version %q", version)
+	return ""
 }
 
 // DaemonUnsafeServiceNotice — условие модального предупреждения SPEC 136 §6:
@@ -621,7 +618,7 @@ func (ac *AppController) notifyDaemonServiceAfterCoreUpdate() {
 		debuglog.InfoLog("notifyDaemonServiceAfterCoreUpdate: the service already runs this core")
 		return
 	case command == "":
-		// CoreTooOld: скачанное ядро копию не умеет — команды нет.
+		// Команды нет: службы нет вовсе либо она уже на этом ядре.
 		debuglog.WarnLog("notifyDaemonServiceAfterCoreUpdate: core updated; the daemon service is %s (%s)", check.State, check.Detail)
 		return
 	}
@@ -635,8 +632,7 @@ func (ac *AppController) notifyDaemonServiceAfterCoreUpdate() {
 }
 
 // daemonCoreUpdatedCommand — команда диалога после скачивания ядра; "" —
-// диалога нет: службы нет, копия уже это ядро (OK) или ядро лаунчера не
-// умеет root-owned копию (CoreTooOld).
+// диалога нет: службы нет, либо копия уже это ядро (OK).
 func daemonCoreUpdatedCommand(check DaemonServiceCheck, launcherCore string) string {
 	if !check.NeedsInstall() {
 		return ""
@@ -691,16 +687,19 @@ func (ac *AppController) DaemonRepairCommand() string {
 // перезапускается). Никаких параметров: install сам выбирает loopback-порт
 // (19091+, либо адрес существующей установки), генерирует секрет, включает
 // mTLS и печатает приглашение. Адрес лаунчер узнаёт из приглашения при
-// сопряжении (PairDaemonWithInvite сохраняет invite.Addr). Ядро ниже
-// minCoreForRootOwnedService (или неизвестной версии) — ошибка
-// *serviceCoreTooOldError вместо команды: его install записал бы в plist
-// файл пользователя.
+// сопряжении (PairDaemonWithInvite сохраняет invite.Addr).
+//
+// Версия ядра на команду не влияет: гейт снят (serviceCoreGate), поэтому
+// кастомные и неразбираемые версии получают ту же команду, что и
+// пронумерованные релизы форка. Команда исполняется под sudo и по-прежнему
+// кладёт root-owned копию.
 func (ac *AppController) DaemonInstallCommand() (string, error) {
 	return daemonInstallCommandFor(ac.FileService.SingboxPath, ac.launcherCoreVersion())
 }
 
 // daemonInstallCommandFor — команда install для ядра лаунчера launcherCore
-// версии launcherVersion, через гейт serviceCoreGate.
+// версии launcherVersion. Гейт serviceCoreGate всегда пропускает: второй
+// параметр оставлен ради вызывающих и логов.
 func daemonInstallCommandFor(launcherCore, launcherVersion string) (string, error) {
 	if err := serviceCoreGate(launcherVersion); err != nil {
 		return "", err

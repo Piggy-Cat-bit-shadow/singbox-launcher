@@ -23,12 +23,6 @@ import (
 // Всё без прав: DACL службы даёт Authenticated Users чтение конфигурации и
 // статуса (SPEC 141 §3 п. 1a).
 
-// minCoreForRootOwnedService — первое ядро со службой Windows (SPEC 103
-// форка, линия v1.14.2): `--service=install|copy`, --invite-out, набор с
-// libcronet.dll. Пре-релиз порогового релиза (rc.1) гейт проходит: разбор
-// сравнивает базу и lx.N, пре-релиз ядра лаунчера не понижает.
-const minCoreForRootOwnedService = "1.14.2-lx.2"
-
 // daemonServiceCorePath — главный файл набора защищённой копии.
 func daemonServiceCorePath() string {
 	return filepath.Join(platform.PrivilegedCopyDir(), platform.PrivilegedCopyName)
