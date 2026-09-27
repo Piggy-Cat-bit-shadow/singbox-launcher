@@ -199,6 +199,8 @@ func export10Source(src state.Source) (Source10, bool) {
 		Skip:               cloneSkip(src.Skip),
 		MaxNodes:           src.MaxNodes,
 		Update:             cloneUpdateSpec(src.Update),
+		InputKind:          src.InputKind,
+		LocalFilename:      src.LocalFilename,
 
 		// Свёртка — той же формой, что в состоянии (контракт 1.1.78);
 		// прежние `fold` + `fold_tag` писатель не пишет.
@@ -206,6 +208,19 @@ func export10Source(src state.Source) (Source10, bool) {
 	}
 
 	if src.Kind != state.SourceKindSubscription {
+		return out, true
+	}
+
+	// Локальный снимок: состав ЕДЕТ в файл.
+	//
+	// У подписки nodes — кэш выдачи провайдера, он принадлежит машине и
+	// наполнится первым же обновлением на приёмнике, поэтому обнуляется ниже.
+	// У снимка провайдера нет: обновляться неоткуда, а пустой URL не даст
+	// импортёру ничего восстановить. Не вывези мы состав — импорт создал бы
+	// пустой источник, который нечем наполнить, и это была бы молчаливая
+	// потеря данных в пользовательском бэкапе.
+	if state.SubscriptionInputKindOf(&src) == state.SubscriptionInputLocalSnapshot {
+		out.Disabled = exportDisabledMap(src)
 		return out, true
 	}
 

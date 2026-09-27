@@ -271,6 +271,40 @@ The fields were also not projected into the DTO: `toSubscriptionDTO` now emits
 `input_kind`, `can_refresh` and `filename`, without which the Swift row would fall
 back to "remote" and render an empty URL. *IPC, test*
 
+### 4.1 The portable backup format dropped local snapshots
+
+Found by a pre-existing reflection test (`TestSource10CoversStateSourceKeys`) that
+requires every `state.Source` field to either travel in the `1.0` backup format or
+be declared an exception with a reason. It failed on the two new keys, which
+exposed three linked problems rather than one:
+
+1. **The keys were not in the file.** `input_kind` and `local_filename` are
+   properties of the *source*, not of the machine that made the backup. Without
+   them a snapshot would arrive at the destination as an ordinary subscription
+   with an empty URL — a source the UI would offer to refresh with no provider to
+   ask. They are now exported and imported; an empty `input_kind` still reads as
+   `remote`, so files written before this feature are unaffected.
+
+2. **The nodes were not in the file.** This was the more serious half. The export
+   deliberately drops `nodes[]` for subscriptions, because for a *remote* source
+   that array is a machine-local provider cache which refills on the first update
+   at the destination. A snapshot has no provider: the drop would have produced a
+   source that can never be filled. Local snapshots therefore export their nodes,
+   while remote subscriptions keep dropping their cache (both behaviours are now
+   pinned by tests).
+
+3. **The import ignored them anyway.** `import10` handled
+   `SourceKindSubscription` on the assumption that `nodes[]` is always empty in
+   the file, routing only the disabled marks into `PendingDisabled`. Even with
+   export fixed, a restore would have silently discarded the nodes. The local
+   snapshot branch now imports its node list the same way a folder imports its
+   members.
+
+The failure mode was the worst kind — a backup that looks restored and is not.
+Round-tripping a snapshot through export → parse → import into an empty state now
+preserves the nodes, the filename and the non-refreshability, and a remote
+subscription still exports without its cache. *test*
+
 ---
 
 ## 5. Swift side — what each control does
@@ -333,6 +367,7 @@ Not implemented, and not implied by anything above:
 | Sub: malformed input leaves no source | ✅ | ✅ | ✅ |
 | Sub: DTO fields for the row | ✅ | ✅ | ✅ |
 | Sub: config ownership preserved | ✅ | — | — |
+| Sub: survives a backup/restore round trip (nodes + kind) | ✅ | — | ✅ |
 | Both: dispatch reachable over IPC | ✅ | ✅ | ✅ |
 | Both: Swift covered + budgeted | ✅ | — | ✅ |
 
@@ -340,4 +375,5 @@ Reproduce the automated half:
 
 ```
 go test ./backend/service/ -run 'TestCoreImport|TestLocalImport|TestServerDispatchesImportMethods|TestSwiftClientCoversEveryMethod|TestSwiftTimeoutBudgets' -count=1
+go test ./core/backup/ -run 'TestSource10CoversStateSourceKeys|TestExportCarriesLocalSnapshot|TestLocalSnapshotSurvivesRestore|TestExportStillDropsRemoteSubscriptionCache' -count=1
 ```

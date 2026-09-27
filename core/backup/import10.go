@@ -127,6 +127,10 @@ func decode10Source(in Source10, ruleGroup func(node int) bool) (decodedSource, 
 		Skip:               cloneSkip(in.Skip),
 		MaxNodes:           in.MaxNodes,
 		Update:             cloneUpdateSpec(in.Update),
+		// Пустое значение читается как remote (state.SubscriptionInputKindOf),
+		// поэтому файлы, записанные до появления снимков, не меняют смысла.
+		InputKind:     in.InputKind,
+		LocalFilename: in.LocalFilename,
 		// Свёртка: только `replace` формы состояния. Прежняя пара `fold` +
 		// `fold_tag` не читается (контракт 1.1.79): это неизвестные ключи.
 		Replace: import10Replace(in),
@@ -152,6 +156,35 @@ func decode10Source(in Source10, ruleGroup func(node int) bool) (decodedSource, 
 
 	switch in.Kind {
 	case state.SourceKindSubscription:
+		// Локальный снимок: состав ЕДЕТ в файле и должен приехать обратно.
+		//
+		// У обычной подписки nodes[] в файле пусты (кэш выдачи провайдера
+		// принадлежит машине), и импорт только копит отметки выключенных узлов
+		// до первого достоверного fetch. У снимка провайдера нет и обновляться
+		// неоткуда, поэтому его состав надо принять как есть — иначе
+		// восстановление даёт пустой источник, который нечем наполнить.
+		if state.SubscriptionInputKindOf(&src) == state.SubscriptionInputLocalSnapshot {
+			for _, n := range in.Nodes {
+				member := cloneNode(n)
+				// Коды деградации — производная тела, посчитанная чужим
+				// реестром; читаются и отбрасываются молча, как у узлов папки
+				// (PARSING_PRINCIPLES §6).
+				if member.Kind != state.SourceKindAuto {
+					member.Warnings = nil
+				}
+				ms, mw := normalizeImportedSections(member.Sections, n.Tag)
+				warns = append(warns, mw...)
+				ms, mk := dropSectionsForForeignNode(n.Kind, ms, n.Tag)
+				warns = append(warns, mk...)
+				member.Sections = ms
+				member.NormalizeNodeSections()
+				src.Nodes = append(src.Nodes, member)
+			}
+			// Отметки выключенных узлов: узлы уже приехали, ждать fetch нечего.
+			src.PendingDisabled = disabledTags10(in.Disabled)
+			return decodedSource{Kind: decodedSubscription, Src: src, FullSettings: true}, warns, true
+		}
+
 		// Отметки выключенных узлов: у только что импортированной подписки
 		// nodes[] пусты (кэш в файл не едет), поэтому отметки ждут первого
 		// достоверного fetch в PendingDisabled — тот же вердикт O2, что у

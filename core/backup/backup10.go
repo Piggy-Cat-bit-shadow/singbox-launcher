@@ -129,6 +129,15 @@ type Source10 struct {
 	Skip               []map[string]string         `json:"skip,omitempty"`
 	MaxNodes           int                         `json:"max_nodes,omitempty"`
 	Update             *state.UpdateSpec           `json:"update,omitempty"`
+	// InputKind — откуда взялся состав: `remote` (провайдер по URL) или
+	// `local_snapshot` (импорт из файла). Едет в файл, потому что это
+	// свойство самого источника, а не машины: без него снимок на приёмнике
+	// стал бы обычной подпиской с пустым URL — то есть источником, который
+	// «можно обновить», но обновлять неоткуда. Пустое значение = remote,
+	// поэтому старые файлы читаются как раньше.
+	InputKind state.SubscriptionInputKind `json:"input_kind,omitempty"`
+	// LocalFilename — исходное имя файла снимка, только для показа.
+	LocalFilename string `json:"local_filename,omitempty"`
 
 	// ── формой контракта ──
 	//
