@@ -139,3 +139,9 @@ func LatencyColor(ms int) color.Color {
 		return Danger()
 	}
 }
+
+// RowActiveBackground — фон строки узла, используемого ядром.
+func RowActiveBackground() color.Color { return currentPalette().RowActiveBackground }
+
+// RowSelectedBackground — фон строки, отмеченной пользователем.
+func RowSelectedBackground() color.Color { return currentPalette().RowSelectedBackground }

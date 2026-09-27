@@ -67,7 +67,7 @@ func NewCard(title, description string, trailing fyne.CanvasObject, body fyne.Ca
 	c.border.StrokeColor = Border()
 	c.border.StrokeWidth = 1
 
-	c.pad = &paddedBox{l: CardPadding, t: CardPaddingY, r: CardPadding, b: CardPaddingY}
+	c.pad = &paddedBox{L: CardPadding, T: CardPaddingY, R: CardPadding, B: CardPaddingY}
 	c.object = container.NewStack(c.bg, c.border, container.New(c.pad, container.NewVBox(items...)))
 	return c
 }
@@ -122,7 +122,7 @@ func (c *ClickableCard) CreateRenderer() fyne.WidgetRenderer {
 
 	// Сводная карточка ниже обычной: внутри две строки текста, и большие
 	// поля делали её похожей на пустую панель.
-	content := container.New(&paddedBox{l: CardPadding, t: CardPaddingY, r: CardPadding, b: CardPaddingY},
+	content := container.New(&paddedBox{L: CardPadding, T: CardPaddingY, R: CardPadding, B: CardPaddingY},
 		container.NewVBox(inner...))
 	// Слои: фон → граница → содержимое. Прозрачного слоя сверху НЕТ.
 	return widget.NewSimpleRenderer(container.NewStack(c.bg, c.border, content))
@@ -202,7 +202,7 @@ func NewCardRow(title, subtitle string, trailing fyne.CanvasObject, onTapped fun
 	}
 
 	var body fyne.CanvasObject = container.NewBorder(nil, nil, nil, trailing, text)
-	inner := container.New(&paddedBox{l: SpaceM, t: SpaceS, r: SpaceM, b: SpaceS}, body)
+	inner := container.New(&paddedBox{L: SpaceM, T: SpaceS, R: SpaceM, B: SpaceS}, body)
 
 	// Правило наложения (SPEC 145 fix-wave §10).
 	//

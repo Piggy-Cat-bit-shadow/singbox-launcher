@@ -127,10 +127,12 @@ func (s *Sidebar) build() {
 		main = append(main, row.object)
 	}
 
-	body := container.NewVBox(main...)
+	// Точные промежутки: NavItemGap между пунктами, NavSectionGap перед
+	// подписью группы. Раньше всё это определял theme padding.
+	body := NewVStack(NavItemGap, main...)
 	if len(pinned) > 0 {
 		body.Add(widget.NewSeparator())
-		body.Add(container.NewVBox(pinned...))
+		body.Add(NewVStack(NavItemGap, pinned...))
 	}
 	s.body = body
 }
@@ -157,12 +159,12 @@ func (s *Sidebar) CreateRenderer() fyne.WidgetRenderer {
 	edge.SetMinSize(fyne.NewSize(1, 0))
 
 	identity := container.New(&fixedHeight{min: SidebarIdentityHeight},
-		container.New(&paddedBox{l: SidebarPadding + SpaceS, t: 0, r: SidebarPadding, b: 0},
+		container.New(&paddedBox{L: SidebarPadding + SpaceS, T: 0, R: SidebarPadding, B: 0},
 			container.NewCenter(container.NewHBox(sidebarAppIcon(), hSpacer(SpaceS), sidebarIdentityLabel()))))
 
-	scroll := container.NewVScroll(container.NewVBox(
+	scroll := container.NewVScroll(NewVStack(SidebarTopGap,
 		identity,
-		container.New(&paddedBox{l: SidebarPadding, t: 0, r: SidebarPadding, b: SidebarPadding}, s.body),
+		container.New(&PaddedBox{L: SidebarPadding, T: 0, R: SidebarPadding, B: SidebarPadding}, s.body),
 	))
 
 	content := container.NewBorder(nil, s.footerRow(), nil, edge, scroll)
@@ -178,7 +180,7 @@ func (s *Sidebar) footerRow() fyne.CanvasObject {
 	// Отсутствие truncation здесь принципиально: раньше подпись статуса
 	// обрезалась и «Disconnected» превращался в «Disc…».
 	s.statusLabel.Wrapping = fyne.TextWrapWord
-	return container.New(&paddedBox{l: SidebarPadding + SpaceS, t: SpaceM, r: SidebarPadding, b: SpaceM},
+	return container.New(&paddedBox{L: SidebarPadding + SpaceS, T: SpaceM, R: SidebarPadding, B: SpaceM},
 		container.NewHBox(container.NewCenter(dotBox), s.statusLabel))
 }
 
@@ -236,6 +238,7 @@ func newNavRow(e NavEntry, s *Sidebar) *navRow {
 	r.bg.Hide()
 
 	r.icon = widget.NewIcon(tintIcon(e.Icon, TextSecondary()))
+	iconBox := container.New(&fixedSizeBox{w: NavIconSize, h: NavIconSize}, r.icon)
 
 	r.label = widget.NewLabel(e.Title)
 	r.label.Alignment = fyne.TextAlignLeading
@@ -244,13 +247,15 @@ func newNavRow(e NavEntry, s *Sidebar) *navRow {
 	r.label.Wrapping = fyne.TextWrapWord
 	r.label.Importance = widget.LowImportance
 
-	body := container.NewBorder(nil, nil, container.NewHBox(r.icon, r.label), nil)
+	// Точный промежуток иконка↔текст: раньше его задавал theme padding, и
+	// токен NavIconGap не действовал.
+	body := container.NewBorder(nil, nil, NewHStack(NavIconGap, iconBox, r.label), nil)
 
 	holder := &navRowHolder{row: r}
 	holder.ExtendBaseWidget(holder)
 	r.holder = holder
 
-	inner := container.New(&paddedBox{l: SpaceM, t: SpaceXS, r: SpaceM, b: SpaceXS}, body)
+	inner := container.New(&paddedBox{L: SpaceM, T: SpaceXS, R: SpaceM, B: SpaceXS}, body)
 	stack := container.NewStack(r.bg, inner)
 	holder.object = container.NewStack(stack, holder)
 
@@ -351,7 +356,7 @@ func navSectionLabel(text string) fyne.CanvasObject {
 		top = 0
 	}
 	return container.New(&minHeight{min: NavSectionLabelHeight, max: NavSectionLabelHeight},
-		container.New(&paddedBox{l: NavSectionLabelIndent, t: top, r: SidebarPadding, b: 0},
+		container.New(&paddedBox{L: NavSectionLabelIndent, T: top, R: SidebarPadding, B: 0},
 			container.NewCenter(container.NewHBox(t))))
 }
 
@@ -451,12 +456,15 @@ func (m *minHeight) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(w, m.clamp(h))
 }
 
-// paddedBox — отступы по сторонам.
-type paddedBox struct{ l, t, r, b float32 }
+// PaddedBox — отступы по сторонам, экспортирован для страниц вне design.
+type PaddedBox struct{ L, T, R, B float32 }
 
-func (p *paddedBox) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	w := size.Width - p.l - p.r
-	h := size.Height - p.t - p.b
+// paddedBox — внутреннее имя для краткости внутри пакета.
+type paddedBox = PaddedBox
+
+func (p *PaddedBox) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	w := size.Width - p.L - p.R
+	h := size.Height - p.T - p.B
 	if w < 0 {
 		w = 0
 	}
@@ -464,12 +472,12 @@ func (p *paddedBox) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 		h = 0
 	}
 	for _, o := range objects {
-		o.Move(fyne.NewPos(p.l, p.t))
+		o.Move(fyne.NewPos(p.L, p.T))
 		o.Resize(fyne.NewSize(w, h))
 	}
 }
 
-func (p *paddedBox) MinSize(objects []fyne.CanvasObject) fyne.Size {
+func (p *PaddedBox) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	var min fyne.Size
 	for _, o := range objects {
 		s := o.MinSize()
@@ -480,5 +488,5 @@ func (p *paddedBox) MinSize(objects []fyne.CanvasObject) fyne.Size {
 			min.Height = s.Height
 		}
 	}
-	return fyne.NewSize(min.Width+p.l+p.r, min.Height+p.t+p.b)
+	return fyne.NewSize(min.Width+p.L+p.R, min.Height+p.T+p.B)
 }

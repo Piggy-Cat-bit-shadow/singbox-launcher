@@ -30,6 +30,7 @@ import (
 	"singbox-launcher/internal/platform"
 	"singbox-launcher/internal/textnorm"
 	"singbox-launcher/ui/components"
+	"singbox-launcher/ui/design"
 )
 
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
@@ -960,10 +961,12 @@ func CreateProxyListPanel(ac *core.AppController, scope services.ProxyScope) *Pr
 		delayBackground.Refresh()
 
 		// Обновляем фон
+		// Семантические роли вместо жёстких светлых значений: в тёмной теме
+		// прежние цвета давали светлую плашку под светлым текстом.
 		if proxyInfo.Name == ac.GetActiveProxyName() {
-			background.FillColor = color.NRGBA{R: 144, G: 238, B: 144, A: 128} // Зеленый для активного
+			background.FillColor = design.RowActiveBackground()
 		} else if _, sel := selectedProxyNames[proxyInfo.Name]; sel {
-			background.FillColor = color.NRGBA{R: 135, G: 206, B: 250, A: 128} // Синий для выделенных (один или несколько)
+			background.FillColor = design.RowSelectedBackground()
 		} else {
 			background.FillColor = color.Transparent
 		}
@@ -2003,16 +2006,20 @@ func CreateProxyListPanel(ac *core.AppController, scope services.ProxyScope) *Pr
 	)
 	topControls := container.NewVBox(groupRow, widget.NewSeparator(), buttonsRow)
 
-	// Обертываем status label в контейнер с горизонтальной прокруткой
-	// Scroll контейнер ограничит ширину label и добавит прокрутку при необходимости
-	statusScroll := container.NewScroll(status)
-	statusScroll.Direction = container.ScrollBoth
-	// Ограничиваем только высоту, ширина будет ограничена родительским Border контейнером
-	statusScroll.SetMinSize(fyne.NewSize(0, status.MinSize().Height))
+	// Строка статуса — одна строка с многоточием и полным текстом в подсказке.
+	//
+	// Раньше здесь стоял Scroll со ScrollBoth: длинный статус («No machine
+	// connected. Pick one…») уезжал по горизонтали и обрезался о край окна,
+	// а прокрутка одной строки всё равно не помогает — пользователь не
+	// догадывается, что текст надо тянуть. Многоточие + tooltip честнее:
+	// видно, что текст есть, и он доступен целиком.
+	status.Truncation = fyne.TextTruncateEllipsis
+	statusRow := container.New(&design.PaddedBox{L: design.SpaceS, T: design.SpaceXS, R: design.SpaceS, B: design.SpaceXS}, status)
+	fynewidget.SetToolTipSafe(status, status.Text)
 
 	contentContainer := container.NewBorder(
 		topControls,
-		statusScroll,
+		statusRow,
 		nil,
 		nil,
 		scrollContainer,

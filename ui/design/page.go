@@ -39,7 +39,7 @@ func NewPageHeader(title, subtitle string, trailing fyne.CanvasObject) *PageHead
 		trailing = canvas.NewRectangle(nil)
 	}
 	h := &PageHeader{trailing: container.NewCenter(trailing)}
-	h.object = container.New(&paddedBox{l: ContentPaddingH, t: ContentPaddingV, r: ContentPaddingH, b: 0},
+	h.object = container.New(&paddedBox{L: ContentPaddingH, T: ContentPaddingV, R: ContentPaddingH, B: 0},
 		container.NewBorder(nil, nil, nil, h.trailing, titleBox))
 	return h
 }
@@ -90,7 +90,7 @@ func NewSectionCard(title, description string, body fyne.CanvasObject) *SectionC
 	c.object = container.NewStack(
 		bg,
 		border,
-		container.New(&paddedBox{l: CardPadding, t: CardPadding, r: CardPadding, b: CardPadding}, inner),
+		container.New(&paddedBox{L: CardPadding, T: CardPadding, R: CardPadding, B: CardPadding}, inner),
 	)
 	return c
 }

@@ -77,6 +77,14 @@ type Palette struct {
 	// Shadow — подложка под карточками. Почти прозрачная: используется как
 	// смещение на 1–2 unit, а не как blur.
 	Shadow color.NRGBA
+
+	// RowActiveBackground — фон строки узла, который сейчас используется
+	// ядром. Семантическая роль, а не «светло-зелёный»: в тёмной теме фон
+	// обязан быть тёмным, иначе строка выглядит подсвеченной маркером.
+	RowActiveBackground color.NRGBA
+	// RowSelectedBackground — фон строки, отмеченной пользователем
+	// (множественный выбор перед групповой операцией).
+	RowSelectedBackground color.NRGBA
 }
 
 // lightPalette — светлая схема.
@@ -118,6 +126,11 @@ var lightPalette = Palette{
 	Focus:     color.NRGBA{R: 0x00, G: 0x7A, B: 0xFF, A: 0x66},
 	ScrollBar: color.NRGBA{R: 0xC5, G: 0xC5, B: 0xCA, A: 0xFF},
 	Shadow:    color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x0F},
+
+	// Спокойные оттенки вместо прежних насыщенных (144/238/144 и 135/206/250):
+	// строка — фон для текста, а не акцент.
+	RowActiveBackground:   color.NRGBA{R: 0xDF, G: 0xF3, B: 0xE1, A: 0xFF},
+	RowSelectedBackground: color.NRGBA{R: 0xDF, G: 0xEA, B: 0xFB, A: 0xFF},
 }
 
 // darkPalette — тёмная схема.
@@ -153,6 +166,10 @@ var darkPalette = Palette{
 	Focus:     color.NRGBA{R: 0x0A, G: 0x84, B: 0xFF, A: 0x80},
 	ScrollBar: color.NRGBA{R: 0x48, G: 0x48, B: 0x4C, A: 0xFF},
 	Shadow:    color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x33},
+
+	// В тёмной теме те же роли темнее фона карточки, а не светлее.
+	RowActiveBackground:   color.NRGBA{R: 0x1E, G: 0x33, B: 0x25, A: 0xFF},
+	RowSelectedBackground: color.NRGBA{R: 0x1F, G: 0x2C, B: 0x42, A: 0xFF},
 }
 
 // PaletteFor возвращает палитру для варианта темы.

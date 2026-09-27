@@ -233,13 +233,15 @@ func (t *Theme) Size(name fyne.ThemeSizeName) float32 {
 		return 5
 
 	case theme.SizeNamePadding:
-		// Базовая плотность. Дефолтные 4 дают «тесные» контролы; 8 —
-		// десктопная плотность современных клиентов.
-		return 8
+		// Базовая плотность промежутков в стандартных контейнерах Fyne
+		// (VBox/HBox). Было 8 — на десктопе это читается как планшет:
+		// каждый VBox добавлял по 8 unit, а страницы вдобавок вставляли
+		// явные распоры, давая двойной зазор. 5 — десктопная плотность.
+		return 5
 	case theme.SizeNameInnerPadding:
-		return 8
+		return 5
 	case theme.SizeNameLineSpacing:
-		return 4
+		return 2
 	}
 	return t.base.Size(name)
 }
