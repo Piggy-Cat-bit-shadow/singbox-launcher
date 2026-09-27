@@ -5,6 +5,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"singbox-launcher/core"
@@ -62,7 +63,7 @@ func NewHomePage(ac *core.AppController, controller *core.AppController) *HomePa
 	})
 
 	hero := h.buildHero()
-	runtimeCard := h.buildRuntimeCard()
+	runtimeRows := h.buildRuntimeCard()
 	proxiesCard := design.NewClickableCard(
 		locale.T("Proxies"), locale.T("Nodes of the local core"),
 		func() { h.goTo(RouteProxies) })
@@ -72,10 +73,22 @@ func NewHomePage(ac *core.AppController, controller *core.AppController) *HomePa
 
 	// Карточки разделены ровно одним интервалом: раньше между ними было
 	// «пусто» больше, чем внутри карточек, и страница выглядела разряженной.
+	// Шестерёнка настроек ядра — в правом верхнем углу карточки Runtime.
+	//
+	// Это восстановленный вход из прежней панели Core: движок (classic/daemon)
+	// и сопряжение меняются именно там, и пользователь ищет их рядом со
+	// сведениями о ядре, а не в Diagnostics.
+	gear := design.IconAction(theme.SettingsIcon(),
+		locale.T("Core settings: engine and daemon pairing"),
+		func() { OpenCoreSettingsAction(h.ac) })
+
+	runtimeBox := design.NewCard(locale.T("Core"), "", gear,
+		container.NewVBox(runtimeRows...))
+
 	h.root = container.NewVBox(
 		hero,
 		design.SpacerV(design.CardGap),
-		design.NewCard("", "", nil, runtimeCard).Object(),
+		runtimeBox.Object(),
 		design.SpacerV(design.CardGap),
 		proxiesCard,
 		design.SpacerV(design.CardGap),
@@ -174,7 +187,7 @@ func (h *HomePage) buildHero() fyne.CanvasObject {
 }
 
 // buildRuntimeCard — сведения о ядре, конфиге и бэкенде.
-func (h *HomePage) buildRuntimeCard() fyne.CanvasObject {
+func (h *HomePage) buildRuntimeCard() []fyne.CanvasObject {
 	versionRow := design.NewCardRow(locale.T("Core"), h.coreVersionText(), nil, nil)
 	configRow := design.NewCardRow(locale.T("Configuration"), h.configPathText(), nil, nil)
 
@@ -189,7 +202,7 @@ func (h *HomePage) buildRuntimeCard() fyne.CanvasObject {
 	for _, r := range h.runtimeRows {
 		rows = append(rows, r.Object())
 	}
-	return container.NewVBox(rows...)
+	return rows
 }
 
 // Refresh обновляет проекцию состояния ядра. Виджеты не пересоздаются.

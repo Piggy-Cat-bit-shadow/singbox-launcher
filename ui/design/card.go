@@ -38,10 +38,14 @@ type Card struct {
 // шеврон). Тело может быть nil.
 func NewCard(title, description string, trailing fyne.CanvasObject, body fyne.CanvasObject) *Card {
 	items := make([]fyne.CanvasObject, 0, 4)
-	if title != "" {
-		head := container.NewHBox(CardTitle(title))
+	if title != "" || trailing != nil {
+		// trailing — действие в правом верхнем углу карточки (например,
+		// шестерёнка настроек ядра). Оно лежит в шапке, а НЕ поверх тела:
+		// прозрачный слой поверх содержимого перехватывал бы клики у
+		// контролов внутри карточки.
+		var head fyne.CanvasObject = CardTitle(title)
 		if trailing != nil {
-			head = container.NewBorder(nil, nil, nil, trailing, CardTitle(title))
+			head = container.NewBorder(nil, nil, nil, container.NewCenter(trailing), CardTitle(title))
 		}
 		items = append(items, head)
 	}
@@ -63,7 +67,7 @@ func NewCard(title, description string, trailing fyne.CanvasObject, body fyne.Ca
 	c.border.StrokeColor = Border()
 	c.border.StrokeWidth = 1
 
-	c.pad = &paddedBox{l: CardPadding, t: CardPadding, r: CardPadding, b: CardPadding}
+	c.pad = &paddedBox{l: CardPadding, t: CardPaddingY, r: CardPadding, b: CardPaddingY}
 	c.object = container.NewStack(c.bg, c.border, container.New(c.pad, container.NewVBox(items...)))
 	return c
 }
@@ -118,7 +122,7 @@ func (c *ClickableCard) CreateRenderer() fyne.WidgetRenderer {
 
 	// Сводная карточка ниже обычной: внутри две строки текста, и большие
 	// поля делали её похожей на пустую панель.
-	content := container.New(&paddedBox{l: CardPadding, t: SpaceM, r: CardPadding, b: SpaceM},
+	content := container.New(&paddedBox{l: CardPadding, t: CardPaddingY, r: CardPadding, b: CardPaddingY},
 		container.NewVBox(inner...))
 	// Слои: фон → граница → содержимое. Прозрачного слоя сверху НЕТ.
 	return widget.NewSimpleRenderer(container.NewStack(c.bg, c.border, content))

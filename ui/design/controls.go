@@ -32,17 +32,16 @@ import (
 func PrimaryAction(label string, onTapped func()) *widget.Button {
 	b := widget.NewButton(label, onTapped)
 	b.Importance = widget.HighImportance
-	// Компактная высота: дефолтная кнопка Fyne с нашей темой (padding 8)
-	// выглядит «блоком». 38 — высота кнопок в десктопных клиентах.
-	b.Resize(fyne.NewSize(b.MinSize().Width, PrimaryButtonHeight))
+	// Компактный размер: дефолтная кнопка Fyne с нашей темой (padding 8)
+	// выглядит «блоком». Высота и минимальная ширина — из токенов, чтобы
+	// Start и Stop не «дёргались» при смене подписи.
+	w := b.MinSize().Width
+	if w < PrimaryButtonMinWidth {
+		w = PrimaryButtonMinWidth
+	}
+	b.Resize(fyne.NewSize(w, PrimaryButtonHeight))
 	return b
 }
-
-// PrimaryButtonHeight — высота главной кнопки страницы.
-//
-// Вынесена в токен: Start/Stop и прочие primary-действия обязаны совпадать по
-// высоте, иначе ряд «заголовок + кнопка» разъезжается.
-const PrimaryButtonHeight float32 = 38
 
 // SecondaryAction — обычная кнопка: заметная, но не конкурирующая с главной.
 func SecondaryAction(label string, onTapped func()) *widget.Button {
@@ -78,6 +77,9 @@ func DangerAction(label string, icon fyne.Resource, onTapped func()) *widget.But
 func IconAction(icon fyne.Resource, tooltip string, onTapped func()) *widget.Button {
 	b := widget.NewButtonWithIcon("", icon, onTapped)
 	b.Importance = widget.LowImportance
+	// Квадрат фиксированного размера: icon-кнопка не должна растягиваться по
+	// ширине заголовка карточки.
+	b.Resize(fyne.NewSize(IconButtonSize, IconButtonSize))
 	if tooltip != "" {
 		fynewidget.SetToolTipSafe(b, tooltip)
 	}
