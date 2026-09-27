@@ -1048,6 +1048,19 @@ final class AppModel {
     /// count as busy.
     var coreIsTransitioning: Bool { core?.state.isTransitioning ?? false }
 
+    /// True while a proxy switch is in flight, for any node.
+    ///
+    /// Switches are serialised: two concurrent `switch_proxy` calls would race
+    /// for the same selection, so no row offers a switch while one is running.
+    var proxySwitchInFlight: Bool {
+        guard let pending else { return false }
+        if case .switchingProxy = pending { return true }
+        return false
+    }
+
+    /// True while the whole group is being measured.
+    var proxyGroupTestInFlight: Bool { pending == .testingGroup }
+
     /// True while any core-affecting command is in flight.
     var coreOperationBusy: Bool {
         if pending != nil { return true }

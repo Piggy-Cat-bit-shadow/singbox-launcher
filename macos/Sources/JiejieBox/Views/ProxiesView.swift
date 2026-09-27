@@ -22,7 +22,10 @@ struct ProxiesView: View {
     let model: AppModel
 
     var body: some View {
-        PanelScaffold(model: model, title: "Proxies", onBack: { model.goBack() }) {
+        // scrollsContent: false — this page's node list is the scroll owner.
+        // The scaffold would otherwise wrap it in a second vertical ScrollView.
+        PanelScaffold(model: model, title: "Proxies", onBack: { model.goBack() },
+                      scrollsContent: false) {
             VStack(alignment: .leading, spacing: 0) {
                 // The toolbar only appears once there is something to control:
                 // with no groups or a dead backend, an empty picker and a
@@ -39,6 +42,7 @@ struct ProxiesView: View {
 
                 body_
                     .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .task {
@@ -326,6 +330,11 @@ struct ProxiesView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The page's single vertical scroll owner.
+    ///
+    /// The frame is bounded by the scaffold (maxHeight: .infinity inside a
+    /// fixed-size panel), so the list scrolls rather than growing the window.
+    /// `basedOnSize` means a short list does not bounce.
     private var nodeList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
@@ -335,9 +344,8 @@ struct ProxiesView: View {
             }
             .padding(.bottom, 4)
         }
-        // The panel is capped at 640pt overall, so the list scrolls rather than
-        // pushing the menu bar window off screen.
-        .frame(minHeight: 120, maxHeight: 340)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Node row
@@ -353,6 +361,22 @@ struct ProxiesView: View {
         let selected = node.selected
         let switching = model.pending == .switchingProxy(node.name)
         let testing = model.pending == .testingProxy(node.name)
+
+        // Availability is decided HERE, not left to the model's withPending
+        // guard. A busy row disables BOTH of its actions — half a row staying
+        // live mid-operation is inconsistent and invites a click that can only
+        // be rejected with "another operation is running".
+        //
+        // Across rows the rules differ by operation: switches are serialised
+        // (two would race for the same selection), while measurements are
+        // independent and stay usable unless the whole group is being tested.
+        //
+        // `withPending` remains the second line of defence for a rapid click
+        // that slips through; it is no longer the only thing preventing one.
+        let rowBusy = switching || testing
+        let selectDisabled = rowBusy || model.proxyGroupTestInFlight || model.proxySwitchInFlight
+        let testDisabled = rowBusy || model.proxyGroupTestInFlight
+
         return ActionRow(actions: [
             RowAction(
                 id: "select-\(node.id)",
@@ -360,6 +384,7 @@ struct ProxiesView: View {
                 subtitle: node.type,
                 value: nil,
                 isPending: switching,
+                isDisabled: selectDisabled,
                 leading: AnyView(
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 12))
@@ -378,13 +403,14 @@ struct ProxiesView: View {
                 value: node.delayLabel,
                 valueColor: delayColor(node),
                 isPending: testing,
+                isDisabled: testDisabled,
                 weight: 1,
                 help: node.isMeasured
                     ? "Measure this node again."
                     : "Measure this node's latency.",
                 action: { Task { await model.testProxy(node) } }
             ),
-        ], disabled: model.pending != nil && !testing)
+        ])
     }
 
     private func delayColor(_ node: ProxyNode) -> Color {

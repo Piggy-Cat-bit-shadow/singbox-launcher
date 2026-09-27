@@ -10,12 +10,10 @@
 package service
 
 import (
-	"os"
 	"strconv"
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/platform"
 )
 
 // MaintenanceResult reports what a rebuild or refresh actually did.
@@ -76,6 +74,13 @@ func (b *Backend) ReloadConfig() (MaintenanceResult, error) {
 		}
 	}
 
+	// The build succeeded, so the launcher now owns the config on disk. Record
+	// that before returning: the marker is what makes a LATER reload possible,
+	// and it is written only here, after a real build.
+	if err := b.markConfigManaged(); err != nil {
+		debuglog.WarnLog("backend: reload succeeded but provenance could not be recorded: %v", err)
+	}
+
 	// The core's view of the config may have changed (existence, node count),
 	// so republish the state alongside the result.
 	b.EmitCoreState()
@@ -85,20 +90,6 @@ func (b *Backend) ReloadConfig() (MaintenanceResult, error) {
 		OK:      true,
 		Message: "Configuration rebuilt from the current state.",
 	}, nil
-}
-
-// configIsRebuildable reports whether a rebuild has the state it needs.
-//
-// Rebuilding is a replay of the wizard state, so without that state there is
-// nothing to replay — the config on disk is then the only source of truth and
-// must not be overwritten from an empty one.
-func (b *Backend) configIsRebuildable() bool {
-	if b.ac == nil || b.ac.FileService == nil {
-		return false
-	}
-	statePath := platform.GetWizardStatePath(b.ac.FileService.Layout.Data)
-	_, err := os.Stat(statePath)
-	return err == nil
 }
 
 // UpdateSubscriptions refreshes every enabled subscription source.

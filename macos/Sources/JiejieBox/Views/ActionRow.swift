@@ -30,6 +30,15 @@ struct RowAction: Identifiable {
     var role: MenuRowRole
     /// True while this particular action is in flight.
     var isPending: Bool
+    /// Disables THIS action only.
+    ///
+    /// A row can have actions with different availability: while one node is
+    /// being tested, its own select action must not be clickable either — the
+    /// pair is inconsistent mid-measurement — yet other rows stay usable. A
+    /// row-wide flag cannot express that, and relying on the model's
+    /// `withPending` guard instead means the user clicks a live-looking control
+    /// and is told an operation is already running.
+    var isDisabled: Bool
     /// Leading content shown instead of title/subtitle when present.
     var leading: AnyView?
     /// Fraction of the row this action occupies. The primary action should
@@ -48,6 +57,7 @@ struct RowAction: Identifiable {
         showsChevron: Bool = false,
         role: MenuRowRole = .normal,
         isPending: Bool = false,
+        isDisabled: Bool = false,
         leading: AnyView? = nil,
         weight: CGFloat = 1,
         help: String? = nil,
@@ -62,6 +72,7 @@ struct RowAction: Identifiable {
         self.showsChevron = showsChevron
         self.role = role
         self.isPending = isPending
+        self.isDisabled = isDisabled
         self.leading = leading
         self.weight = weight
         self.help = help
@@ -92,6 +103,10 @@ private struct ActionRowButton: View {
 
     /// Stable per-action hover key, so the tint survives a body re-evaluation.
     private var hover: HoverState { HoverStore.box(for: "actionrow:\(action.id)") }
+
+    /// The action is usable only when neither the row nor the action itself is
+    /// disabled.
+    private var isEnabled: Bool { !disabled && !action.isDisabled }
 
     var body: some View {
         Button(action: action.action) {
@@ -148,8 +163,8 @@ private struct ActionRowButton: View {
         }
         .buttonStyle(MenuRowButtonStyle())
         .layoutPriority(action.weight)
-        .onHover { hover.isHovering = $0 && !disabled }
-        .disabled(disabled)
+        .onHover { hover.isHovering = $0 && !isEnabled }
+        .disabled(!isEnabled)
         .help(action.help ?? "")
         .accessibilityElement(children: .combine)
         .accessibilityLabel(action.title)

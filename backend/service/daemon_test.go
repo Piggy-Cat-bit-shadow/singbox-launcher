@@ -3,10 +3,13 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"singbox-launcher/backend/protocol"
+	"singbox-launcher/internal/platform"
 )
 
 // TestDaemonStatusShape — the Daemon screen is driven entirely by this payload,
@@ -287,5 +290,97 @@ func TestDaemonRepairMatchesInstallFollowUp(t *testing.T) {
 		t.Errorf("install follow_up = %q but repair follow_up = %q; "+
 			"the guided sequence would be inconsistent",
 			install.FollowUp, repair.FollowUp)
+	}
+}
+
+// TestExternalConfigStaysUnrebuildableAfterAddSubscription — the exact
+// regression the provenance marker exists to prevent.
+//
+// state.json cannot be the ownership signal: AddSubscription calls state.New()
+// and creates one the first time a source is added. A check based on "does
+// state.json exist" therefore flips from correctly refusing to wrongly
+// rebuilding, and a reload would replay an almost-empty state over a config
+// somebody else wrote.
+//
+// Ownership is recorded by an explicit marker instead, so an external config
+// acquires a state file while remaining refused.
+func TestExternalConfigStaysUnrebuildableAfterAddSubscription(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// A config on disk that the launcher never built, plus no state.
+	configPath := b.ac.FileService.ConfigPath
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	external := []byte(`{"outbounds":[{"type":"selector","tag":"proxy-out","outbounds":["N"],"default":"N"}],"route":{"final":"proxy-out"}}`)
+	if err := os.WriteFile(configPath, external, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if b.configIsRebuildable() {
+		t.Fatal("an external config with no marker must not be rebuildable")
+	}
+
+	// AddSubscription creates state.json via state.New().
+	if _, err := b.AddSubscription("P", "https://p.example/s"); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+	statePath := platform.GetWizardStatePath(b.ac.FileService.Layout.Data)
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("the subscription manager did not create a state file: %v", err)
+	}
+
+	// The state file now exists, and the config must STILL be refused: its
+	// existence is not evidence that the launcher owns the config.
+	if b.configIsRebuildable() {
+		t.Error("an external config became rebuildable merely because AddSubscription " +
+			"created a state file; a reload would overwrite a config we do not own")
+	}
+
+	// And a reload must refuse rather than attempt the overwrite.
+	_, err := b.ReloadConfig()
+	pe, ok := err.(*protocol.Error)
+	if !ok {
+		t.Fatalf("error is %T, want *protocol.Error (config must not be rebuilt)", err)
+	}
+	if pe.Code != "not_rebuildable" {
+		t.Errorf("code = %q, want not_rebuildable", pe.Code)
+	}
+
+	// The external file is untouched.
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(external) {
+		t.Error("the external config was modified by a refused reload")
+	}
+}
+
+// TestMarkerGrantsOwnership — the positive half: once the launcher has built the
+// config, rebuilding it is exactly what the user is asking for.
+func TestMarkerGrantsOwnership(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// The fixture writes a config we did not build, so it is refused first —
+	// this is the state the marker has to change.
+	if b.configIsRebuildable() {
+		t.Fatal("precondition: the fixture config has no marker and must be refused")
+	}
+
+	if err := b.markConfigManaged(); err != nil {
+		t.Fatalf("markConfigManaged: %v", err)
+	}
+	if !b.configIsRebuildable() {
+		t.Error("a marked config must be rebuildable")
+	}
+
+	// An unreadable marker means unknown ownership, which must refuse rather
+	// than assume the permissive answer.
+	if err := os.WriteFile(b.provenancePath(), []byte("{ not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if b.configIsRebuildable() {
+		t.Error("a corrupt marker must refuse, not assume ownership")
 	}
 }

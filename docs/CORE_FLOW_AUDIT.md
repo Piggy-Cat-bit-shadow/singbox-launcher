@@ -18,9 +18,9 @@ Backend methods chain-verified:            10
 Proxy state paths audited:                 10
 Core state paths audited:                   5
 
-Confirmed bugs:                             7
-  P0 fixed:                                 3
-  P1 fixed:                                 3
+Confirmed bugs:                            10
+  P0 fixed:                                 4
+  P1 fixed:                                 5
   P2 fixed:                                 1
 Remaining known core-flow bugs:             0
 ```
@@ -173,6 +173,76 @@ somewhere informative rather than nowhere.
 replaces a dead end with an accurate explanation, which is the honest outcome for
 a config the product does not own.
 
+### BUG-8 — Config provenance was inferred from file existence (P0)
+
+**Root cause**: `configIsRebuildable` returned true when `state.json` existed.
+That is not an ownership signal. `AddSubscription` calls `state.New()` and
+creates a state file the first time a source is added, so an **externally managed
+config acquires a state file** the moment the user subscribes — and the check
+flips from correctly refusing to wrongly rebuilding. A reload would then replay
+an almost-empty state over a config the launcher never wrote.
+
+**Reproduced**: external config, no state → `not_rebuildable` (correct); add one
+subscription → `rebuild_failed` (misjudged as rebuildable).
+
+**Fix**: ownership is recorded explicitly in a marker beside config.json
+(`.jiejiebox-config.json`), written **only** after the launcher has actually built
+the config. The guard has three cases:
+
+| Case | Decision |
+|---|---|
+| No config.json | allowed — a rebuild is how the file comes into existence |
+| config.json + our marker | allowed — the launcher built it |
+| config.json, no marker | **refused** — someone else owns this file |
+
+Modification times were explicitly rejected: a hand edit makes the config newer
+than the state, and a rebuild makes it newer still, so mtime says nothing about
+ownership.
+
+**Regression check**: `TestExternalConfigStaysUnrebuildableAfterAddSubscription`
+drives the exact scenario end to end and asserts the external file is
+byte-identical afterwards. `TestMarkerGrantsOwnership` covers the positive path
+and that a corrupt marker refuses rather than assuming the permissive answer.
+
+---
+
+### BUG-9 — Proxies nested a vertical ScrollView inside another (P1)
+
+**Root cause**: `PanelScaffold` always wrapped content in a `ScrollView`, and
+`ProxiesView` wrapped its node list in another. The inner view therefore had an
+unbounded height, so it never scrolled itself; the wheel behaved differently
+depending on which view was under the pointer, and the edges double-bounced.
+
+**Fix**: `PanelScaffold` takes `scrollsContent: Bool`. Proxies passes false and
+its node list is the page's single vertical scroll owner, bounded by the
+scaffold's fixed-height frame. The header stays outside every scroll view, so
+Back and Quit remain reachable. Verified: exactly one real `ScrollView` per page.
+
+---
+
+### BUG-10 — A busy proxy row left both its actions clickable (P1)
+
+**Root cause**: `ActionRow` had only a row-wide `disabled`, and the proxy row
+passed `disabled: pending != nil && !testing` — so while a node was being
+measured, **both** its actions stayed live. The second click was then rejected by
+the model's `withPending` guard, and the user saw "Another operation is still
+running" for a control that looked available.
+
+**Fix**: `RowAction` gained `isDisabled`, so availability is per action. A busy
+row disables both of its actions; across rows the rules follow the operation —
+switches are serialised (two would race for the same selection), measurements are
+independent and stay usable unless the whole group is tested.
+
+| State | select | measure |
+|---|---|---|
+| idle | enabled | enabled |
+| this node testing / switching | disabled | disabled |
+| another node testing | enabled | enabled |
+| another node switching | disabled | enabled |
+| Test All | disabled | disabled |
+
+`withPending` is retained as the second line of defence rather than the only one.
+
 ---
 
 ## 3. Front-to-back chain verification
@@ -250,11 +320,11 @@ than appearing to succeed.
 | 4 | Enter Proxies | loads groups then nodes |
 | 5 | Change group | reloads that group's nodes |
 | 6 | Search nodes | filters locally, count reads "N of M", clearable |
-| 7 | Test one node | measures only that node; selection unchanged (measured) |
+| 7 | Test one node | measures only that node; selection unchanged (measured); both of that row's actions disabled while it runs (BUG-10) |
 | 8 | Test all nodes | sequential, per-row spinners |
 | 9 | Switch node | response re-read from the core (measured) |
 | 10 | Update subscriptions | per-source result; `proxies_changed` |
-| 11 | Reload config | guarded; explains when unrebuildable |
+| 11 | Reload config | provenance-guarded: refuses a config we did not build (BUG-8) |
 | 12 | Return to Proxies | groups reload before nodes (BUG-5) |
 | 13 | Home summary | from the snapshot, not page visits |
 | 14 | Error readability | real backend message (BUG-1) |
@@ -266,10 +336,17 @@ than appearing to succeed.
 
 **None in the core flow.** Two things are recorded as behaviour rather than bugs:
 
-1. **Reload Config cannot rebuild a hand-written configuration.** A rebuild
-   replays wizard state; a config with no state file is not rebuildable. The UI
-   now says so precisely instead of failing obscurely. Making it rebuildable is a
-   product decision, not a defect.
+1. **Reload Config deliberately cannot rebuild a hand-written configuration.**
+   A rebuild replays wizard state, so a config the launcher did not build is
+   refused — now determined by an explicit ownership marker rather than by
+   whether a state file happens to exist (BUG-8). Making an external config
+   rebuildable is a product decision, not a defect.
+
+   Open question for the owner: the Proxies screen still *offers* Reload
+   unconditionally, because rebuildability is not exposed to the frontend. The
+   backend refuses correctly and explains why, so this is a UX nit rather than a
+   correctness issue — exposing a `rebuildable` flag would let the button be
+   hidden or replaced.
 2. **The manual GUI walkthrough is still unrun.** Every claim above is static
    analysis plus IPC exercised against the packaged helper with a stub Clash API.
    Layout, hover states and click feel need a human.

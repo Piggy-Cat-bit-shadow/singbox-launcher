@@ -27,6 +27,16 @@ struct PanelScaffold<Content: View>: View {
     var onBack: (() -> Void)?
     /// Optional trailing content in the header, left of Quit.
     var headerAccessory: AnyView?
+    /// Whether the scaffold provides the vertical scroll.
+    ///
+    /// A page that owns its own scrolling list (Proxies, whose node list is the
+    /// content) must set this false. Nesting two vertical ScrollViews gives the
+    /// inner one an unbounded height so it never scrolls itself, produces double
+    /// bounce at the edges, and makes the wheel behave differently depending on
+    /// which view happens to be under the pointer.
+    ///
+    /// The invariant this exists to hold: ONE page, ONE vertical scroll owner.
+    var scrollsContent: Bool
     @ViewBuilder var content: () -> Content
 
     init(
@@ -34,24 +44,35 @@ struct PanelScaffold<Content: View>: View {
         title: String,
         onBack: (() -> Void)? = nil,
         headerAccessory: AnyView? = nil,
+        scrollsContent: Bool = true,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.model = model
         self.title = title
         self.onBack = onBack
         self.headerAccessory = headerAccessory
+        self.scrollsContent = scrollsContent
         self.content = content
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            // The header is outside any scroll view on every page, so Back and
+            // Quit can never be scrolled out of reach.
             PanelHeader(model: model, title: title, onBack: onBack, accessory: headerAccessory)
             Divider()
-            ScrollView {
+            if scrollsContent {
+                ScrollView {
+                    content()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+            } else {
+                // The page owns the scroll. It fills the remaining height, so
+                // its list has a bounded frame to scroll within.
                 content()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
     }
 }
