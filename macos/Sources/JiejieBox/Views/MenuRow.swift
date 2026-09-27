@@ -99,22 +99,31 @@ struct MenuRow<Trailing: View>: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 13))
-                        .frame(width: 18)
+                        .font(.system(size: Metrics.iconSize))
+                        .frame(width: Metrics.iconColumn)
                         .foregroundStyle(role == .destructive ? Color.red : .secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
+                        .font(Typography.rowTitle)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                         .foregroundStyle(role == .destructive ? Color.red : .primary)
                     if let subtitle {
                         Text(subtitle)
-                            .font(.caption)
+                            .font(Typography.rowSubtitle)
                             .foregroundStyle(.secondary)
+                            // Two lines, but the row does not grow to fit an
+                            // arbitrarily long message: a translated subtitle
+                            // can be much longer than the English one, and an
+                            // unbounded row makes the whole section look broken
+                            // in that language.
                             .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -122,7 +131,7 @@ struct MenuRow<Trailing: View>: View {
 
                 if let value {
                     Text(value)
-                        .font(.callout)
+                        .font(Typography.rowValue)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -132,7 +141,7 @@ struct MenuRow<Trailing: View>: View {
 
                 if showsChevron {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: Metrics.chevronSize, weight: .semibold))
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -201,7 +210,18 @@ enum Metrics {
     static let panelWidth: CGFloat = 400
 }
 
-/// A titled group of rows, drawing its own hairline separator.
+/// A titled group of rows.
+///
+/// The header is aligned to the ROW's icon column, not to the panel edge. A
+/// group label that starts further left than the icons below it reads as a
+/// stray caption; aligned to the icon column it reads as the label of that
+/// group. This is done with padding rather than a fixed frame width, so it holds
+/// at any panel size and in either language.
+///
+/// No hairline separator any more: with `Metrics.groupSpacing` larger than
+/// `Metrics.rowGap`, whitespace alone expresses the grouping. A rule between
+/// every section and around every row was most of what made the old panel look
+/// like a crowded table rather than a native menu.
 struct MenuSection<Content: View>: View {
     let title: String?
     @ViewBuilder var content: () -> Content
@@ -212,19 +232,23 @@ struct MenuSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
+        VStack(alignment: .leading, spacing: Metrics.headerToRowGap) {
             if let title {
                 Text(title)
-                    .font(.caption.weight(.semibold))
+                    .font(Typography.sectionHeader)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, Metrics.rowPaddingH)
-                    .padding(.top, 2)
+                    .textCase(nil)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, Metrics.sectionHeaderInset)
+                    .padding(.bottom, 1)
+                    .accessibilityAddTraits(.isHeader)
             }
-            VStack(spacing: 1) {
+            VStack(spacing: Metrics.rowGap) {
                 content()
             }
         }
-        .padding(.horizontal, Metrics.sectionPaddingH)
+        .padding(.horizontal, Metrics.contentInset)
     }
 }
 
@@ -250,11 +274,13 @@ struct DetailLine: View {
             // endpoint or an error message are the information, while the label
             // is a fixed caption that is meaningless when truncated.
             Text(label)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .layoutPriority(-1)
             Spacer(minLength: 8)
             Text(value)
+                .font(Typography.rowValue)
                 .foregroundStyle(tone == .error ? Color.red : Color.primary)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(3)
@@ -264,7 +290,6 @@ struct DetailLine: View {
                 // long path or error is never lost to the panel width.
                 .help(value)
         }
-        .font(.callout)
         .padding(.horizontal, Metrics.rowPaddingH)
         .padding(.vertical, 5)
     }
@@ -313,30 +338,33 @@ struct MenuPickerRow<Option: Hashable & Identifiable>: View {
             HStack(spacing: 10) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 13))
-                        .frame(width: 18)
+                        .font(.system(size: Metrics.iconSize))
+                        .frame(width: Metrics.iconColumn)
                         .foregroundStyle(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
+                        .font(Typography.rowTitle)
+                        .lineLimit(1)
                     if let subtitle {
                         Text(subtitle)
-                            .font(.caption)
+                            .font(Typography.rowSubtitle)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
                 Spacer(minLength: 8)
 
                 Text(label(selection))
-                    .font(.callout)
+                    .font(Typography.rowValue)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: Metrics.chevronSize, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
             // Same full-width hit target and height as MenuRow, so the row reads
@@ -418,25 +446,28 @@ struct MenuActionRow: View {
             HStack(spacing: 10) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 13))
-                        .frame(width: 18)
+                        .font(.system(size: Metrics.iconSize))
+                        .frame(width: Metrics.iconColumn)
                         .foregroundStyle(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
+                        .font(Typography.rowTitle)
+                        .lineLimit(1)
                     if let subtitle {
                         Text(subtitle)
-                            .font(.caption)
+                            .font(Typography.rowSubtitle)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
                 Spacer(minLength: 8)
 
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: Metrics.chevronSize, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
             // Same full-width hit target and height as MenuRow, so the row reads

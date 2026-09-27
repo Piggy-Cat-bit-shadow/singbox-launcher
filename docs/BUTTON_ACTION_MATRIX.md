@@ -147,6 +147,7 @@ things depending on the row.
 | Proxies / Core Details / Core Mode / Subscriptions / More | MenuRow | navigate | — | ✅ |
 | Reload Config | MenuRow | `reloadConfig` | `reload_config` | ✅ — shown only when `core.config_rebuildable`; otherwise a "Config Source: External" note plus **Open Config** |
 | Appearance | MenuPickerRow | `model.appearance = …` | — (UserDefaults) | ✅ |
+| Language | MenuPickerRow | `model.language.preference = …` | — (UserDefaults) | ✅ |
 | Restart Core | MenuRow | `restartCore` | `restart_core` | ✅ |
 | Auto Ping / Auto Update toggles | MenuRow + drawn switch | `setAutoPing` / `setAutoUpdateSubscriptions` | `set_auto_ping` / `set_auto_update_subscriptions` | ✅ |
 | Launch at Login | MenuRow + drawn switch | `setLaunchAtLogin` (SMAppService) | — | ✅ |

@@ -235,6 +235,19 @@ final class AppModel {
 
     private static let appearanceKey = "appearance"
 
+    /// The interface language.
+    ///
+    /// Owned here so the whole app observes one instance: the Language screen
+    /// writes it, and every view re-renders from the same value. Persistence and
+    /// resolution live in `LanguageStore`, which deliberately does not know about
+    /// the backend — language is a frontend-only preference, exactly like
+    /// appearance, so it must not grow an IPC method or a settings.json field.
+    let language = LanguageStore()
+
+    /// The language strings are currently drawn in, for non-view call sites that
+    /// need a translated string (error text, transient messages).
+    var resolvedLanguage: Localization { language.resolved }
+
     /// Launch at Login: a frontend-only preference handled by SMAppService, so
     /// the backend never learns about it.
     private(set) var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
@@ -273,7 +286,9 @@ final class AppModel {
                 ? "Launch at Login was not enabled. Approve JiejieBox in System Settings › General › Login Items."
                 : "Launch at Login is still enabled. Turn it off in System Settings › General › Login Items."
         } else {
-            showTransient(enabled ? "Launch at Login enabled." : "Launch at Login disabled.")
+            showTransient(enabled
+                ? L.launchAtLoginEnabled.tr(resolvedLanguage)
+                : L.launchAtLoginDisabled.tr(resolvedLanguage))
         }
     }
 
@@ -309,7 +324,20 @@ final class AppModel {
     enum AppearancePreference: String, CaseIterable, Identifiable {
         case system, light, dark
         var id: String { rawValue }
-        var label: String { rawValue.capitalized }
+
+        /// Localized name for the picker's row value.
+        ///
+        /// Takes the language rather than reading the environment: this is a
+        /// model type, and reaching into SwiftUI's environment from here would
+        /// make the enum untestable and couple the model to the view layer. The
+        /// view decides the language and passes it in.
+        func label(_ language: Localization) -> String {
+            switch self {
+            case .system: return L.appearanceSystem.tr(language)
+            case .light: return L.appearanceLight.tr(language)
+            case .dark: return L.appearanceDark.tr(language)
+            }
+        }
 
         var colorScheme: ColorScheme? {
             switch self {
@@ -622,7 +650,7 @@ final class AppModel {
             self.apply(list)
             if let refreshed = list.proxies.first(where: { $0.name == node.name }),
                !refreshed.isMeasured {
-                self.lastError = "\(node.label) did not respond."
+                self.lastError = "\(node.label) \(L.nodeDidNotRespond.tr(self.resolvedLanguage))"
             }
         }
     }
@@ -671,7 +699,7 @@ final class AppModel {
         await withPending(.addingSubscription, success: nil) {
             _ = try await self.client.addSubscription(name: name, url: url)
             added = true
-            self.showTransient("Subscription added.")
+            self.showTransient(L.subscriptionAdded.tr(self.resolvedLanguage))
         }
         if added { await loadSubscriptions() }
         return added
@@ -682,7 +710,7 @@ final class AppModel {
         await withPending(.savingSubscription, success: nil) {
             _ = try await self.client.updateSubscription(id: id, name: name, url: url)
             saved = true
-            self.showTransient("Subscription saved.")
+            self.showTransient(L.subscriptionSaved.tr(self.resolvedLanguage))
         }
         if saved { await loadSubscriptions() }
         return saved
@@ -701,7 +729,7 @@ final class AppModel {
         await withPending(.removingSubscription, success: nil) {
             try await self.client.removeSubscription(id: id)
             removed = true
-            self.showTransient("Subscription removed.")
+            self.showTransient(L.subscriptionRemoved.tr(self.resolvedLanguage))
         }
         if removed { await loadSubscriptions() }
         return removed
@@ -848,7 +876,7 @@ final class AppModel {
             self.daemon = try await self.client.pairDaemon(invite: invite)
             paired = self.daemon?.paired ?? false
             if paired {
-                self.showTransient("Daemon paired.")
+                self.showTransient(L.daemonPaired.tr(self.resolvedLanguage))
                 // The invite is spent; leaving the command on screen would
                 // invite the user to paste it again, which cannot work.
                 self.daemonCommand = nil
@@ -860,7 +888,7 @@ final class AppModel {
     func unpairDaemon() async {
         await withPending(.pairingDaemon, success: nil) {
             self.daemon = try await self.client.unpairDaemon()
-            self.showTransient("Pairing removed.")
+            self.showTransient(L.pairingRemoved.tr(self.resolvedLanguage))
         }
     }
 
@@ -876,7 +904,7 @@ final class AppModel {
     /// Activate daemon mode. Only offered once the daemon reports ready.
     func activateDaemonMode() async {
         guard daemon?.ready == true else {
-            lastError = "Finish the daemon setup before switching to it."
+            lastError = L.finishDaemonSetup.tr(resolvedLanguage)
             return
         }
         await setCoreMode("daemon")
@@ -942,7 +970,7 @@ final class AppModel {
         // SILENT no-op: a click that produces nothing is indistinguishable from
         // a broken button, so the reason is surfaced.
         guard pending == nil else {
-            lastError = "Another operation is still running. Wait for it to finish."
+            lastError = L.anotherOperationRunning.tr(resolvedLanguage)
             return
         }
         pending = op
@@ -1073,13 +1101,28 @@ final class AppModel {
     /// the saved preference. They can legitimately diverge — a switch can
     /// succeed while saving the preference fails — and showing the saved value
     /// as "Active" would then misdescribe what is actually running.
-    var coreModeLabel: String {
-        (core?.backend ?? "classic").capitalized
+    /// Localized name of the engine currently running.
+    ///
+    /// Not `.capitalized` on the wire value any more: "classic"/"daemon" are
+    /// protocol identifiers, and capitalizing them produced English words in a
+    /// Chinese interface.
+    func coreModeLabel(_ language: Localization) -> String {
+        engineLabel(core?.backend, language)
     }
 
     /// The saved preference, which may differ from the active engine.
-    var savedCoreModeLabel: String {
-        (settings?.core_backend_mode ?? "classic").capitalized
+    func savedCoreModeLabel(_ language: Localization) -> String {
+        engineLabel(settings?.core_backend_mode, language)
+    }
+
+    /// Engine identifiers are protocol values ("classic"/"daemon"), so they are
+    /// mapped to localized words rather than capitalized — capitalizing produced
+    /// English UI text inside a Chinese interface.
+    private func engineLabel(_ raw: String?, _ language: Localization) -> String {
+        switch raw {
+        case "daemon": return L.daemon.tr(language)
+        default: return L.classic.tr(language)
+        }
     }
 
     /// Whether JiejieBox may rebuild the config it is running on.
@@ -1095,7 +1138,7 @@ final class AppModel {
     /// should know the preference did not stick.
     var coreModePreferenceDiverged: Bool {
         guard settings != nil, core != nil else { return false }
-        return coreModeLabel != savedCoreModeLabel
+        return coreModeLabel(resolvedLanguage) != savedCoreModeLabel(resolvedLanguage)
     }
 
     /// True once the handshake succeeded and the backend is answering.
@@ -1147,20 +1190,27 @@ final class AppModel {
         return state == .stopped
     }
 
+    /// The engine actually in use, as the protocol identifier ("classic" or
+    /// "daemon").
+    ///
+    /// Exposed so views can compare against a STABLE value. Comparing rendered
+    /// labels would work in English and silently break in every other language.
+    var activeEngine: String { core?.backend ?? "classic" }
+
     /// Why the engine cannot be switched, for an inline explanation.
-    var coreModeBlockedReason: String? {
+    func coreModeBlockedReason(_ language: Localization) -> String? {
         guard let state = core?.state else { return nil }
         switch state {
         case .stopped:
             return nil
         case .running:
-            return "Stop the VPN before switching engines."
+            return L.stopVPNFromHome.tr(language)
         case .starting:
-            return "The core is starting. Wait for it to settle."
+            return L.coreStartingWait.tr(language)
         case .stopping:
-            return "The core is stopping. Wait for it to settle."
+            return L.coreStoppingWait.tr(language)
         case .error:
-            return "The core is in an error state. Restart it before switching."
+            return L.coreErrorRestart.tr(language)
         }
     }
 
@@ -1208,7 +1258,7 @@ final class AppModel {
     /// is disabled in that window, and this is the second line of defence.
     func toggleCore() async {
         guard !coreOperationBusy else {
-            lastError = "Wait for the current core operation to finish."
+            lastError = L.waitForCoreOperation.tr(resolvedLanguage)
             return
         }
         guard let state = core?.state else { return }
@@ -1303,7 +1353,7 @@ final class AppModel {
             // here keeps the process-exit callback from reporting a crash for
             // a shutdown the backend announced in advance.
             if !isQuitting {
-                lastError = "The backend is shutting down."
+                lastError = L.backendShuttingDown.tr(resolvedLanguage)
             }
         default:
             break

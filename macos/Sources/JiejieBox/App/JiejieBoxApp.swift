@@ -67,6 +67,11 @@ struct RootView: View {
         .frame(minWidth: Metrics.panelWidth, maxWidth: Metrics.panelWidth,
                minHeight: 360, maxHeight: 680)
         .preferredColorScheme(model.appearance.colorScheme)
+        // Reading `language.resolved` here is what makes the switch take effect
+        // without a relaunch: the store is @Observable, so changing the
+        // preference re-evaluates this body and re-injects the new language
+        // into every descendant.
+        .localized(model.language.resolved)
     }
 
     @ViewBuilder

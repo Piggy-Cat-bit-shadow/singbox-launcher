@@ -20,11 +20,13 @@ import SwiftUI
 
 struct ProxiesView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     var body: some View {
         // scrollsContent: false — this page's node list is the scroll owner.
         // The scaffold would otherwise wrap it in a second vertical ScrollView.
-        PanelScaffold(model: model, title: "Proxies", onBack: { model.goBack() },
+        PanelScaffold(model: model, title: L.proxies.tr(language),
+                      onBack: { model.goBack() },
                       scrollsContent: false) {
             VStack(alignment: .leading, spacing: 0) {
                 // The toolbar only appears once there is something to control:
@@ -102,22 +104,22 @@ struct ProxiesView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "square.stack.3d.up")
-                    .font(.system(size: 12))
+                    .font(Typography.badge)
                     .foregroundStyle(.secondary)
                 Text(currentGroupLabel)
-                    .font(.callout.weight(.medium))
+                    .font(Typography.rowTitle.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Typography.inlineGlyph)
                     .foregroundStyle(.secondary)
             }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(model.groups.count > 1
-              ? "Switch group. \(model.groups.count) groups available."
-              : "The active selector group.")
+              ? "\(L.switchGroupHelp.tr(language)) \(model.groups.count) \(L.groupCountHelp.tr(language))"
+              : L.activeSelectorGroup.tr(language))
     }
 
     /// A real button with its own hit area, not a floating label. Disabled with
@@ -132,10 +134,11 @@ struct ProxiesView: View {
                     ProgressView().controlSize(.mini)
                 } else {
                     Image(systemName: "bolt.horizontal")
-                        .font(.system(size: 11))
+                        .font(Typography.rowSubtitle)
                 }
-                Text(model.pending == .testingGroup ? "Testing…" : "Test All")
-                    .font(.caption.weight(.medium))
+                Text(model.pending == .testingGroup
+                     ? L.testing.tr(language) : L.testAll.tr(language))
+                    .font(Typography.rowValue.weight(.medium))
             }
             .padding(.horizontal, 9)
             .frame(height: 24)
@@ -154,14 +157,14 @@ struct ProxiesView: View {
 
     private var testAllHelp: String {
         switch model.proxyListState {
-        case .coreStopped: return "Start the core to test latency."
-        case .backendUnavailable: return "The backend is unavailable."
-        case .empty: return "This group has no nodes to test."
+        case .coreStopped: return L.coreStoppedTest.tr(language)
+        case .backendUnavailable: return L.backendUnavailableShort.tr(language)
+        case .empty: return L.noNodesToTest.tr(language)
         case .ready:
             return model.pending == nil
-                ? "Measure latency for every node in this group."
-                : "Another operation is running."
-        default: return "Nothing to test yet."
+                ? L.measureAllHelp.tr(language)
+                : L.anotherOpRunning.tr(language)
+        default: return L.nothingToTest.tr(language)
         }
     }
 
@@ -174,7 +177,8 @@ struct ProxiesView: View {
 
     private var currentGroupLabel: String {
         let group = model.groups.first { $0.name == model.selectedGroup }
-        let base = group?.label ?? (model.selectedGroup.isEmpty ? "No group" : model.selectedGroup)
+        let base = group?.label
+            ?? (model.selectedGroup.isEmpty ? L.noGroup.tr(language) : model.selectedGroup)
         guard let selected = group?.selected_display ?? group?.selected, !selected.isEmpty else {
             return base
         }
@@ -186,12 +190,12 @@ struct ProxiesView: View {
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
-            TextField("Search nodes", text: Binding(get: { model.proxySearch },
+            TextField(L.searchNodes.tr(language), text: Binding(get: { model.proxySearch },
                                                     set: { model.proxySearch = $0 }))
                 .textFieldStyle(.plain)
-                .font(.callout)
+                .font(Typography.rowValue)
             // Clearing matters on a filtered list: without it the only way back
             // to the full list is selecting and deleting the text by hand.
             if !model.proxySearch.isEmpty {
@@ -199,16 +203,16 @@ struct ProxiesView: View {
                     model.proxySearch = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Clear the search.")
+                .help(L.clearSearch.tr(language))
             }
             if !model.proxies.isEmpty {
                 Text(countLabel)
-                    .font(.caption)
+                    .font(Typography.rowSubtitle)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -230,7 +234,7 @@ struct ProxiesView: View {
     private var body_: some View {
         switch model.proxyListState {
         case .backendUnavailable:
-            BackendDownView(model: model, subject: "the proxy list")
+            BackendDownView(model: model)
 
         case .loading, .idle:
             loadingRow
@@ -238,8 +242,8 @@ struct ProxiesView: View {
         case .coreStopped:
             ProxyNotice(
                 symbol: "power",
-                title: "Core is not running",
-                detail: "Start the core to load, test and switch nodes.",
+                title: L.coreNotRunning.tr(language),
+                detail: L.coreNotRunningDetail.tr(language),
                 tone: .neutral)
 
         case .failed:
@@ -275,15 +279,15 @@ struct ProxiesView: View {
         case .noGroups:
             ProxyNotice(
                 symbol: "square.stack.3d.up.slash",
-                title: "No selector groups",
+                title: L.noSelectorGroups.tr(language),
                 detail: model.subscriptions.isEmpty
-                    ? "No proxies yet. Add a subscription first."
-                    : "The current configuration defines no selector groups.",
+                    ? L.noProxiesYet.tr(language)
+                    : L.noSelectorGroupsDetail.tr(language),
                 tone: .neutral,
                 action: model.subscriptions.isEmpty
-                    ? ("Open Subscriptions", { model.path.append(.subscriptions) })
+                    ? (L.openSubscriptions.tr(language), { model.path.append(.subscriptions) })
                     : (model.configRebuildable
-                        ? ("Reload Config", { reloadConfig() })
+                        ? (L.reloadConfigAction.tr(language), { reloadConfig() })
                         : ("Open Config", { model.revealConfig() })))
 
         case .noGroupSelected:
@@ -302,7 +306,7 @@ struct ProxiesView: View {
                     : "Update the subscriptions to fetch the current node list.",
                 tone: .neutral,
                 action: model.subscriptions.isEmpty
-                    ? ("Open Subscriptions", { model.path.append(.subscriptions) })
+                    ? (L.openSubscriptions.tr(language), { model.path.append(.subscriptions) })
                     : ("Update Subscriptions", { updateAndReload() }))
 
         case .ready:
@@ -337,8 +341,8 @@ struct ProxiesView: View {
     private var loadingRow: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text("Loading nodes…")
-                .font(.callout)
+            Text(L.loadingNodes.tr(language))
+                .font(Typography.rowValue)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
@@ -403,7 +407,7 @@ struct ProxiesView: View {
                 isDisabled: selectDisabled,
                 leading: AnyView(
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 12))
+                        .font(Typography.badge)
                         .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
                         .frame(width: 16)
                 ),
@@ -455,13 +459,13 @@ struct ProxyNotice: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: symbol)
-                    .font(.system(size: 12))
+                    .font(Typography.badge)
                     .foregroundStyle(tint)
                 Text(title)
-                    .font(.callout.weight(.medium))
+                    .font(Typography.rowTitle.weight(.medium))
             }
             Text(detail)
-                .font(.caption)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let action {

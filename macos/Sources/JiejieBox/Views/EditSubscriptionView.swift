@@ -9,6 +9,7 @@ import SwiftUI
 struct EditSubscriptionView: View {
     let model: AppModel
     let id: String
+    @Environment(\.localization) private var language
 
     private let nameField = FieldState()
     private let urlField = FieldState()
@@ -21,12 +22,13 @@ struct EditSubscriptionView: View {
     }
 
     var body: some View {
-        PanelScaffold(model: model, title: "Subscription", onBack: { model.goBack() }) {
+        PanelScaffold(model: model, title: L.subscriptions.tr(language),
+                      onBack: { model.goBack() }) {
             if let sub {
                 content(sub)
             } else {
-                Text("This subscription is no longer configured.")
-                    .font(.callout)
+                Text(L.noLongerConfigured.tr(language))
+                    .font(Typography.rowValue)
                     .foregroundStyle(.secondary)
                     .padding(Metrics.rowPaddingH)
             }
@@ -47,17 +49,17 @@ struct EditSubscriptionView: View {
     @ViewBuilder
     private func content(_ sub: Subscription) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            MenuSection("Details") {
-                DetailLine(label: "Status", value: sub.statusSummary,
+            MenuSection(L.status.tr(language)) {
+                DetailLine(label: L.status.tr(language), value: sub.statusSummary(language),
                            tone: sub.hasError ? .error : .normal)
-                DetailLine(label: "Nodes", value: sub.nodeSummary)
+                DetailLine(label: L.nodes.tr(language), value: sub.nodeSummary(language))
                 // A local snapshot came from a file, not a provider, so it has
                 // no URL and no HTTP result to report. Showing "Source" as the
                 // file and omitting the fetch-only rows keeps the screen honest
                 // instead of printing blank fields that look like faults.
                 if sub.isLocalSnapshot {
                     if let f = sub.filename, !f.isEmpty {
-                        DetailLine(label: "Source", value: f)
+                        DetailLine(label: L.source.tr(language), value: f)
                     }
                 }
                 // The fetch-only rows below mean nothing for an imported file:
@@ -66,40 +68,40 @@ struct EditSubscriptionView: View {
                 // it under a misleading label.
                 if !sub.isLocalSnapshot {
                     if let fetched = sub.nodes_fetched, fetched > 0, fetched != sub.node_count {
-                        DetailLine(label: "Fetched", value: "\(fetched)")
+                        DetailLine(label: L.fetched.tr(language), value: "\(fetched)")
                     }
                     if let code = sub.http_status_code, code != 0 {
                         DetailLine(label: "HTTP", value: "\(code)")
                     }
                     if let success = sub.last_success, !success.isEmpty {
-                        DetailLine(label: "Last success", value: RelativeTime.describe(success))
+                        DetailLine(label: L.lastSuccess.tr(language), value: RelativeTime.describe(success))
                     }
                 }
                 if let support = sub.support_url, !support.isEmpty,
                    let url = URL(string: support) {
-                    MenuRow("Provider Support", systemImage: "questionmark.circle") {
+                    MenuRow(L.providerSupport.tr(language), systemImage: "questionmark.circle") {
                         NSWorkspace.shared.open(url)
                     }
                 }
             }
 
-            MenuSection("Edit") {
-                LabeledField(label: "Name",
+            MenuSection(L.saveChanges.tr(language)) {
+                LabeledField(label: L.name.tr(language),
                              placeholder: sub.name,
                              state: nameField)
                 // No URL field for an imported file: it has no provider, and an
                 // editable empty URL would either save nothing or imply the
                 // source can be pointed somewhere. Renaming is what remains.
                 if !sub.isLocalSnapshot {
-                    LabeledField(label: "URL",
+                    LabeledField(label: L.url.tr(language),
                                  placeholder: sub.url,
                                  state: urlField)
                 }
             }
 
-            MenuSection("Actions") {
-                MenuRow("Save Changes",
-                        subtitle: hasEdits ? nil : "Nothing to save yet.",
+            MenuSection(L.refresh.tr(language)) {
+                MenuRow(L.saveChanges.tr(language),
+                        subtitle: hasEdits ? nil : L.nothingToSave.tr(language),
                         systemImage: "checkmark") {
                     Task {
                         let ok = await model.updateSubscription(
@@ -116,7 +118,7 @@ struct EditSubscriptionView: View {
                 }
                 .disabled(model.pending != nil || !hasEdits)
 
-                MenuRow(sub.enabled ? "Disable" : "Enable",
+                MenuRow(sub.enabled ? L.disable.tr(language) : L.enable.tr(language),
                         systemImage: sub.enabled ? "pause.circle" : "play.circle") {
                     Task { await model.setSubscriptionEnabled(sub.id, enabled: !sub.enabled) }
                 }
@@ -126,46 +128,46 @@ struct EditSubscriptionView: View {
                 // snapshot has no provider to fetch from; the backend refuses
                 // it, so the row is omitted and the reason is stated instead.
                 if sub.isRefreshable {
-                    MenuRow("Refresh Now", systemImage: "arrow.clockwise") {
+                    MenuRow(L.refreshNow.tr(language), systemImage: "arrow.clockwise") {
                         Task { await model.refreshSubscription(sub.id) }
                     }
                     .disabled(model.pending != nil)
 
                     if model.pending == .refreshingSubscription {
-                        PendingRow("Fetching…")
+                        PendingRow(L.fetching.tr(language))
                     }
                 } else {
                     // Stated as a fact rather than a dead button: the source has
                     // no provider, so there is nothing to fetch. A greyed-out
                     // "Refresh" would imply the action exists but is temporarily
                     // unavailable, which is not the case.
-                    DetailLine(label: "Refresh",
-                               value: "Not available for an imported file")
+                    DetailLine(label: L.refreshNotAvailable.tr(language),
+                               value: L.refreshNotAvailableWhy.tr(language))
                 }
             }
 
-            MenuSection("Danger") {
-                MenuRow("Delete Subscription", systemImage: "trash", role: .destructive) {
+            MenuSection(L.delete.tr(language)) {
+                MenuRow(L.deleteSubscription.tr(language), systemImage: "trash", role: .destructive) {
                     confirmDelete.text = "confirm"
                 }
                 .disabled(model.pending != nil)
             }
         }
         .padding(.vertical, 8)
-        .confirmationDialog("Delete this subscription?",
+        .confirmationDialog(L.deleteSubscriptionConfirm.tr(language),
                             isPresented: Binding(
                                 get: { confirmDelete.text == "confirm" },
                                 set: { if !$0 { confirmDelete.text = "" } }),
                             titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
+            Button(L.delete.tr(language), role: .destructive) {
                 confirmDelete.text = ""
                 Task {
                     if await model.removeSubscription(sub.id) { model.goBack() }
                 }
             }
-            Button("Cancel", role: .cancel) { confirmDelete.text = "" }
+            Button(L.cancel.tr(language), role: .cancel) { confirmDelete.text = "" }
         } message: {
-            Text("Its nodes will be removed from the configuration on the next reload.")
+            Text(L.deleteSubscriptionMessage.tr(language))
         }
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct AboutView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     /// Project links. `URL(string:)` returns nil for a malformed string, so the
     /// result is optional and the views render conditionally rather than
@@ -16,24 +17,31 @@ struct AboutView: View {
     }
 
     var body: some View {
-        PanelScaffold(model: model, title: "About", onBack: { model.goBack() }) {
+        PanelScaffold(model: model, title: L.about.tr(language),
+                      onBack: { model.goBack() }) {
             VStack(spacing: 10) {
                 Image(systemName: "bolt.horizontal.circle.fill")
-                    .font(.system(size: 40))
+                    .font(Typography.heroGlyph)
                     .foregroundStyle(.tint)
 
-                Text("JiejieBox")
-                    .font(.title3.weight(.semibold))
+                Text(L.appName.tr(language))
+                    .font(Typography.productName)
+
+                Text(L.aboutBlurb.tr(language))
+                    .font(Typography.rowSubtitle)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 VStack(spacing: 2) {
-                    Text("App \(frontendVersion)")
-                    Text("Backend \(model.handshake?.backend_version ?? "—")")
-                    Text("Protocol \(model.handshake?.protocol_version ?? 0)")
+                    Text("\(L.appVersion.tr(language)) \(frontendVersion)")
+                    Text("\(L.backendVersion.tr(language)) \(model.handshake?.backend_version ?? "—")")
+                    Text("\(L.protocolVersion.tr(language)) \(model.handshake?.protocol_version ?? 0)")
                     if let core = model.core?.core_version, !core.isEmpty {
                         Text("sing-box \(core)")
                     }
                 }
-                .font(.caption)
+                .font(Typography.status)
                 .foregroundStyle(.secondary)
 
                 // Explicitly typed constants rather than a force-unwrap. These
@@ -42,13 +50,13 @@ struct AboutView: View {
                 // at every call site.
                 HStack(spacing: 12) {
                     if let github = Self.githubURL {
-                        Link("GitHub", destination: github)
+                        Link(L.github.tr(language), destination: github)
                     }
                     if let telegram = Self.telegramURL {
-                        Link("Telegram", destination: telegram)
+                        Link(L.telegram.tr(language), destination: telegram)
                     }
                 }
-                .font(.callout)
+                .font(Typography.rowValue)
             }
             .padding(20)
             .frame(maxWidth: .infinity)

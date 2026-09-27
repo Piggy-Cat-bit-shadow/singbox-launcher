@@ -178,13 +178,17 @@ enum CoreState: String, Decodable {
     case error
 
     /// Label for the status line.
-    var label: String {
+    /// Localized label for the status line.
+    ///
+    /// Takes the language rather than reading the environment because this is a
+    /// model type; the view decides which language to draw in.
+    func label(_ language: Localization) -> String {
         switch self {
-        case .stopped: return "Disconnected"
-        case .starting: return "Starting…"
-        case .running: return "Connected"
-        case .stopping: return "Stopping…"
-        case .error: return "Error"
+        case .stopped: return L.disconnected.tr(language)
+        case .starting: return L.starting.tr(language)
+        case .running: return L.connected.tr(language)
+        case .stopping: return L.stopping.tr(language)
+        case .error: return L.coreError.tr(language)
         }
     }
 
@@ -376,10 +380,12 @@ struct Subscription: Decodable, Identifiable, Hashable {
     ///
     /// A local snapshot has no URL to show — showing an empty one would look
     /// like a broken source, so the file it came from is named instead.
-    var sourceSummary: String {
+    func sourceSummary(_ language: Localization) -> String {
         if isLocalSnapshot {
-            if let f = filename, !f.isEmpty { return "Imported from \(f)" }
-            return "Imported from a file"
+            if let f = filename, !f.isEmpty {
+                return "\(L.importedFrom.tr(language)) \(f)"
+            }
+            return L.importedFromAFile.tr(language)
         }
         return url
     }
@@ -391,28 +397,30 @@ struct Subscription: Decodable, Identifiable, Hashable {
     var neverFetched: Bool { (last_success ?? "").isEmpty }
 
     /// Human summary of the node count.
-    var nodeSummary: String {
-        node_count == 1 ? "1 node" : "\(node_count) nodes"
+    func nodeSummary(_ language: Localization) -> String {
+        node_count == 1
+            ? "\(node_count) \(L.nodesCount.tr(language))"
+            : "\(node_count) \(L.nodesCount.tr(language))"
     }
 
     /// "Updated 2h ago", "Never updated", or the error.
-    var statusSummary: String {
+    func statusSummary(_ language: Localization) -> String {
         if hasError {
             if let err = last_error, !err.isEmpty { return err }
-            return "Last update failed"
+            return L.lastUpdateFailed.tr(language)
         }
         // A local snapshot is never fetched, so "Never updated" would read as a
         // fault rather than as the normal state of an imported file.
         if isLocalSnapshot {
             if let success = last_success, !success.isEmpty {
-                return "Imported \(RelativeTime.describe(success))"
+                return "\(L.imported.tr(language)) \(RelativeTime.describe(success))"
             }
-            return "Imported"
+            return L.imported.tr(language)
         }
         if let success = last_success, !success.isEmpty {
-            return "Updated \(RelativeTime.describe(success))"
+            return "\(L.updatedAgo.tr(language)) \(RelativeTime.describe(success))"
         }
-        return "Never updated"
+        return L.neverUpdated.tr(language)
     }
 }
 
@@ -516,14 +524,19 @@ struct DaemonStatus: Decodable {
     let error: String?
 
     /// Short label for the service state, for a status row.
-    var serviceLabel: String {
+    ///
+    /// Driven by the protocol value, not by the rendered `summary` string: a
+    /// label chosen by matching display text would break in any other language.
+    /// The `default` case falls back to the raw value rather than to a
+    /// translated guess, so an unknown state is visible instead of mislabelled.
+    func serviceLabel(_ language: Localization) -> String {
         switch service {
-        case "not_installed": return "Not installed"
-        case "unsafe": return "Unsafe"
-        case "stale": return "Update required"
-        case "not_running": return "Stopped"
-        case "process_stale": return "Restart required"
-        case "ok": return "Running"
+        case "not_installed": return L.daemonNotInstalled.tr(language)
+        case "unsafe": return L.daemonUnsafe.tr(language)
+        case "stale": return L.daemonUpdateRequired.tr(language)
+        case "not_running": return L.daemonServiceStopped.tr(language)
+        case "process_stale": return L.daemonRestartRequired.tr(language)
+        case "ok": return L.daemonRunning.tr(language)
         default: return service
         }
     }
@@ -542,15 +555,19 @@ struct DaemonStatus: Decodable {
         return nil
     }
 
-    /// One-line state summary for the Core Mode row.
-    var summary: String {
-        if !supported { return "Unavailable" }
-        if active_mode { return "Active" }
-        if ready { return "Ready" }
-        if !installed || needs_install { return "Setup required" }
-        if needs_start { return "Service stopped" }
-        if !paired { return "Pairing required" }
-        return "Unavailable"
+    /// One-line state summary, for display only.
+    ///
+    /// Views must NOT branch on this text — `nextStep` and `service` carry the
+    /// machine-readable state. This exists so a status line can be shown without
+    /// the caller re-deriving the same precedence.
+    func summary(_ language: Localization) -> String {
+        if !supported { return L.daemonUnavailable.tr(language) }
+        if active_mode { return L.daemonActive.tr(language) }
+        if ready { return L.daemonReady.tr(language) }
+        if !installed || needs_install { return L.daemonSetupRequired.tr(language) }
+        if needs_start { return L.daemonServiceStopped.tr(language) }
+        if !paired { return L.daemonPairingRequired.tr(language) }
+        return L.daemonUnavailable.tr(language)
     }
 }
 

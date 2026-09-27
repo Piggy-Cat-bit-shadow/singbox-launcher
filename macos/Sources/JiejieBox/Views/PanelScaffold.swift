@@ -83,18 +83,20 @@ struct PanelHeader: View {
     let title: String
     var onBack: (() -> Void)?
     var accessory: AnyView?
+    @Environment(\.localization) private var language
 
     var body: some View {
         HStack(spacing: 6) {
             if let onBack {
                 PanelIconButton(systemImage: "chevron.left",
-                                help: "Back",
+                                help: L.back.tr(language),
                                 action: onBack)
             }
 
             Text(title)
-                .font(.headline)
+                .font(Typography.pageTitle)
                 .lineLimit(1)
+                .truncationMode(.tail)
                 .padding(.leading, onBack == nil ? 4 : 0)
 
             Spacer(minLength: 8)
@@ -125,7 +127,7 @@ struct PanelIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typography.inlineGlyph)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
                 .background(
@@ -151,6 +153,7 @@ struct PanelIconButton: View {
 /// keep-running set, stopping first would defeat the whole point.
 struct QuitButton: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     private var hover: HoverState { HoverStore.box(for: "quit") }
 
@@ -164,14 +167,14 @@ struct QuitButton: View {
             if model.isQuitting {
                 HStack(spacing: 5) {
                     ProgressView().controlSize(.mini)
-                    Text("Quitting…")
-                        .font(.caption.weight(.medium))
+                    Text(L.quitting.tr(language))
+                        .font(Typography.button)
                 }
                 .padding(.horizontal, 8)
                 .frame(height: 22)
             } else {
-                Text("Quit")
-                    .font(.caption.weight(.medium))
+                Text(L.quit.tr(language))
+                    .font(Typography.button)
                     .padding(.horizontal, 8)
                     .frame(height: 22)
                     .contentShape(Rectangle())
@@ -184,7 +187,7 @@ struct QuitButton: View {
         .buttonStyle(MenuRowButtonStyle())
         .onHover { hover.isHovering = $0 }
         .disabled(model.isQuitting)
-        .help("Quit JiejieBox")
-        .accessibilityLabel("Quit JiejieBox")
+        .help(L.quitHelp.tr(language))
+        .accessibilityLabel(L.quitHelp.tr(language))
     }
 }

@@ -13,37 +13,45 @@ import SwiftUI
 
 struct CoreModeView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     var body: some View {
-        PanelScaffold(model: model, title: "Core Mode", onBack: { model.goBack() }) {
-            VStack(alignment: .leading, spacing: 10) {
-                MenuSection("Engine") {
+        PanelScaffold(model: model, title: L.coreMode.tr(language),
+                      onBack: { model.goBack() }) {
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
+                MenuSection(L.engine.tr(language)) {
                     classicRow
                     daemonRow
                 }
 
-                if let reason = model.coreModeBlockedReason {
+                if let reason = model.coreModeBlockedReason(language) {
                     Text(reason)
-                        .font(.caption)
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, Metrics.rowPaddingH)
                 }
 
                 if model.coreModePreferenceDiverged {
                     // The running engine and the saved preference disagree:
-                    // the switch worked but the choice did not persist.
-                    Text("Running \(model.coreModeLabel) (saved preference: \(model.savedCoreModeLabel)).")
-                        .font(.caption)
+                    // the switch worked but the choice did not persist. Both
+                    // names come from the protocol identifier, never from a
+                    // rendered label.
+                    Text("\(L.runningWithSaved.tr(language)) \(model.coreModeLabel(language))"
+                         + " (\(L.savedPreference.tr(language)): \(model.savedCoreModeLabel(language)))")
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, Metrics.rowPaddingH)
                 }
 
                 if model.pending == .switchingMode("classic")
                     || model.pending == .switchingMode("daemon") {
-                    PendingRow("Switching engine…")
+                    PendingRow(L.switchingEngine.tr(language))
                 }
             }
-            .padding(.vertical, 8)
+            .padding(.top, Metrics.contentTopPadding)
+            .padding(.bottom, Metrics.contentBottomPadding)
         }
         .task {
             // The daemon row's subtitle is a status claim, so it is loaded
@@ -59,8 +67,8 @@ struct CoreModeView: View {
     /// Disabled only when it cannot be acted on — already active, or the core
     /// is not in a state where switching is safe — and the footer explains why.
     private var classicRow: some View {
-        MenuRow("Classic",
-                subtitle: "sing-box runs as a child of JiejieBox.",
+        MenuRow(L.classic.tr(language),
+                subtitle: L.classicSubtitle.tr(language),
                 action: {
                     guard !classicActive else { return }
                     Task { await model.activateClassicMode() }
@@ -81,7 +89,7 @@ struct CoreModeView: View {
     /// ever navigates, so it is never disabled, and it always shows a chevron
     /// so it reads as a destination rather than as inert text.
     private var daemonRow: some View {
-        MenuRow("Daemon",
+        MenuRow(L.daemon.tr(language),
                 subtitle: daemonSubtitle,
                 showsChevron: true,
                 action: { model.path.append(.daemon) },
@@ -91,8 +99,8 @@ struct CoreModeView: View {
     @ViewBuilder
     private func activeBadge(_ active: Bool) -> some View {
         if active {
-            Text("Active")
-                .font(.caption.weight(.medium))
+            Text(L.active.tr(language))
+                .font(Typography.rowValue.weight(.medium))
                 .foregroundStyle(.tint)
         }
     }
@@ -103,8 +111,11 @@ struct CoreModeView: View {
     /// preference. The two can diverge when a switch succeeded but persisting
     /// it did not, and calling the saved value "Active" would misdescribe what
     /// is actually running.
-    private var daemonActive: Bool { model.coreModeLabel == "Daemon" }
-    private var classicActive: Bool { model.coreModeLabel == "Classic" }
+    /// Compared against the protocol identifier, never a rendered label: the
+    /// label is language-dependent, so comparing it would silently pick the
+    /// wrong row in any interface that is not English.
+    private var daemonActive: Bool { model.activeEngine == "daemon" }
+    private var classicActive: Bool { model.activeEngine == "classic" }
 
     private var daemonReady: Bool { model.daemon?.ready == true }
 
@@ -112,32 +123,29 @@ struct CoreModeView: View {
     /// this?" before it is clicked.
     private var daemonSubtitle: String {
         guard let status = model.daemon else {
-            return "sing-box runs as a persistent system service."
+            return L.daemonSubtitleDefault.tr(language)
         }
         if !status.supported {
-            return "Not available in this build."
+            return L.daemonNotInBuild.tr(language)
         }
         if daemonActive {
             return status.ready
-                ? "Active. Click for service details."
-                : "Active, but the service needs attention. Click for details."
+                ? L.daemonActiveClick.tr(language)
+                : L.daemonActiveAttention.tr(language)
         }
         // A core without `lxd` cannot host the service at all, and saying
         // "setup required" would send the user to a screen that cannot help.
         if !status.core_supports_lxd {
-            return "The installed core has no daemon support."
+            return L.daemonNoCoreSupport.tr(language)
         }
-        switch status.summary {
-        case "Ready":
-            return "Service ready. Click to switch."
-        case "Setup required":
-            return "Not installed. Click to set up."
-        case "Service stopped":
-            return "Installed but stopped. Click to set up."
-        case "Pairing required":
-            return "Not paired. Click to set up."
-        default:
-            return "Service unreachable. Click for details."
+        // Driven by the structured next-step field rather than by the rendered
+        // English `summary` string, which is for display only.
+        switch status.nextStep {
+        case .install: return L.daemonNotInstalledClick.tr(language)
+        case .start: return L.daemonInstalledStopped.tr(language)
+        case .pair: return L.daemonNotPaired.tr(language)
+        case .wait: return L.daemonServiceReady.tr(language)
+        case nil: return L.daemonUnreachable.tr(language)
         }
     }
 }

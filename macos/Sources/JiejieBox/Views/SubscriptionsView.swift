@@ -12,14 +12,16 @@ import SwiftUI
 
 struct SubscriptionsView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     var body: some View {
-        PanelScaffold(model: model, title: "Subscriptions", onBack: { model.goBack() }) {
+        PanelScaffold(model: model, title: L.subscriptions.tr(language),
+                      onBack: { model.goBack() }) {
             VStack(alignment: .leading, spacing: 10) {
                 if model.shouldShowBackendDown {
                     // The list is unknown, not empty: do not report "No
                     // Subscriptions" for a backend that never answered.
-                    BackendDownView(model: model, subject: "subscriptions")
+                    BackendDownView(model: model)
                 } else if model.subscriptions.isEmpty && !model.subscriptionsLoading {
                     emptyState
                 } else {
@@ -27,22 +29,22 @@ struct SubscriptionsView: View {
                         addMenu
                     }
 
-                    MenuSection("Sources") {
+                    MenuSection(L.sources.tr(language)) {
                         ForEach(model.subscriptions) { sub in
                             subscriptionRow(sub)
                         }
                         if model.subscriptionsLoading {
-                            PendingRow("Loading…")
+                            PendingRow(L.loading.tr(language))
                         }
                     }
 
                     MenuSection {
-                        MenuRow("Update All", systemImage: "arrow.down.circle") {
+                        MenuRow(L.updateAll.tr(language), systemImage: "arrow.down.circle") {
                             Task { await model.updateAllSubscriptions() }
                         }
                         .disabled(model.subscriptions.isEmpty || model.pending != nil)
                         if model.pending == .updatingSubscriptions {
-                            PendingRow("Updating subscriptions…")
+                            PendingRow(L.updatingSubscriptions.tr(language))
                         }
                         if model.core?.config_stale == true {
                             reloadPrompt
@@ -52,7 +54,7 @@ struct SubscriptionsView: View {
 
                 if let status = model.transientStatus, !status.isEmpty {
                     Text(status)
-                        .font(.caption)
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, Metrics.rowPaddingH)
                 }
@@ -72,19 +74,19 @@ struct SubscriptionsView: View {
     /// leads to a guaranteed refusal is worse than no row.
     private var addMenu: some View {
         var actions: [MenuAction] = [
-            MenuAction(id: "url", title: "Add from URL…", systemImage: "link") {
+            MenuAction(id: "url", title: L.addFromURL.tr(language), systemImage: "link") {
                 model.path.append(.addSubscription)
             },
         ]
         if model.localSubscriptionImportAvailable {
             actions.append(
-                MenuAction(id: "file", title: "Import from File…",
+                MenuAction(id: "file", title: L.importFromFile.tr(language),
                            systemImage: "doc.badge.plus") {
                     importFromFile()
                 }
             )
         }
-        return MenuActionRow(title: "Add Subscription",
+        return MenuActionRow(title: L.addSubscription.tr(language),
                              systemImage: "plus",
                              actions: actions,
                              disabled: model.pending != nil)
@@ -112,7 +114,7 @@ struct SubscriptionsView: View {
                 id: "open-\(sub.id)",
                 title: sub.label,
                 subtitle: subtitle(for: sub),
-                value: sub.nodeSummary,
+                value: sub.nodeSummary(language),
                 showsChevron: true,
                 weight: 4,
                 help: "Edit this subscription.",
@@ -123,14 +125,14 @@ struct SubscriptionsView: View {
                 // Shows its own saving state, so the row that was clicked
                 // reports progress instead of the whole list going inert.
                 title: model.pending == .updatingSetting(.subscriptionEnabled(sub.id))
-                    ? "Saving…"
-                    : (sub.enabled ? "On" : "Off"),
+                    ? L.saving.tr(language)
+                    : (sub.enabled ? L.enabled.tr(language) : L.disabled.tr(language)),
                 value: nil,
                 isPending: model.pending == .updatingSetting(.subscriptionEnabled(sub.id)),
                 weight: 1,
                 help: sub.enabled
-                    ? "Enabled. Click to exclude it from the built config."
-                    : "Disabled. Click to include it again.",
+                    ? L.enabledHelp.tr(language)
+                    : L.disabledHelp.tr(language),
                 action: {
                     Task { await model.setSubscriptionEnabled(sub.id, enabled: !sub.enabled) }
                 }
@@ -145,31 +147,31 @@ struct SubscriptionsView: View {
         // source line names the file so the row does not show an empty URL,
         // which would read as a broken source.
         if sub.isLocalSnapshot {
-            if sub.hasError { return "Error · \(sub.statusSummary)" }
-            return sub.sourceSummary
+            if sub.hasError { return "\(L.coreError.tr(language)) · \(sub.statusSummary(language))" }
+            return sub.sourceSummary(language)
         }
         if sub.hasError {
-            return "Error · \(sub.statusSummary)"
+            return "\(L.coreError.tr(language)) · \(sub.statusSummary(language))"
         }
-        return sub.statusSummary
+        return sub.statusSummary(language)
     }
 
     // MARK: - Empty state
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("No Subscriptions")
-                .font(.callout.weight(.medium))
+            Text(L.noSubscriptions.tr(language))
+                .font(Typography.rowTitle.weight(.medium))
             Text(model.localSubscriptionImportAvailable
-                 ? "Add a subscription URL, or import a file from disk."
-                 : "Add a subscription URL to import proxy nodes.")
-                .font(.caption)
+                 ? L.noSubscriptionsHintLocal.tr(language)
+                 : L.noSubscriptionsHint.tr(language))
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 Button {
                     model.path.append(.addSubscription)
                 } label: {
-                    Label("Add from URL", systemImage: "plus")
+                    Label(L.addFromURL.tr(language), systemImage: "plus")
                 }
                 .controlSize(.regular)
                 .disabled(model.pending != nil)
@@ -178,14 +180,14 @@ struct SubscriptionsView: View {
                     Button {
                         importFromFile()
                     } label: {
-                        Label("Import from File", systemImage: "doc.badge.plus")
+                        Label(L.importFromFileButton.tr(language), systemImage: "doc.badge.plus")
                     }
                     .controlSize(.regular)
                     .disabled(model.pending != nil)
                 }
             }
             if model.pending == .importingSubscription {
-                PendingRow("Importing from file…")
+                PendingRow(L.importingFromFile.tr(language))
             }
         }
         .padding(.horizontal, Metrics.rowPaddingH)
@@ -205,13 +207,13 @@ struct SubscriptionsView: View {
     private var reloadPrompt: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(model.configRebuildable
-                 ? "Configuration needs reload"
-                 : "Configuration is managed externally")
-                .font(.caption.weight(.medium))
+                 ? L.reloadPromptTitle.tr(language)
+                 : L.externalPromptTitle.tr(language))
+                .font(Typography.rowValue.weight(.medium))
             Text(model.configRebuildable
-                 ? "Reload the config to apply the new node list."
-                 : "These changes will not take effect until the external configuration is updated.")
-                .font(.caption)
+                 ? L.reloadPromptBody.tr(language)
+                 : L.externalPromptBody.tr(language))
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -222,7 +224,7 @@ struct SubscriptionsView: View {
                         await model.refreshCoreState()
                     }
                 } label: {
-                    Text("Reload Config")
+                    Text(L.reloadConfigAction.tr(language))
                 }
                 .controlSize(.small)
                 .disabled(model.pending != nil)
@@ -230,7 +232,7 @@ struct SubscriptionsView: View {
                 Button {
                     model.revealConfig()
                 } label: {
-                    Text("Open Config")
+                    Text(L.openConfig.tr(language))
                 }
                 .controlSize(.small)
             }

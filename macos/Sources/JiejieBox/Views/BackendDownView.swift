@@ -14,20 +14,19 @@ import SwiftUI
 /// Shown in place of content when the backend is unreachable.
 struct BackendDownView: View {
     let model: AppModel
-    /// What this screen would have shown, so the message stays specific.
-    var subject: String = "this screen"
+    @Environment(\.localization) private var language
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "bolt.horizontal.circle")
                     .foregroundStyle(.secondary)
-                Text("Backend Unavailable")
-                    .font(.callout.weight(.medium))
+                Text(L.backendUnavailable.tr(language))
+                    .font(Typography.rowTitle.weight(.medium))
             }
 
             Text(reason)
-                .font(.caption)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -37,10 +36,10 @@ struct BackendDownView: View {
                 if model.connection == .connecting {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Restarting…")
+                        Text(L.reconnecting.tr(language))
                     }
                 } else {
-                    Text("Restart Backend")
+                    Text(L.restartBackend.tr(language))
                 }
             }
             .controlSize(.small)
@@ -50,18 +49,23 @@ struct BackendDownView: View {
         .padding(.vertical, 12)
     }
 
+    /// Why the backend is unavailable.
+    ///
+    /// A backend-authored failure message is shown verbatim: it comes from the Go
+    /// side already localized by that side's own locale package, and the frontend
+    /// has neither the context nor the vocabulary to re-translate it.
     private var reason: String {
         switch model.connection {
         case .failed(let message):
             return message
         case .connecting:
-            return "Reconnecting. \(subject) will reload automatically."
+            return L.reconnecting.tr(language)
         case .idle:
-            return "The backend is not running, so \(subject) cannot be loaded."
+            return L.backendUnavailableHint.tr(language)
         case .ready:
             // Reachable but a specific call failed; the screen's own error
             // banner covers that case.
-            return "The backend did not answer. Try again in a moment."
+            return L.backendUnavailableHint.tr(language)
         }
     }
 }

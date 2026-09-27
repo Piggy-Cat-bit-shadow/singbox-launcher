@@ -115,7 +115,7 @@ private struct ActionRowButton: View {
                     leading
                 } else if let systemImage = action.systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 13))
+                        .font(Typography.rowTitle)
                         .frame(width: 18)
                         .foregroundStyle(action.role == .destructive ? Color.red : .secondary)
                 }
@@ -127,7 +127,7 @@ private struct ActionRowButton: View {
                         .truncationMode(.middle)
                     if let subtitle = action.subtitle {
                         Text(subtitle)
-                            .font(.caption)
+                            .font(Typography.rowSubtitle)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -140,14 +140,14 @@ private struct ActionRowButton: View {
                     ProgressView().controlSize(.small)
                 } else if let value = action.value {
                     Text(value)
-                        .font(.caption.monospacedDigit())
+                        .font(Typography.numeric)
                         .foregroundStyle(action.valueColor ?? .secondary)
                         .lineLimit(1)
                 }
 
                 if action.showsChevron {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(Typography.inlineGlyph)
                         .foregroundStyle(.tertiary)
                 }
             }

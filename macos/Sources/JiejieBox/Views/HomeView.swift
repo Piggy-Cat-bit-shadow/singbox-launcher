@@ -20,6 +20,7 @@ import SwiftUI
 
 struct HomeView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     var body: some View {
         PanelScaffold(model: model, title: "JiejieBox") {
@@ -43,7 +44,8 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    StatusLine(state: model.core?.state, error: model.core?.error_message)
+                    StatusLine(state: model.core?.state, error: model.core?.error_message,
+                               language: language)
                     versionRow
                 }
 
@@ -83,29 +85,29 @@ struct HomeView: View {
                 HStack(spacing: 4) {
                     if model.pending == .importingCore {
                         ProgressView().controlSize(.mini)
-                        Text("Installing core…")
+                        Text(L.installingCore.tr(language))
                     } else if let version = installedVersion {
                         Text(version)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.caption2)
+                            .font(Typography.microGlyph)
                     } else {
-                        Text("Load Core…")
+                        Text(L.loadCore.tr(language))
                     }
                 }
-                .font(.caption2)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(model.pending != nil)
             .help(installedVersion == nil
-                  ? "Choose a sing-box binary to install"
-                  : "Replace the sing-box core")
+                  ? L.loadCoreHelp.tr(language)
+                  : L.replaceCoreHelp.tr(language))
         } else if let version = installedVersion {
             Text(version)
-                .font(.caption2)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -128,7 +130,8 @@ struct HomeView: View {
         Task { await model.importCoreFile(path: path) }
     }
 
-    private var primaryButton: some View {        Button {
+    private var primaryButton: some View {
+        Button {
             Task { await model.toggleCore() }
         } label: {
             if primaryIsBusy {
@@ -154,17 +157,17 @@ struct HomeView: View {
     /// The button's label, reflecting BOTH the reported state and a command in
     /// flight. The pending case matters because `start_core` returns before the
     /// core reaches `starting`, so relying on the state alone left a window
-    /// where the button still read "Start" after being clicked.
+    /// where the button still read L.start.tr(language) after being clicked.
     private var primaryTitle: String {
-        if model.pending == .startingCore { return "Starting…" }
-        if model.pending == .stoppingCore { return "Stopping…" }
-        guard let state = model.core?.state else { return "Start" }
+        if model.pending == .startingCore { return L.starting.tr(language) }
+        if model.pending == .stoppingCore { return L.stopping.tr(language) }
+        guard let state = model.core?.state else { return L.start.tr(language) }
         switch state {
-        case .running: return "Stop"
-        case .starting: return "Starting…"
-        case .stopping: return "Stopping…"
-        case .error: return "Retry"
-        case .stopped: return "Start"
+        case .running: return L.stop.tr(language)
+        case .starting: return L.starting.tr(language)
+        case .stopping: return L.stopping.tr(language)
+        case .error: return L.retry.tr(language)
+        case .stopped: return L.start.tr(language)
         }
     }
 
@@ -190,20 +193,22 @@ struct HomeView: View {
 
     private var primaryHelp: String {
         guard let core = model.core else { return "" }
-        if model.coreOperationBusy { return "Please wait for the current operation to finish." }
+        if model.coreOperationBusy { return L.waitForOperation.tr(language) }
         if core.state != .running && !core.binary_exists {
-            return "The sing-box core binary was not found."
+            return L.coreNotFound.tr(language)
         }
-        return core.state == .running ? "Stop the core" : "Start the core"
+        return core.state == .running
+            ? L.stopTheCore.tr(language)
+            : L.startTheCore.tr(language)
     }
 
     /// Up/down speed, monospaced so the numbers do not jitter the layout.
     private func speedReadout(_ rate: TrafficRate) -> some View {
         HStack(spacing: 16) {
             speedItem(symbol: "arrow.down", value: ByteFormat.rate(rate.down),
-                      total: rate.total_down, label: "Downloaded")
+                      total: rate.total_down, label: L.downloaded.tr(language))
             speedItem(symbol: "arrow.up", value: ByteFormat.rate(rate.up),
-                      total: rate.total_up, label: "Uploaded")
+                      total: rate.total_up, label: L.uploaded.tr(language))
             Spacer(minLength: 0)
         }
     }
@@ -211,9 +216,9 @@ struct HomeView: View {
     private func speedItem(symbol: String, value: String, total: Int64, label: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Label(value, systemImage: symbol)
-                .font(.callout.monospacedDigit())
+                .font(Typography.numeric)
             Text("\(ByteFormat.size(total)) total")
-                .font(.caption2)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.tertiary)
         }
         .help("\(label) since connecting")
@@ -240,25 +245,25 @@ struct HomeView: View {
     private var persistentBanners: some View {
         if case .failed(let message) = model.connection {
             Banner(kind: .error, message: message) {
-                Button("Restart") { Task { await model.restart() } }
+                Button(L.restart.tr(language)) { Task { await model.restart() } }
                     .controlSize(.small)
             }
         } else if model.coreMissing {
             // With no core at all, choosing one is the only way forward, so the
             // banner leads with it. Revealing the folder stays available as the
             // second option for someone who wants to place the binary by hand.
-            Banner(kind: .error, message: "The sing-box core binary was not found.") {
+            Banner(kind: .error, message: L.coreNotFound.tr(language)) {
                 if model.coreImportAvailable {
-                    Button("Load Core…") { loadCore() }
+                    Button(L.loadCore.tr(language)) { loadCore() }
                         .controlSize(.small)
                         .disabled(model.pending != nil)
                 }
-                Button("Reveal Folder") { model.revealConfigFolder() }
+                Button(L.revealFolder.tr(language)) { model.revealConfigFolder() }
                     .controlSize(.small)
             }
         } else if model.configMissing {
-            Banner(kind: .warning, message: "No config.json yet. Add a subscription to build one.") {
-                Button("Subscriptions") { model.path.append(.subscriptions) }
+            Banner(kind: .warning, message: L.noConfigYet.tr(language)) {
+                Button(L.subscriptions.tr(language)) { model.path.append(.subscriptions) }
                     .controlSize(.small)
             }
         } else if model.core?.config_stale == true {
@@ -267,10 +272,10 @@ struct HomeView: View {
             // the file instead.
             Banner(kind: .warning,
                    message: model.configRebuildable
-                       ? "The configuration has changed since it was built."
-                       : "The configuration changed, but it is managed outside JiejieBox.") {
+                       ? L.configChanged.tr(language)
+                       : L.configChangedExternal.tr(language)) {
                 if model.configRebuildable {
-                    Button("Reload") {
+                    Button(L.reload.tr(language)) {
                         Task {
                             await model.reloadConfig()
                             await model.refreshCoreState()
@@ -278,7 +283,7 @@ struct HomeView: View {
                     }
                     .controlSize(.small)
                 } else {
-                    Button("Open Config") { model.revealConfig() }
+                    Button(L.openConfig.tr(language)) { model.revealConfig() }
                         .controlSize(.small)
                 }
             }
@@ -323,13 +328,13 @@ struct HomeView: View {
     // MARK: - Runtime
 
     private var runtimeSection: some View {
-        MenuSection("Runtime") {
-            MenuRow("Core Details", systemImage: "info.circle",
-                    value: model.core?.state.label ?? "—",
+        MenuSection(L.core.tr(language)) {
+            MenuRow(L.coreDetails.tr(language), systemImage: "info.circle",
+                    value: model.core?.state.label(language) ?? "—",
                     showsChevron: true) {
                 model.path.append(.coreDetails)
             }
-            MenuRow("Core Mode", systemImage: "gearshape",
+            MenuRow(L.coreMode.tr(language), systemImage: "gearshape",
                     value: coreModeValue,
                     showsChevron: true) {
                 model.path.append(.coreMode)
@@ -337,30 +342,32 @@ struct HomeView: View {
         }
     }
 
+    /// Which engine is in use, as a localized word.
+    ///
+    /// The backend reports an identifier ("classic"/"daemon"), never prose, so
+    /// the mapping lives here rather than comparing against a rendered English
+    /// label — which would break the moment the interface is not in English.
     private var coreModeValue: String {
-        if model.coreModeLabel == "Daemon" {
-            return model.daemon?.summary == "Active" ? "Daemon" : "Daemon"
-        }
-        return "Classic"
+        model.coreModeLabel(language)
     }
 
     // MARK: - Network
 
     private var networkSection: some View {
-        MenuSection("Network") {
+        MenuSection(L.proxies.tr(language)) {
             // Always navigable, even with the core stopped. ProxiesView
             // already explains "start the core to list and switch proxies", so
             // disabling the entry hid the very explanation the user needs — the
             // same navigation-vs-mutation mistake as the daemon row: not being
             // able to CHANGE something is not a reason to hide its STATUS.
-            MenuRow("Proxies", systemImage: "arrow.triangle.branch",
+            MenuRow(L.proxies.tr(language), systemImage: "arrow.triangle.branch",
                     value: proxySummary,
                     showsChevron: true) {
                 model.path.append(.proxies)
             }
             .help(model.core?.state == .running
-                  ? "Choose a proxy group and node."
-                  : "Start the core to choose a proxy.")
+                  ? L.chooseProxyGroup.tr(language)
+                  : L.startCoreToChoose.tr(language))
         }
     }
 
@@ -372,7 +379,7 @@ struct HomeView: View {
     private var proxySummary: String {
         guard model.core?.state == .running else { return "—" }
         guard let summary = model.proxySummary, summary.hasSelection else {
-            return "Choose…"
+            return L.choose.tr(language)
         }
         if let delay = summary.delayLabel {
             return "\(summary.label) · \(delay)"
@@ -383,13 +390,13 @@ struct HomeView: View {
     // MARK: - Navigation
 
     private var navigationSection: some View {
-        MenuSection("Manage") {
-            MenuRow("Subscriptions", systemImage: "arrow.down.circle",
+        MenuSection(L.manage.tr(language)) {
+            MenuRow(L.subscriptions.tr(language), systemImage: "arrow.down.circle",
                     value: subscriptionSummary,
                     showsChevron: true) {
                 model.path.append(.subscriptions)
             }
-            MenuRow("More", systemImage: "ellipsis.circle", showsChevron: true) {
+            MenuRow(L.more.tr(language), systemImage: "ellipsis.circle", showsChevron: true) {
                 model.path.append(.more)
             }
         }
@@ -397,8 +404,7 @@ struct HomeView: View {
 
     private var subscriptionSummary: String {
         let count = model.subscriptions.count
-        if count == 0 { return "None" }
-        return count == 1 ? "1" : "\(count)"
+        return count == 0 ? L.none.tr(language) : "\(count)"
     }
 }
 
@@ -408,6 +414,10 @@ struct HomeView: View {
 struct StatusLine: View {
     let state: CoreState?
     var error: String?
+    /// Injected rather than read from the environment: this view is also used
+    /// from the Proxies screen, and passing the language keeps its output
+    /// deterministic and testable.
+    var language: Localization = .en
 
     var body: some View {
         HStack(spacing: 6) {
@@ -415,15 +425,16 @@ struct StatusLine: View {
                 .fill(color)
                 .frame(width: 8, height: 8)
             Text(label)
-                .font(.callout.weight(.medium))
+                .font(Typography.statusPrimary)
                 .foregroundStyle(.primary)
+                .lineLimit(1)
         }
         .help(error ?? "")
     }
 
     private var label: String {
-        guard let state else { return "Connecting…" }
-        return state.label
+        guard let state else { return L.connecting.tr(language) }
+        return state.label(language)
     }
 
     private var color: Color {
@@ -451,9 +462,9 @@ struct Banner<Action: View>: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: symbol)
                 .foregroundStyle(tint)
-                .font(.system(size: 12))
+                .font(Typography.badge)
             Text(message)
-                .font(.caption)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)

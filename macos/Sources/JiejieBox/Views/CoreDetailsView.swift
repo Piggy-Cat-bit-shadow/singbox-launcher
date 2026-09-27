@@ -11,42 +11,50 @@ import SwiftUI
 
 struct CoreDetailsView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     var body: some View {
-        PanelScaffold(model: model, title: "Core Details", onBack: { model.goBack() }) {
-            VStack(alignment: .leading, spacing: 10) {
-                MenuSection("Core") {
-                    detail("Status", model.core?.state.label)
-                    detail("Version", model.core?.core_version, fallback: "Unknown")
-                    detail("Mode", model.coreModeLabel)
-                    detail("Binary", model.coreMissing ? "Missing" : "Found")
-                    detail("Config", model.configMissing ? "Missing" : "Ready")
+        PanelScaffold(model: model, title: L.coreDetails.tr(language),
+                      onBack: { model.goBack() }) {
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
+                MenuSection(L.core.tr(language)) {
+                    detail(L.status.tr(language), model.core?.state.label(language))
+                    detail(L.version.tr(language), model.core?.core_version,
+                           fallback: L.unknown.tr(language))
+                    detail(L.mode.tr(language), model.coreModeLabel(language))
+                    detail(L.binary.tr(language),
+                           model.coreMissing ? L.missing.tr(language) : L.found.tr(language))
+                    detail(L.configFile.tr(language),
+                           model.configMissing ? L.missing.tr(language) : L.ready.tr(language))
                 }
 
-                MenuSection("Backend") {
-                    detail("Version", model.handshake?.backend_version, fallback: "Unknown")
-                    detail("Protocol", "\(model.handshake?.protocol_version ?? 0)")
-                    detail("Process ID", model.handshake.map { String($0.pid) }, fallback: "—")
+                MenuSection(L.backendVersion.tr(language)) {
+                    detail(L.version.tr(language), model.handshake?.backend_version,
+                           fallback: L.unknown.tr(language))
+                    detail(L.protocolVersion.tr(language), "\(model.handshake?.protocol_version ?? 0)")
+                    detail(L.processID.tr(language), model.handshake.map { String($0.pid) },
+                           fallback: "—")
                 }
 
-                MenuSection("Paths") {
-                    pathRow("Config file", model.settings?.config_path, kind: .file)
-                    pathRow("Data", model.settings?.data_dir, kind: .directory)
-                    pathRow("Logs", model.settings?.logs_dir, kind: .directory)
+                MenuSection(L.paths.tr(language)) {
+                    pathRow(L.configFile.tr(language), model.settings?.config_path, kind: .file)
+                    pathRow(L.dataFolder.tr(language), model.settings?.data_dir, kind: .directory)
+                    pathRow(L.logsFolder.tr(language), model.settings?.logs_dir, kind: .directory)
                 }
 
                 MenuSection {
-                    MenuRow("Restart Core",
-                            subtitle: "Stop and start the core again",
+                    MenuRow(L.restartCore.tr(language),
+                            subtitle: L.restartCoreHelp.tr(language),
                             systemImage: "arrow.clockwise") {
                         Task { await model.restartCore() }
                     }
                     if model.pending == .restarting {
-                        pendingRow("Restarting…")
+                        pendingRow(L.restarting.tr(language))
                     }
                 }
             }
-            .padding(.vertical, 8)
+            .padding(.top, Metrics.contentTopPadding)
+            .padding(.bottom, Metrics.contentBottomPadding)
         }
     }
 
@@ -81,11 +89,13 @@ struct CoreDetailsView: View {
     /// which action it performs, so what a click will do is never a surprise.
     private func pathRow(_ title: String, _ path: String?, kind: PathKind) -> some View {
         let usable = !(path ?? "").isEmpty
-        let action = kind == .file ? "Reveal in Finder" : "Open Folder"
+        let action = kind == .file
+            ? L.revealInFinder.tr(language)
+            : L.openFolder.tr(language)
         return MenuRow(title,
-                       subtitle: usable ? action : "Path not reported",
+                       subtitle: usable ? action : L.pathNotReported.tr(language),
                        systemImage: kind == .file ? "doc" : "folder",
-                       value: usable ? abbreviate(path!) : "Unknown",
+                       value: usable ? abbreviate(path!) : L.unknown.tr(language),
                        action: {
                            guard let path, !path.isEmpty else { return }
                            switch kind {
@@ -102,7 +112,7 @@ struct CoreDetailsView: View {
     private func pendingRow(_ text: String) -> some View {
         HStack(spacing: 6) {
             ProgressView().controlSize(.small)
-            Text(text).font(.caption).foregroundStyle(.secondary)
+            Text(text).font(Typography.rowSubtitle).foregroundStyle(.secondary)
             Spacer()
         }
         .padding(.horizontal, Metrics.rowPaddingH)

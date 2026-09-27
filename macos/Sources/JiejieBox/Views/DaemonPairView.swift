@@ -14,17 +14,19 @@ import SwiftUI
 
 struct DaemonPairView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     private let inviteField = FieldState()
 
     var body: some View {
-        PanelScaffold(model: model, title: "Pair Daemon", onBack: { model.goBack() }) {
+        PanelScaffold(model: model, title: L.pairService.tr(language),
+                      onBack: { model.goBack() }) {
             VStack(alignment: .leading, spacing: 10) {
-                MenuSection("Invite") {
-                    LabeledField(label: "Invite",
+                MenuSection(L.pairing.tr(language)) {
+                    LabeledField(label: L.inviteFormat.tr(language),
                                  placeholder: "address#fingerprint#code",
                                  state: inviteField)
-                    MenuRow("Paste from Clipboard", systemImage: "doc.on.clipboard") {
+                    MenuRow(L.pasteFromClipboard.tr(language), systemImage: "doc.on.clipboard") {
                         if let text = NSPasteboard.general.string(forType: .string) {
                             inviteField.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         }
@@ -32,8 +34,8 @@ struct DaemonPairView: View {
                     // The expected shape, stated up front. The fingerprint is
                     // never shown — only its position in the format — so this
                     // cannot leak a credential.
-                    Text("Expected format: address#fingerprint#code")
-                        .font(.caption)
+                    Text(L.inviteFormat.tr(language))
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, Metrics.rowPaddingH)
                         .padding(.bottom, 4)
@@ -46,11 +48,11 @@ struct DaemonPairView: View {
                         if model.pending == .pairingDaemon {
                             HStack(spacing: 6) {
                                 ProgressView().controlSize(.small)
-                                Text("Pairing…")
+                                Text(L.pairing.tr(language))
                             }
                             .frame(maxWidth: .infinity)
                         } else {
-                            Text("Pair")
+                            Text(L.pair.tr(language))
                                 .frame(maxWidth: .infinity)
                         }
                     }
@@ -58,16 +60,14 @@ struct DaemonPairView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canPair)
 
-                    Text("Run the pairing command in Terminal, then paste the one-time "
-                         + "invite it prints here.")
-                        .font(.caption)
+                    Text(L.pairInstructions.tr(language))
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     if needsFreshInvite {
-                        Text("An invite can only be used once. If this one was already "
-                             + "used or has expired, generate a new one.")
-                            .font(.caption)
+                        Text(L.inviteOneTime.tr(language))
+                            .font(Typography.rowSubtitle)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -82,7 +82,7 @@ struct DaemonPairView: View {
                             await model.prepareDaemonPairing()
                         }
                     } label: {
-                        Text("Generate New Invite")
+                        Text(L.generateNewInvite.tr(language))
                     }
                     .controlSize(.small)
                     .disabled(model.pending != nil)

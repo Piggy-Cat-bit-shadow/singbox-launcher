@@ -8,6 +8,7 @@ import SwiftUI
 
 struct AddSubscriptionView: View {
     let model: AppModel
+    @Environment(\.localization) private var language
 
     // Plain stored properties rather than @State: this toolchain cannot
     // compile the SwiftUI macro plugin (see AppModel's header comment).
@@ -15,7 +16,8 @@ struct AddSubscriptionView: View {
     private let nameField = FieldState()
 
     var body: some View {
-        PanelScaffold(model: model, title: "Add Subscription", onBack: { model.goBack() }) {
+        PanelScaffold(model: model, title: L.addSubscriptionTitle.tr(language),
+                      onBack: { model.goBack() }) {
             VStack(alignment: .leading, spacing: 10) {
                 MenuSection("Address") {
                     LabeledField(label: "URL",
@@ -33,11 +35,11 @@ struct AddSubscriptionView: View {
                         if model.pending == .addingSubscription {
                             HStack(spacing: 6) {
                                 ProgressView().controlSize(.small)
-                                Text("Adding…")
+                                Text(L.adding.tr(language))
                             }
                             .frame(maxWidth: .infinity)
                         } else {
-                            Text("Add")
+                            Text(L.add.tr(language))
                                 .frame(maxWidth: .infinity)
                         }
                     }
@@ -45,9 +47,8 @@ struct AddSubscriptionView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canAdd)
 
-                    Text("The subscription is saved even if the first fetch fails; "
-                         + "you can refresh it later.")
-                        .font(.caption)
+                    Text(L.subscriptionSavedEvenIfFetchFails.tr(language))
+                        .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -99,7 +100,7 @@ struct LabeledField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
-                .font(.caption)
+                .font(Typography.rowSubtitle)
                 .foregroundStyle(.secondary)
             Group {
                 if secure {
@@ -111,7 +112,7 @@ struct LabeledField: View {
                 }
             }
             .textFieldStyle(.roundedBorder)
-            .font(.callout)
+            .font(Typography.rowValue)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
         .padding(.vertical, 4)

@@ -135,6 +135,37 @@ migrated or rewritten on first launch. The bundle identifier stays
   a state file.
 - **Appearance is a frontend-only preference** (System / Light / Dark), stored in
   `UserDefaults`. It never reaches the backend, and it survives a relaunch.
+- **Language is a frontend-only preference** (Follow System / 简体中文 / English),
+  stored in `UserDefaults` under `appLanguage` and applied live — switching
+  re-renders the open panel without a relaunch. "Follow System" is a distinct
+  choice rather than an alias: it resolves against `Locale.preferredLanguages`
+  each time, so an app left on it follows a later change to the system language.
+
+  Interface text lives in `Models/Localization.swift` as one `enum L` with two
+  exhaustive `switch` tables. Two consequences are deliberate: a missing
+  translation is a **compile error** rather than a blank label, and the frontend
+  owns only its OWN strings. Backend-authored prose (build reports, daemon
+  messages) arrives over IPC already localized by the Go side's locale package —
+  re-translating it here would need the backend's context and would drift from it.
+
+  Fonts are system fonts, always: no bundled CJK family, no per-language family
+  switch. macOS selects PingFang SC for Chinese and SF Pro for Latin with matched
+  optical sizes, and a custom family would break SF Symbols alignment. Tolerance
+  for longer translated strings is handled where it belongs — bounded `lineLimit`
+  plus `fixedSize(vertical:)` on subtitles — not by changing type.
+- **The More page is grouped by kind**, in the order a user looks for things:
+  Automation (toggles), Application (appearance, language), Files (actions),
+  About. Rows within a section share one primitive each — `MenuToggleRow`,
+  `MenuPickerRow`, `MenuRow` — so height, icon column and trailing-control
+  position cannot drift apart. A picker row and a toggle row are the same shape,
+  which is why Appearance and Language read as one group.
+- **Typography and spacing are tokens**, not per-call-site choices. `Typography`
+  (in `Views/Typography.swift`) holds the text scale and extends the existing
+  `Metrics` with the spacing values. Section headers are inset by `rowPaddingH`
+  so `contentInset + sectionHeaderInset` is, by construction, the column the row
+  icons occupy — a group label that starts left of its own content reads as a
+  stray caption. The Go suite enforces this: a semantic font (`.caption`,
+  `.callout`) or a raw point size in a view fails `TestSwiftViewsUseTypographyTokens`.
 - **Daemon is set up before it is activated.** The engine needs an installed
   launchd service, a paired identity and a reachable control plane. The Daemon
   screen walks those steps one at a time and only offers "Use Daemon Mode" once
