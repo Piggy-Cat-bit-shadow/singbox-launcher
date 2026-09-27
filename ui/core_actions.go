@@ -95,3 +95,32 @@ func StopCoreAction(t coreActionTarget, gen *uint64) {
 	}
 	core.StopSingBoxProcess()
 }
+
+// OpenCoreSettingsAction — открыть настройки ядра (движок + сопряжение с
+// демоном).
+//
+// **Восстановленный вход.** В прежней панели Core справа от строки состояния
+// стояла кнопка-шестерёнка (connBtn, подпись «⚙»), ведущая сюда. При переезде
+// на Home её потеряли: настройки движка стали доступны только через
+// Diagnostics/Settings, то есть не там, где пользователь их ищет.
+//
+// Логика НЕ переписана: это тот же вызов OpenConnectionWindow с тем же
+// пост-действием. После закрытия окна движок мог смениться classic↔daemon,
+// поэтому сбрасывается состояние API, перечитывается список прокси и
+// обновляется маркер канала — ровно как делала старая кнопка.
+func OpenCoreSettingsAction(ac *core.AppController) {
+	if ac == nil {
+		return
+	}
+	OpenConnectionWindow(ac, func() {
+		if ac.UIService != nil && ac.UIService.ResetAPIStateFunc != nil {
+			ac.UIService.ResetAPIStateFunc()
+		}
+		if ac.UIService != nil && ac.UIService.RefreshAPIFunc != nil {
+			ac.UIService.RefreshAPIFunc()
+		}
+		if ac.UIService != nil && ac.UIService.UpdateCoreStatusFunc != nil {
+			ac.UIService.UpdateCoreStatusFunc()
+		}
+	})
+}
