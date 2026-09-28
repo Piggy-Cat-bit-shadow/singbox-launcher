@@ -160,3 +160,60 @@ struct GroupTestProgress: Equatable {
     /// Nodes whose measurement is in flight, so only those show a spinner.
     var inFlight: Set<String>
 }
+
+// MARK: - Coalescing refreshes
+
+/// A refresh that coalesces concurrent callers and ignores superseded replies.
+///
+/// WHY THIS SHAPE. The daemon status read is triggered by a button, by every
+/// daemon event, and by the initial load. Two behaviours matter, and they pull in
+/// opposite directions:
+///
+///   * REPEATED CLICKS MUST COST ONE REQUEST. A user who clicks Refresh three
+///     times should not send three reads whose replies can arrive in any order —
+///     and each of which would repaint the screen. A caller that arrives while a
+///     read is in flight JOINS it.
+///
+///   * A FAILED REFRESH MUST NOT DESTROY WHAT IS ON SCREEN. The status is the
+///     context for the command being displayed; clearing it because one read
+///     failed would erase the very thing the user is looking at. So a failure
+///     reports an error and changes nothing else.
+///
+/// Modelled as a value type so the Go suite can execute the ordering rules with
+/// explicit "what if the reply arrives now" steps, which is impossible to express
+/// reliably against a live backend.
+struct CoalescingRefresh {
+    private var generation = RequestGeneration()
+    private(set) var inFlight = false
+
+    /// Number of callers that joined the in-flight read instead of starting one.
+    private(set) var joinedCount = 0
+
+    /// A caller arrives. Returns the generation to use when STARTING a read, or
+    /// nil when it should join one already in flight.
+    mutating func arrive() -> UInt64? {
+        if inFlight {
+            joinedCount += 1
+            return nil
+        }
+        inFlight = true
+        return generation.begin()
+    }
+
+    /// Whether a reply stamped `stamp` may commit.
+    func mayCommit(_ stamp: UInt64) -> Bool { generation.isCurrent(stamp) }
+
+    /// Finish a read, whatever its outcome. A failure still ends the read, or the
+    /// next click would join a read that has already finished and never return.
+    mutating func finish(_ stamp: UInt64) {
+        guard generation.isCurrent(stamp) else { return }
+        inFlight = false
+    }
+
+    /// Discard everything in flight, e.g. because the session changed and any
+    /// reply now describes a different backend.
+    mutating func invalidate() {
+        generation.invalidate()
+        inFlight = false
+    }
+}

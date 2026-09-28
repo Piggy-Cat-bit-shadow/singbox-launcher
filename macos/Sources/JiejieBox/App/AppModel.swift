@@ -1900,22 +1900,29 @@ final class AppModel {
             // reply would always look "newer than the command" even when it
             // reports the very state the command started from.
             let authoritative = snapshot.core.state
-            let settledHere = authoritative.isTerminal(for: op.kind)
+            // The decision lives in DaemonCommandLifetime so the Go suite EXECUTES
+            // it: concluding "finished" on the wrong state is what let a second
+            // lifecycle command race the first.
+            let verdict = reconcileCoreOperation(snapshotState: authoritative,
+                                                 kind: op.kind)
 
             apply(snapshot)
             guard coreOperation?.id == opID else { return }
 
-            if settledHere {
+            switch verdict {
+            case .confirmedFinished:
                 // The work finished; only the notification was lost. This is
                 // the case the deadline exists for, and it releases cleanly and
                 // silently because the user's operation did succeed.
                 finishCoreOperation(opID)
                 return
+            case .stillRunning:
+                // Still in flight. The marker stays — releasing it here is what
+                // let a second lifecycle command race the first.
+                lastError = L.coreOperationStillRunning.tr(resolvedLanguage)
+            case .unconfirmed:
+                lastError = L.coreOperationUnconfirmed.tr(resolvedLanguage)
             }
-
-            // Still in flight. The marker stays — releasing it here is what
-            // let a second lifecycle command race the first.
-            lastError = L.coreOperationStillRunning.tr(resolvedLanguage)
         } catch {
             // The backend could not be reached. Releasing the marker would make
             // the UI claim an operation ended when we cannot see the backend at

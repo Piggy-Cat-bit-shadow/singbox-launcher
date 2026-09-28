@@ -97,3 +97,56 @@ func daemonCommandSurvives(_ prepared: PreparedDaemonCommand?,
     }
     return false
 }
+
+// MARK: - Core operation reconciliation
+
+/// What to do when a lifecycle operation's deadline expires without a confirming
+/// event.
+///
+/// THE DEFECT THIS MODELS. Core operations wait for a backend event that says the
+/// work finished. If that event is lost — a dropped frame, a reconnected stream —
+/// the UI stays busy forever and every control is disabled, which is the worst
+/// possible failure for a VPN client: the user cannot start, stop, or retry.
+///
+/// The deadline exists for exactly that case, but what it may conclude is narrow.
+/// The snapshot is authoritative ONLY if it reports the operation's own goal
+/// reached; anything else leaves the marker in place. Releasing it there is what
+/// allowed a second lifecycle command to race the first — the UI declared the
+/// operation over while the backend was still working.
+enum CoreReconciliation: Equatable {
+    /// The snapshot proves the operation succeeded; release the marker silently,
+    /// because the user's action DID work and there is nothing to report.
+    case confirmedFinished
+    /// The snapshot shows the operation is still running: keep the marker and say
+    /// so, rather than pretending it ended.
+    case stillRunning
+    /// The backend could not be reached, so the outcome cannot be confirmed: keep
+    /// the marker and report that, because releasing it would claim an operation
+    /// ended when we cannot see the backend at all.
+    case unconfirmed
+}
+
+/// Decide what a timed-out lifecycle operation may conclude.
+///
+/// - Parameters:
+///   - snapshotState: the state the backend reported, or nil if the read failed.
+///   - kind: the goal the operation was trying to reach.
+func reconcileCoreOperation(snapshotState: CoreState?, kind: CoreGoal) -> CoreReconciliation {
+    guard let snapshotState else { return .unconfirmed }
+    return snapshotState.isTerminal(for: kind) ? .confirmedFinished : .stillRunning
+}
+
+/// Whether a snapshot may conclude a core operation, given the sequence numbers.
+///
+/// THE FRESHNESS RULE. A snapshot older than the command that started the
+/// operation describes the world BEFORE the user acted, so it cannot be evidence
+/// about the outcome. The reply must be strictly newer than the command's own
+/// observation.
+///
+/// Strictly: a snapshot at exactly the command's sequence reports the state the
+/// operation started from, which for a stop is still `running` and for a start is
+/// still `stopped`. Accepting it would settle the operation on the very state it
+/// was issued to change.
+func snapshotCanSettleOperation(snapshotSeq: UInt64, commandSeq: UInt64) -> Bool {
+    snapshotSeq > commandSeq
+}
