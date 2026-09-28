@@ -461,7 +461,16 @@ func (apiSvc *APIService) GetMeasurements() map[string]ProxyMeasurementState {
 func (apiSvc *APIService) ClearMeasurements() {
 	apiSvc.StateMutex.Lock()
 	defer apiSvc.StateMutex.Unlock()
-	apiSvc.mutableStateLocked().Measurements = make(map[string]ProxyMeasurementState)
+	st := apiSvc.mutableStateLocked()
+	st.Measurements = make(map[string]ProxyMeasurementState)
+	// THE ERROR MAP IS THE OTHER HALF OF THE SAME VIEW, SO IT IS CLEARED HERE TOO.
+	//
+	// `SetMeasurement` writes both, the UI reads both, and this function exists to discard
+	// the results of a run. Clearing only the measurements left every row with no delay but
+	// its previous error text still attached — the data gone and the complaint about it
+	// present, which reads as "these nodes are broken" rather than "these results were
+	// cleared". The user's only recourse would be to re-run the test they just dismissed.
+	st.LastPingError = make(map[string]string)
 }
 
 // GetLastPingError returns the last ping error message for a proxy, or empty string.

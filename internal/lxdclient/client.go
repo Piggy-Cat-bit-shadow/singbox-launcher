@@ -482,8 +482,40 @@ func (c *Client) ResourceContent(name string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, &ResourceError{StatusCode: resp.StatusCode, Name: name, Message: decodeError(resp)}
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	// A BOUND THAT CANNOT BE MISTAKEN FOR SUCCESS.
+	//
+	// This used to be `io.ReadAll(io.LimitReader(resp.Body, 64<<20))`, which returned a
+	// silent PREFIX for anything larger: 64 MB of a 100 MB file, indistinguishable from a
+	// complete small one. The caller writes those bytes into the machine's rule-set
+	// directory and treats them as the file, so a truncated rule-set does not fail at
+	// download time — it fails when the core loads it, with a parse error pointing at a file
+	// the user believes was fetched successfully.
+	//
+	// Reading ONE BYTE PAST the limit is what makes the overflow detectable. A limiter set
+	// to exactly the maximum cannot tell "the whole file" from "the file cut to the
+	// maximum", so the truncation would still be silent.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResourceContentBytes+1))
+	if err != nil {
+		return nil, &ResourceError{
+			Name: name, Message: "cannot read the resource content: " + err.Error(),
+		}
+	}
+	if int64(len(data)) > maxResourceContentBytes {
+		return nil, &ResourceError{
+			Name: name,
+			Message: fmt.Sprintf("the resource is larger than the %d MB limit, so it cannot "+
+				"be fetched in one piece. Download it on the machine itself.",
+				maxResourceContentBytes>>20),
+		}
+	}
+	return data, nil
 }
+
+// maxResourceContentBytes bounds one resource download.
+//
+// One byte MORE is read than this value, so that a resource exceeding the limit is
+// REPORTED rather than silently truncated.
+const maxResourceContentBytes = 64 << 20
 
 // DeleteResource удаляет ресурс (DELETE /admin/resources/{name}).
 //
