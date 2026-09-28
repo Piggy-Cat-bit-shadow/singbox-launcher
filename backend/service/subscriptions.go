@@ -508,6 +508,26 @@ func looksLikeURL(raw string) bool {
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
+// LooksLikeURLForTest exposes the URL-acceptance rule AS THE API APPLIES IT, to
+// the cross-language contract test.
+//
+// Exported because the frontend must apply the SAME rule, and the only way to
+// assert that is to compare the two implementations. A frontend whose rule is
+// STRICTER than this one silently disables its own submit button on input the
+// backend would accept, and the user is given no error to explain it — the defect
+// this pair of functions exists to prevent.
+//
+// The TRIM is part of the rule, not an accident of one call site: AddSubscription
+// trims before validating, so "  https://…  " — which is what a paste from a
+// terminal or a chat message often looks like — is accepted. Exposing the bare
+// predicate would have encoded a rule the product does not actually apply, and
+// the contract test would then have demanded the frontend reject input the
+// backend takes.
+//
+// Named for its purpose rather than as a general API: nothing in the product
+// should call it, and the suffix makes that obvious at a call site.
+func LooksLikeURLForTest(raw string) bool { return looksLikeURL(strings.TrimSpace(raw)) }
+
 // displayNameFromURL derives a readable name from a URL host.
 func displayNameFromURL(raw string) string {
 	withoutScheme := raw
