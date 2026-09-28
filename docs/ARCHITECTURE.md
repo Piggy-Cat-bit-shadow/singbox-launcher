@@ -34,6 +34,26 @@ Fyne desktop GUI.
 > backend dependency graph). See **[MACOS_MENU_BAR.md](MACOS_MENU_BAR.md)** for
 > the app guide and **[BACKEND_PROTOCOL.md](BACKEND_PROTOCOL.md)** for the IPC
 > contract.
+>
+> **How the frontend is tested.** `swift test` CANNOT build here: the toolchain
+> ships neither XCTest nor the Swift Testing macro plugin (`@State` fails with
+> `external macro implementation type 'SwiftUIMacros.StateMacro' could not be
+> found`), and `macos/Package.swift` therefore has no test target. Invariants that
+> are visible in source shape are checked from the Go suite against the Swift text
+> (`backend/service/contract_test.go`), but text matching cannot distinguish code
+> that runs from code that has been commented out or inverted.
+>
+> Logic that DECIDES something is therefore kept in files with **no SwiftUI
+> dependency** — `Models/` holds `DaemonCommandLifetime`, `NavigationStackModel`,
+> `RequestGeneration`, `ActionPolicy`, `SingleFlight`, `SubscriptionURLInput`,
+> `DraftStore`, alongside the protocol DTOs — and `internal/swiftlogic` compiles
+> those with `swiftc` and EXECUTES them under `go test`, asserting against the
+> shipping implementation. `Localization.swift` cannot participate (it imports
+> SwiftUI for its `EnvironmentKey`), so a stub is generated from the real enum
+> rather than hand-maintained. When adding a rule that decides what a control
+> offers, where navigation goes, or which reply may paint the screen, put it in
+> `Models/` and test it there: a decision that lives in `AppModel` or a view is a
+> decision no test in this repository can run.
 
 ```
 JiejieBox.app/Contents/MacOS/JiejieBox           SwiftUI frontend
