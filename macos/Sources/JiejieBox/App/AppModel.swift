@@ -88,6 +88,9 @@ final class AppModel {
         case importingCore
         case configuringDaemon
         case pairingDaemon
+        /// Forgetting the pairing. Its own case: sharing `pairingDaemon` made
+        /// the row say "Pairing…" while doing the opposite.
+        case unpairingDaemon
 
         /// The lifecycle goal, for the three core commands.
         ///
@@ -117,6 +120,27 @@ final class AppModel {
         /// reusing another setting's id made that other row display "Saving…"
         /// for a save it was not performing.
         case subscriptionEnabled(String)
+    }
+
+    /// Why a destructive daemon action is unavailable, or nil when it is allowed.
+    ///
+    /// A reason rather than a bare Bool, because a disabled row with no
+    /// explanation is the interaction defect this whole audit is about: the user
+    /// sees a grey control and cannot tell whether it is a bug, a permission
+    /// problem, or a rule.
+    enum DaemonDestructiveBlock: Equatable {
+        case statusUnknown
+        case coreStateUnknown
+        case vpnRunning
+        case coreTransitioning
+        case coreError
+        case busy
+    }
+
+    /// The single answer to "may the daemon control plane be torn down?".
+    struct DaemonDestructivePolicy: Equatable {
+        let allowed: Bool
+        let reason: DaemonDestructiveBlock?
     }
 
     /// A daemon setup step the user can request.
@@ -1631,12 +1655,60 @@ final class AppModel {
         return paired
     }
 
+    /// Forget the pairing. Distinct pending token from pairing, so the row can
+    /// say "Unpairing…" rather than "Pairing…" for the opposite operation.
     func unpairDaemon() async {
-        await withPending(.pairingDaemon, success: nil) {
+        await withPending(.unpairingDaemon, success: nil) {
             self.daemon = try await self.client.unpairDaemon()
             self.showTransient(L.pairingRemoved.tr(self.resolvedLanguage))
         }
+        await loadDaemonStatus()
     }
+
+    /// True when the daemon control plane may be torn down.
+    ///
+    /// THE SAFETY RULE, STATED ONCE. `destructiveBlocked` in the view asked only
+    /// whether the daemon was active and the core `running`. That is one state
+    /// out of several that make the same teardown unsafe:
+    ///
+    ///   * `starting` — the core is coming up through the daemon, and removing
+    ///     the pairing under it aborts the start the user just requested.
+    ///   * `stopping` — the core is mid-teardown using the same channel.
+    ///   * an in-flight lifecycle or apply operation — the teardown would race
+    ///     the operation holding the channel.
+    ///
+    /// So the rule is not "is it running" but "is the daemon engine SETTLED and
+    /// IDLE". Expressed as a policy object so the row's disabled state, its
+    /// explanation and the confirmation all read the same answer, and so it can
+    /// be tested without a UI.
+    var daemonDestructivePolicy: DaemonDestructivePolicy {
+        guard let status = daemon else {
+            return DaemonDestructivePolicy(allowed: false, reason: .statusUnknown)
+        }
+        guard status.active_mode else {
+            // Installed but not carrying traffic: nothing depends on it.
+            return DaemonDestructivePolicy(allowed: pending == nil, reason: pending == nil ? nil : .busy)
+        }
+        // Active engine: the control channel is in use unless the core is fully
+        // settled and nothing is in flight.
+        if pending != nil { return DaemonDestructivePolicy(allowed: false, reason: .busy) }
+        guard let state = core?.state else {
+            return DaemonDestructivePolicy(allowed: false, reason: .coreStateUnknown)
+        }
+        if state == .running {
+            return DaemonDestructivePolicy(allowed: false, reason: .vpnRunning)
+        }
+        if state.isTransitioning {
+            return DaemonDestructivePolicy(allowed: false, reason: .coreTransitioning)
+        }
+        if state == .error {
+            return DaemonDestructivePolicy(allowed: false, reason: .coreError)
+        }
+        return DaemonDestructivePolicy(allowed: true, reason: nil)
+    }
+
+    /// Whether the daemon control plane can be torn down right now.
+    var canDestroyDaemonControlPlane: Bool { daemonDestructivePolicy.allowed }
 
     func setDaemonKeepRunning(_ keepRunning: Bool) async {
         await withPending(.updatingSetting(.daemonKeepRunning),

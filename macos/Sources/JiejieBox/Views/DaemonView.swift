@@ -69,11 +69,38 @@ struct DaemonView: View {
                 }
             }
 
+            // THE OPERATION PROGRESS BELONGS TO THE PAGE, NOT TO ONE SECTION.
+            //
+            // It used to be drawn only inside `setupSection`, which is rendered
+            // exclusively while the daemon is NOT ready. So Re-pair and Remove
+            // Service — the two operations available on a READY daemon — started
+            // a pending operation that had nowhere to appear: the screen showed
+            // no spinner, no message, only rows that had quietly gone grey. The
+            // user had no way to tell a click from a dead button.
+            daemonOperationProgress
+
             if let cmd = model.daemonCommand {
                 commandSection(cmd)
             }
         }
         .padding(.vertical, 8)
+    }
+
+    /// Progress for any daemon operation, wherever it was started from.
+    @ViewBuilder
+    private var daemonOperationProgress: some View {
+        switch model.pending {
+        case .configuringDaemon:
+            MenuSection(L.statusSection.tr(language)) {
+                PendingRow(L.configuringDaemonPending.tr(language))
+            }
+        case .unpairingDaemon:
+            MenuSection(L.pairing.tr(language)) {
+                PendingRow(L.unpairingDaemon.tr(language))
+            }
+        default:
+            EmptyView()
+        }
     }
 
     // MARK: - Status
@@ -296,9 +323,10 @@ struct DaemonView: View {
             // Removing the pairing or the service underneath a live daemon VPN
             // tears down the control channel the running core depends on. This
             // is a real constraint from the daemon's design, not caution, so
-            // the rows explain it rather than silently refusing.
-            if let blocked = destructiveBlockedReason(status) {
-                Text(blocked)
+            // the reason is stated in the section rather than left to a tooltip
+            // on a control the user cannot press.
+            if !model.daemonDestructivePolicy.allowed {
+                Text(destructiveHelp)
                     .font(Typography.rowSubtitle)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -308,39 +336,96 @@ struct DaemonView: View {
 
             if status.paired {
                 MenuRow(L.forgetPairing.tr(language),
-                        subtitle: destructiveSubtitle(status, L.forgetPairingSubtitle.tr(language)),
+                        subtitle: destructiveSubtitle(L.forgetPairingSubtitle.tr(language)),
                         systemImage: "link.badge.plus",
                         role: .destructive) {
-                    Task { await model.unpairDaemon() }
+                    // A destructive action that cannot be undone from here needs
+                    // a confirmation. Removing the pairing deletes the local
+                    // client identity, and the ONLY way back is a new one-time
+                    // invite generated at the machine running the service — so a
+                    // mis-click costs a trip to that machine. Deleting a
+                    // subscription was already confirmed; this is strictly harder
+                    // to recover from.
+                    model.drafts.set(DraftStore.daemonUnpair, DraftStore.confirmWord)
                 }
-                .disabled(model.pending != nil || destructiveBlocked(status))
+                .disabled(!model.canDestroyDaemonControlPlane)
+                .help(destructiveHelp)
+                .confirmationDialog(
+                    L.forgetPairingConfirmTitle.tr(language),
+                    isPresented: draftBinding(DraftStore.daemonUnpair),
+                    titleVisibility: .visible
+                ) {
+                    Button(L.forgetPairing.tr(language), role: .destructive) {
+                        model.drafts.clear(DraftStore.daemonUnpair)
+                        Task { await model.unpairDaemon() }
+                    }
+                    Button(L.cancel.tr(language), role: .cancel) {
+                        model.drafts.clear(DraftStore.daemonUnpair)
+                    }
+                } message: {
+                    Text(L.forgetPairingConfirmMessage.tr(language))
+                }
             }
 
             MenuRow(L.removeService.tr(language),
-                    subtitle: destructiveSubtitle(status, "Removes the system service."),
+                    subtitle: destructiveSubtitle(L.removeServiceSubtitle.tr(language)),
                     systemImage: "trash",
                     role: .destructive) {
-                Task { await model.daemonSetup(.uninstall) }
+                model.drafts.set(DraftStore.daemonRemoveService, DraftStore.confirmWord)
             }
-            .disabled(model.pending != nil || destructiveBlocked(status))
+            .disabled(!model.canDestroyDaemonControlPlane)
+            .help(destructiveHelp)
+            .confirmationDialog(
+                L.removeServiceConfirmTitle.tr(language),
+                isPresented: draftBinding(DraftStore.daemonRemoveService),
+                titleVisibility: .visible
+            ) {
+                Button(L.removeService.tr(language), role: .destructive) {
+                    model.drafts.clear(DraftStore.daemonRemoveService)
+                    Task { await model.daemonSetup(.uninstall) }
+                }
+                Button(L.cancel.tr(language), role: .cancel) {
+                    model.drafts.clear(DraftStore.daemonRemoveService)
+                }
+            } message: {
+                Text(L.removeServiceConfirmMessage.tr(language))
+            }
         }
     }
 
-    /// True when a destructive daemon action would break a live connection.
+    /// A confirmation dialog bound to a draft slot.
     ///
-    /// Only while the daemon is BOTH the active engine and actually carrying
-    /// traffic: an installed-but-unused service can be removed freely.
-    private func destructiveBlocked(_ status: DaemonStatus) -> Bool {
-        status.active_mode && model.core?.state == .running
+    /// The draft lives on the model, so the dialog survives a re-render instead
+    /// of being dismissed by an unrelated update while the user reads it.
+    private func draftBinding(_ key: String) -> Binding<Bool> {
+        Binding(
+            get: { model.drafts.draft(key).text == DraftStore.confirmWord },
+            set: { presented in
+                if !presented { model.drafts.clear(key) }
+            })
     }
 
-    private func destructiveBlockedReason(_ status: DaemonStatus) -> String? {
-        guard destructiveBlocked(status) else { return nil }
-        return "Stop the VPN from Home before removing the pairing or the service."
+    /// Why the destructive rows are unavailable, when they are.
+    ///
+    /// The question is asked of the MODEL's policy, never re-derived here: the
+    /// row's disabled state and this explanation are two renderings of one
+    /// answer, so they cannot disagree about whether the action is allowed.
+    private var destructiveHelp: String {
+        guard let reason = model.daemonDestructivePolicy.reason else { return "" }
+        switch reason {
+        case .vpnRunning: return L.destructiveStopVPNFirst.tr(language)
+        case .coreTransitioning: return L.destructiveCoreTransitioning.tr(language)
+        case .coreError: return L.destructiveCoreError.tr(language)
+        case .busy: return L.anotherOperationRunning.tr(language)
+        case .statusUnknown: return L.destructiveStatusUnknown.tr(language)
+        case .coreStateUnknown: return L.destructiveCoreStateUnknown.tr(language)
+        }
     }
 
-    private func destructiveSubtitle(_ status: DaemonStatus, _ normal: String) -> String {
-        destructiveBlocked(status) ? "Stop the VPN first." : normal
+    /// The row's subtitle while blocked, so the reason is visible without
+    /// hovering a control the user is trying to understand.
+    private func destructiveSubtitle(_ normal: String) -> String {
+        model.daemonDestructivePolicy.allowed ? normal : L.destructiveBlockedShort.tr(language)
     }
 
     // MARK: - Command output
@@ -450,8 +535,31 @@ func openInTerminal(_ command: String, model: AppModel) {
     process.arguments = ["-e", script]
     do {
         try process.run()
-        model.setTransientStatus("Command opened in Terminal.")
     } catch {
-        model.setTransientStatus("Could not open Terminal. Copy the command instead.")
+        model.setTransientStatus(L.terminalOpenFailed.tr(model.resolvedLanguage))
+        return
+    }
+
+    // WAIT FOR OSASCRIPT TO ACTUALLY FINISH.
+    //
+    // `try process.run()` only proves the osascript PROCESS WAS CREATED. It says
+    // nothing about whether AppleScript ran, whether Terminal existed, or
+    // whether `do script` succeeded — osascript can still exit non-zero a moment
+    // later, for example when automation permission has been refused or Terminal
+    // is not available. Reporting success at that point told the user the command
+    // was running when nothing had happened, which is the worst outcome for a
+    // step they are about to wait on.
+    //
+    // The wait is moved off the main thread and the result is reported from the
+    // real exit status.
+    process.terminationHandler = { proc in
+        let code = proc.terminationStatus
+        Task { @MainActor in
+            if code == 0 {
+                model.setTransientStatus(L.terminalOpened.tr(model.resolvedLanguage))
+            } else {
+                model.setTransientStatus(L.terminalOpenFailed.tr(model.resolvedLanguage))
+            }
+        }
     }
 }

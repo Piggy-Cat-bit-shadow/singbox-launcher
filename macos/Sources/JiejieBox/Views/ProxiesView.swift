@@ -91,6 +91,12 @@ struct ProxiesView: View {
                 Button {
                     Task { await model.selectGroup(group.name) }
                 } label: {
+                    // The switch is offered one at a time. The model already
+                    // refuses overlapping reads by generation, but a control that
+                    // is clickable while its own request is outstanding invites
+                    // exactly the rapid A-B-C sequence that produces the
+                    // out-of-order replies the generation exists to reject.
+
                     // The checkmark marks the group in use; the label shows the
                     // node it currently points at, which is the fact the user
                     // actually wants from this menu.
@@ -117,9 +123,22 @@ struct ProxiesView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(model.groups.count > 1
-              ? "\(L.switchGroupHelp.tr(language)) \(model.groups.count) \(L.groupCountHelp.tr(language))"
-              : L.activeSelectorGroup.tr(language))
+        // Disabled while a node list is loading OR another operation holds the
+        // model. Without this the picker stayed live during its own request, so
+        // a user could queue A, B and C faster than the backend answered — the
+        // exact sequence whose replies can arrive out of order.
+        .disabled(model.proxiesLoading || model.pending != nil)
+        .help(pickerHelp)
+    }
+
+    /// Explains a disabled picker instead of leaving a grey control unexplained.
+    private var pickerHelp: String {
+        if model.proxiesLoading { return L.loadingNodes.tr(language) }
+        if model.pending != nil { return L.anotherOperationRunning.tr(language) }
+        if model.groups.count > 1 {
+            return "\(L.switchGroupHelp.tr(language)) \(model.groups.count) \(L.groupCountHelp.tr(language))"
+        }
+        return L.activeSelectorGroup.tr(language)
     }
 
     /// A real button with its own hit area, not a floating label. Disabled with
@@ -186,7 +205,12 @@ struct ProxiesView: View {
     }
 
     private var currentGroupLabel: String {
-        let group = model.groups.first { $0.name == model.selectedGroup }
+        // While a switch is in flight the header names the group being LOADED,
+        // not the one still on screen. Otherwise the label says A, then jumps to
+        // B when the reply lands, with no indication anything was happening —
+        // and a user who clicks twice has no feedback either way.
+        let target = model.pendingSelectedGroup ?? model.selectedGroup
+        let group = model.groups.first { $0.name == target }
         let base = group?.label
             ?? (model.selectedGroup.isEmpty ? L.noGroup.tr(language) : model.selectedGroup)
         guard let selected = group?.selected_display ?? group?.selected, !selected.isEmpty else {

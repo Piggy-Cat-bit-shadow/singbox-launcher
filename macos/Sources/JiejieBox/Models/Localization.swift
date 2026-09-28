@@ -356,6 +356,25 @@ enum L: CaseIterable {
     case reloadConfigAction
     /// The Proxy screen's notice action that fetches then rebuilds.
     case updateSubscriptionsAction
+    /// Confirmation before forgetting the pairing.
+    case forgetPairingConfirmTitle
+    case forgetPairingConfirmMessage
+    /// Confirmation before removing the service.
+    case removeServiceConfirmTitle
+    case removeServiceConfirmMessage
+    /// Why a destructive daemon action is unavailable.
+    case destructiveStopVPNFirst
+    case destructiveCoreTransitioning
+    case destructiveCoreError
+    case destructiveStatusUnknown
+    case destructiveCoreStateUnknown
+    case destructiveBlockedShort
+    /// Pending text for a daemon operation that has no setup section on screen.
+    case configuringDaemonPending
+    case unpairingDaemon
+    /// Outcome of handing a command to Terminal, reported from osascript's exit.
+    case terminalOpened
+    case terminalOpenFailed
 
     // Core
     case core
@@ -793,6 +812,20 @@ extension L {
         case .externalPromptBody: return "These changes will not take effect until the external configuration is updated."
         case .reloadConfigAction: return "Reload Config"
         case .updateSubscriptionsAction: return "Update Subscriptions"
+        case .forgetPairingConfirmTitle: return "Forget pairing?"
+        case .forgetPairingConfirmMessage: return "This removes the local client identity and disconnects JiejieBox from the daemon. Restoring it requires a new one-time invite from the machine running the service."
+        case .removeServiceConfirmTitle: return "Remove the service?"
+        case .removeServiceConfirmMessage: return "This generates a command that uninstalls the JiejieBox service. The VPN must not be running through it."
+        case .destructiveStopVPNFirst: return "Stop the VPN from Home first — removing the pairing or the service under a running daemon tears down the channel it depends on."
+        case .destructiveCoreTransitioning: return "The core is still starting or stopping. Wait for it to settle."
+        case .destructiveCoreError: return "The core is in an error state. Resolve it from Home first."
+        case .destructiveStatusUnknown: return "The daemon status has not loaded yet."
+        case .destructiveCoreStateUnknown: return "The core state has not loaded yet."
+        case .destructiveBlockedShort: return "Not available right now."
+        case .configuringDaemonPending: return "Preparing…"
+        case .unpairingDaemon: return "Removing pairing…"
+        case .terminalOpened: return "Command opened in Terminal."
+        case .terminalOpenFailed: return "Could not open Terminal. Copy the command and run it yourself."
 
         case .core: return "Core"
         case .restartCore: return "Restart Core"
@@ -1186,6 +1219,20 @@ extension L {
         case .externalPromptBody: return "在外部配置更新之前，这些改动不会生效。"
         case .reloadConfigAction: return "重新加载配置"
         case .updateSubscriptionsAction: return "更新订阅"
+        case .forgetPairingConfirmTitle: return "忘记配对？"
+        case .forgetPairingConfirmMessage: return "这将删除本地客户端身份，并断开 JiejieBox 与该守护进程的连接。恢复需要在运行服务的那台机器上重新生成一次性邀请。"
+        case .removeServiceConfirmTitle: return "移除服务？"
+        case .removeServiceConfirmMessage: return "这将生成一条卸载 JiejieBox 服务的命令。执行前 VPN 不应通过该服务运行。"
+        case .destructiveStopVPNFirst: return "请先在主页停止 VPN——在守护进程仍在运行时移除配对或服务，会切断它所依赖的控制通道。"
+        case .destructiveCoreTransitioning: return "内核正在启动或停止，请等待其完成。"
+        case .destructiveCoreError: return "内核处于错误状态，请先在主页处理。"
+        case .destructiveStatusUnknown: return "守护进程状态尚未加载。"
+        case .destructiveCoreStateUnknown: return "内核状态尚未加载。"
+        case .destructiveBlockedShort: return "当前不可用。"
+        case .configuringDaemonPending: return "正在准备…"
+        case .unpairingDaemon: return "正在解除配对…"
+        case .terminalOpened: return "命令已在终端中打开。"
+        case .terminalOpenFailed: return "无法打开终端。请复制命令后自行运行。"
 
         case .core: return "内核"
         case .restartCore: return "重启内核"
