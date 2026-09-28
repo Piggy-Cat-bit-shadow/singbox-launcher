@@ -677,3 +677,219 @@ the user would see "stopped" for a classic core that was starting, or "running"
 for a daemon they had just left. `BeginDaemonStop`/`EndDaemonStop` now take the
 backend performing the stop and refuse to act once it is no longer current: the
 daemon engine's equivalent of the Classic generation rule.
+
+---
+
+# Fourth pass — IPC session, disk transactions, and request scheduling
+
+The third pass fixed the lifecycle. This one is about the layers the lifecycle talks
+through, and it found defects that made the previous round's work unreachable in the
+shipped app.
+
+## P0 — the IPC read loop was serialised behind each handler
+
+`Serve` read a line, ran the handler to completion, and only then read the next one.
+`start_core` can legitimately block for the whole operation budget — a config build, a
+password prompt, a daemon apply. While it did, the server did not read the pipe at all,
+so a `stop_core` the user sent next sat unread.
+
+**"Stop cannot supersede start" was not a lifecycle defect.** The command never reached
+the controller. Every ordering guarantee the previous round established was correct and
+irrelevant, because the second command was never dispatched.
+
+The loop now hands each request to its own goroutine and returns to reading
+immediately. Ordering is kept where it means something — each domain serialises its own
+mutations — and nowhere else, because the request that must interrupt another is exactly
+the one that must not queue behind it. Responses carry their ids, so out-of-order
+replies were already expressible. `Serve` drains in-flight handlers before returning, so
+"when Serve returns, every accepted request was answered" still holds.
+
+## P0 — a restarted backend looked silent to the frontend
+
+`seq` is a per-process counter; the frontend's high-water mark lives as long as the
+frontend does. After a helper restart the new process counted from 1 while the client
+still held (say) 137, so **every** event from the new helper compared as stale and was
+dropped. Core state, traffic, selections, subscriptions and daemon state all froze until
+the new helper emitted more events than the old one ever had.
+
+A sequence number is only meaningful within the session that issued it, so events and
+snapshots now carry one. A client scopes its mark to the session, re-baselines when it
+changes, and **drops** an event from a session it is not following — the two mistakes
+here are opposite (dropping the live backend's events, applying the dead one's) and both
+came from the same ambiguity.
+
+## P0 — the snapshot could roll a newer event backwards
+
+The stream opens before the snapshot is requested, so an event can arrive while the
+snapshot is in flight. Applying it immediately and then applying the snapshot on top is
+a rollback: the snapshot was composed at an earlier sequence and describes the older
+state, and the event has already been consumed, so the UI stays wrong until something
+unrelated happens.
+
+Events that race the baseline are now buffered and replayed after it, filtered against
+its sequence. The backend's `Snapshot` had the mirror problem — it read the sequence,
+released the lock, and only then built the content, so the number described a moment
+**before** anything in the snapshot was captured. Both are now captured in one critical
+section, which makes the number a real version point.
+
+## P0 — an old helper's exit could tear down the new one
+
+Termination handlers run asynchronously, after the app has moved on, and consulted
+client-wide state. During a restart the old helper's handler therefore judged the old
+process's exit by the **new** process's intent — so a normal exit was reported as a
+crash — and then cleared the new helper's process, stdin and read task. A live backend
+was reported as dead with its event stream closed.
+
+Every async continuation now captures the generation it was created for, and a
+superseded one may touch nothing. Related: `shutdown` terminated, slept a fixed
+interval, and released ownership **without checking whether the helper had exited**, so
+`restart()` could start a second helper over a live first one — two processes sharing
+the state files, the config, the core and the daemon channel. It now escalates and
+confirms, and reports failure rather than pretending.
+
+## P0 — provenance proved the past, not the present
+
+The marker recorded `managed: true`, which says the launcher built a config here at
+some time. It does not say the file present now **is** that config. A user who edited
+config.json by hand left the marker untouched, so the next rebuild was authorised to
+delete their work.
+
+The marker is now bound to content: it carries the SHA-256 of the bytes it describes,
+and ownership holds only while the file still matches. A mismatch is UNKNOWN rather than
+EXTERNAL — the launcher cannot tell the user's own edit from a foreign tool, and
+accusing the user of being someone else is the mistake this file already made once.
+
+The hole was not one missing call. Only the maintenance reload and the explicit adoption
+recorded ownership; every path that actually **builds** the config recorded nothing, and
+on a fresh install the launcher disowned the file it had just created. So the promotion
+point itself now announces what it promoted, which makes the write and its description
+one transaction: a path that promotes a config and forgets is no longer expressible.
+
+## P0 — state.json had no single transaction model
+
+The subscription CRUD paths saved the whole file without taking the lock the refresh
+path used. Two unsynchronised whole-file writers is worse than a lost update — the
+concurrent test observed state.json left **unparseable**, because each save is a
+truncate-and-write the other can walk into. All mutations now go through one helper that
+holds the lock across the entire read-modify-write, **including the load**: locking only
+the save still lets a refresh write back a snapshot it read before the user's edit.
+
+Update-all loaded before locking, and the repair is deliberately not a bigger lock. The
+sweep fetches every subscription over the network, so holding the lock there would block
+every subscription edit behind the slowest provider. It now snapshots source **IDs**
+under the lock, fetches outside it, and merges under a fresh lock that re-reads the
+current state and copies only fetch-owned fields. A user's rename, URL or enabled flag is
+never written from a fetch.
+
+## P0 — core import raced the lifecycle it was checking
+
+`coreIsStoppedForReplacement` consulted the running flag and the button state, both of
+which stay false while a start is **in flight**. An import arriving in that window was
+permitted to rename the core binary while the start goroutine was about to exec the old
+path — version and config validated against one file, the process running another.
+
+Two changes, both needed: the check now consults the lifecycle (where "stopping" is not
+stopped), and replacement takes a **lease** from the operation record, because a check
+and a rename are two steps and only mutual exclusion closes the window between them. The
+lease refuses where an ordinary operation supersedes — superseding a start to install a
+core would cancel the user's start and then rename the binary it was about to exec,
+which is the race dressed up as success.
+
+## P0 — unpairing had no backend guard and outlived its own credentials
+
+`UnpairDaemonForget` called straight through to the controller. The Swift view disables
+the control while the daemon is in use, but a UI is not a safety boundary. It is now
+refused while the core runs or an operation is in flight.
+
+The live transport also survived: deleting a certificate from disk does not invalidate
+an open socket, so the UI reported `Paired=false` while the old backend could still
+control the daemon. Unpairing now tears that transport down.
+
+And the write order was backwards — the identity was deleted before the settings were
+saved, so a failed save left settings naming a pairing whose credentials no longer
+existed. Settings are written first now, so failing leaves everything intact and still
+paired: a state the app can describe.
+
+## P1 — the rest
+
+- **`CancelActive` had zero callers** despite a comment describing exactly when it was
+  called, so a core killed externally, a daemon FATAL, a mode switch and shutdown all
+  left a latency test probing a dead transport. Wired to those three real triggers, with
+  tests that drive the **triggers** rather than the method — a test that calls it
+  directly passes with every call site deleted.
+- **`testContext` leaked a goroutine per test**: it built a context *and* a
+  shutdown-watcher goroutine and returned only the context. Two hundred tests, two
+  hundred parked goroutines. It now derives from one shared run context.
+- **A write failure was only a log line.** The backend kept generating events into a
+  pipe nobody read while a Classic core kept running with no frontend. It now fails the
+  connection and finishes the read loop so the normal teardown runs.
+- **A successful refresh hid a failed rebuild.** The core logged the rebuild failure and
+  returned `nil`, so the user was told "N nodes from M sources" while config.json had
+  not been touched. Both phases now travel out on the result.
+- **`MethodSubscribe` was a fake handshake**: events began at connection time regardless,
+  while the handler acknowledged a subscription that did not exist. The asymmetry is
+  documented rather than implied, and the ordering guarantee moved to the snapshot
+  barrier, which is real.
+- **Enabling/disabling or repointing a subscription** neither marked the config stale nor
+  invalidated the previous provider's nodes and metadata; a URL change now clears the
+  materialisation, and a duplicate URL is refused on edit as well as on add.
+
+## What this pass confirmed as already correct
+
+`subscription_import.go` already took the lock before loading state. `writeCandidate`
+already used the candidate-then-rename pattern. The remaining `RunningState.IsRunning()`
+and `GetVPNButtonState` uses are display derivations, not safety gates — the two safety
+gates now consult the operation record. The operation state machine, the engine-switch
+transaction and the fallback identity proof from the previous rounds hold up.
+
+## The review of this pass, and the two regressions it found in it
+
+Every round in this document was followed by a review of the round itself. This pass's
+review found ten defects — two of them introduced by the pass being reviewed, which is
+the honest reason to record it here rather than only in the commit.
+
+**The sweep was disconnected.** Restructuring the subscription merge, the call site was
+replaced with `_ = sweepIDs` and the call never re-added. Every subscription silently
+stopped refreshing while `UpdateSubscriptions` still reported `RefreshOK: true` — lying
+in exactly the direction the two-phase result had just been built to prevent, in the
+same round that built it. Its own test could not see it, because that test asserted "no
+fetch happens inside the lock", which is trivially true of code that fetches nothing.
+The test now asserts the sweep is *called*.
+
+**The merge lost its lock.** The sweep re-reads state under a brief lock and the caller
+no longer wraps it, but the read-modify-write needs the lock itself; otherwise it is a
+second unsynchronised whole-file writer beside the CRUD paths the same round had just
+serialised. `state.Load` is also not a pure read — it can `Save` — so a "fetch results"
+merge could rewrite the user's outbound config as a side effect.
+
+Three further defects predated the pass and were only visible once it was examined
+closely: the maintenance lease's check and take were in two critical sections (so a
+start could be *superseded* by an import rather than refusing it); unpair deleted
+credentials it had failed to stop using, because the engine switch ran after the wipe
+and its error was swallowed; and the provenance hook was installed *after* the
+construction-time build it was meant to describe, leaving the hole open on the first
+build of every launch.
+
+### A test helper that was editing its own subject
+
+`stripGoComments` cut every line at the first `//`, which is a comment only outside a
+string literal. Go source is full of `json:"http://…"`, so every struct field after one
+silently vanished from the text under test. Two tests were disabling themselves —
+including the P0 assertion for the client half of session identity, which checked the
+same literal twice and never tested the snapshot at all.
+
+The lesson is not "grep tests are bad" but that **a helper which transforms the subject
+must be tested at least as carefully as the assertions that use it**. A source-shape
+test is only as strong as the fidelity of the text it is handed, and a lossy helper
+converts a passing assertion into no assertion at all while still reporting success.
+Fixing the stripper immediately failed four tests whose assertions had been passing
+against text their own helper had already deleted.
+
+### The race that the review prompted
+
+`SendEvent` writes the stream from subscriber goroutines that `drain()` did not track,
+and `defer unsubscribe()` ran *after* the drain — so `Serve` could return while an event
+was still being written, and a caller reading the stream raced a live writer. Three
+races in 25 stress runs; zero once unsubscribe moved before the drain. Found only
+because the review asked what concurrent dispatch had made reachable, and the answer
+was "a write path nobody was counting".

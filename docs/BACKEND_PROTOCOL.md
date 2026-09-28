@@ -66,13 +66,32 @@ Exactly one of `result` / `error` is present.
 ### Event
 
 ```json
-{"event": "core_state_changed", "seq": 12, "payload": { ... }}
+{"event": "core_state_changed", "seq": 12, "session": "9f3c…", "payload": { ... }}
 ```
 
-- `seq` is **monotonic** across all events.
-- The snapshot carries `snapshot_seq`: the event sequence at the moment it was
-  taken. A client must discard any event whose `seq` is `<= snapshot_seq`,
-  which is what makes "subscribe before snapshot" race-free.
+- `seq` is **monotonic across all events** *within one backend process*.
+- `session` identifies that process. It is minted once per backend instance and
+  stamped on every event and every snapshot.
+
+> **`seq` is only meaningful together with `session`.** The number is a per-process
+> counter, but a client's high-water mark outlives any one process. Without the
+> session, a restarted backend counts from 1 while the client still holds e.g. 137, so
+> **every** event from the new process compares as stale and is dropped: the UI freezes
+> until the new backend happens to emit more events than the old one ever did.
+>
+> A client must therefore scope its mark to the session and re-baseline when the
+> session changes — and must **drop** events from a session it is not following. The
+> two mistakes here are opposite (dropping the live backend's events, applying the dead
+> one's) and both come from the same ambiguity.
+
+- The snapshot carries `snapshot_seq` **and** `session`: the sequence, at the moment it
+  was taken, of the session that took it. The sequence and the snapshot's contents are
+  captured in one critical section, so the number is a real version point rather than a
+  timestamp for content that had not been read yet.
+- Events that race the snapshot are buffered and replayed after it, filtered against
+  `snapshot_seq`. Applying an event first and the snapshot on top is a **rollback**: the
+  snapshot was composed at an earlier sequence and describes the older state, and the
+  event has been consumed, so the UI stays wrong until something unrelated happens.
 
 ---
 
@@ -299,17 +318,23 @@ it is advice for the UI, not a guarantee.
 
 ## 6. Lifecycle rules the frontend must respect
 
-1. **Subscribe before snapshot.** Events that race the snapshot are filtered by
-   `snapshot_seq`, not lost.
+1. **Subscribe before snapshot.** Events that race the snapshot are buffered and
+   replayed on top of it, filtered by `snapshot_seq` — not lost, and not applied
+   underneath it. Both the sequence and the session matter (see §1).
 2. **Quit never pre-stops the core.** The frontend sends `shutdown` and lets the
    backend run its graceful-exit policy. In classic mode that stops the core; in
    daemon mode with keep-running enabled it deliberately leaves it. Calling
    `stop_core` first would break daemon persistence.
 3. **Never optimistically flip state.** Every command's result is re-read from
    the core, so a switch that silently failed does not look applied.
-4. **Operations that can half-succeed report it.** `MaintenanceResult.ok` is
-   false when a refresh ran but every source failed — a case that returns no
-   error yet changed nothing.
+4. **Operations that can half-succeed report it.** `MaintenanceResult.ok` is the
+   OVERALL verdict, derived from both phases rather than assumed from the first.
+   `refresh_ok` and `rebuild_ok` are reported separately, because they fail
+   independently and the difference is what the user needs: a refresh that worked with
+   a rebuild that failed means the node list moved while the **running** config did
+   not — the most misleading outcome available, since everything the user can see says
+   it worked. `rebuild_error` carries the reason and `config_stale` says whether
+   config.json still lags the state.
 5. **Editing sources never rebuilds.** Subscriptions and Daemon are the surfaces
    a menu bar actually touches, and both follow the product rule that rebuilding
    the config is the user's decision: `config_stale` is reported, and the UI
