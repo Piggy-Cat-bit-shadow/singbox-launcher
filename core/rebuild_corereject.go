@@ -127,11 +127,32 @@ type NodeDisabler interface {
 type savedStateDisabler struct {
 	s    *state.State
 	path string
+	// rejections accumulates (link → reason) as the loop learns which nodes the core
+	// refuses.
+	//
+	// It records IDENTITIES rather than mutating `s` and saving it, because `s` is the
+	// state loaded when the BUILD began and a build is not instantaneous: it renders, runs
+	// `sing-box check`, and may loop several rounds. Saving that snapshot back at the end
+	// reverted everything the user changed in the window — a subscription URL, an
+	// enable/disable, a newly added source, DNS, rules, vars — under the guise of
+	// recording which nodes the core rejected. The user's edit was simply gone, with no
+	// error anywhere.
+	rejections []coreRejection
 	// dirty — были ли выключения: без них файл не трогаем вовсе.
 	dirty bool
 }
 
+// coreRejection is one node the core refused, held as an identity so it can be applied
+// to whatever state is on disk at commit time.
+type coreRejection struct {
+	link   state.NodeLink
+	reason string
+}
+
 func (d *savedStateDisabler) Disable(link state.NodeLink, reason string) bool {
+	// The in-memory state is still mutated, because the LOOP re-renders the config from
+	// it and must see the node as disabled on the next round. What changes is that this
+	// mutation is no longer treated as the thing that gets persisted.
 	node := findStateNodeByLink(d.s, link)
 	if node == nil {
 		return false
@@ -139,15 +160,54 @@ func (d *savedStateDisabler) Disable(link state.NodeLink, reason string) bool {
 	if !node.SetCoreRejected(reason) {
 		return false
 	}
+	d.rejections = append(d.rejections, coreRejection{link: link, reason: reason})
 	d.dirty = true
 	return true
 }
 
+// Commit applies the recorded rejections to the CURRENT state on disk.
+//
+// LOAD LATEST → APPLY BY IDENTITY → ATOMIC REPLACE. Never "save the snapshot the build
+// started from". The node is located by the same stable identity the loop used (source
+// ID plus tag), so a reordered, renamed or extended source list is handled correctly:
+// only the `core_rejected` field of the named nodes is touched, and every other field —
+// including ones the user changed while the build ran — is left as the user left it.
+//
+// A node that no longer exists is skipped rather than recreated: the user deleted it, and
+// resurrecting it to record a rejection would undo their deletion to store a fact about a
+// node that is gone.
 func (d *savedStateDisabler) Commit() error {
 	if !d.dirty {
 		return nil
 	}
-	return d.s.Save(d.path)
+	// Re-read so the merge sees concurrent edits. A read failure is fatal here rather
+	// than a fallback to saving the stale snapshot: the whole point is that the stale
+	// snapshot must never be written.
+	latest, err := state.Load(d.path)
+	if err != nil {
+		return fmt.Errorf("core reject: cannot reload state to record rejections: %w", err)
+	}
+	applied := 0
+	for _, rej := range d.rejections {
+		node := findStateNodeByLink(latest, rej.link)
+		if node == nil {
+			debuglog.DebugLog("core reject: node %q in source %q no longer exists; its "+
+				"rejection is not recorded", rej.link.Tag, rej.link.FolderID)
+			continue
+		}
+		if node.SetCoreRejected(rej.reason) {
+			applied++
+		}
+	}
+	if applied == 0 {
+		// Nothing to write. Saving anyway would rewrite the file for no reason and
+		// widen the window for no benefit.
+		return nil
+	}
+	if err := latest.Save(d.path); err != nil {
+		return fmt.Errorf("core reject: save state with rejections: %w", err)
+	}
+	return nil
 }
 
 func (d *savedStateDisabler) Label(link state.NodeLink) string {

@@ -742,11 +742,21 @@ func (ac *AppController) PairDaemonWithInvite(inviteRaw, secret string) error {
 	}
 
 	binDir := ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.DaemonAddress = invite.Addr
-	st.DaemonServerFingerprint = invite.ServerFingerprint
-	st.DaemonSecret = secret
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	// ALL THREE FIELDS IN ONE TRANSACTION.
+	//
+	// The pairing is a single record: an address without its fingerprint or secret is not
+	// a weaker pairing, it is a BROKEN one — the next connect either fails outright or, for
+	// a plain-channel daemon, has no secret to authenticate with. Writing through a
+	// load-then-save of a snapshot let a concurrent settings update interleave between the
+	// read and the write, so the enrollment succeeded on the daemon but the client kept a
+	// partial record of it, leaving the user paired by the daemon's reckoning and unpaired
+	// by the app's.
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.DaemonAddress = invite.Addr
+		st.DaemonServerFingerprint = invite.ServerFingerprint
+		st.DaemonSecret = secret
+		return nil
+	}); err != nil {
 		return fmt.Errorf("save settings: %w", err)
 	}
 	debuglog.InfoLog("PairDaemonWithInvite: enrolled at %s (server %s…)", invite.Addr, invite.ServerFingerprint[:12])
@@ -805,11 +815,15 @@ func (ac *AppController) UnpairDaemon() error {
 
 	// (2) Forget the pairing on disk. If this fails nothing has changed yet: the engine
 	// is already off the daemon, so the state is still coherent.
-	st := locale.LoadSettings(binDir)
-	st.DaemonAddress = ""
-	st.DaemonServerFingerprint = ""
-	st.DaemonSecret = ""
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	// Cleared as ONE transaction for the same reason the pairing is written as one: a
+	// partially cleared record — address gone but secret or fingerprint left behind — is
+	// not a weaker unpair, it is a torn one.
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.DaemonAddress = ""
+		st.DaemonServerFingerprint = ""
+		st.DaemonSecret = ""
+		return nil
+	}); err != nil {
 		return fmt.Errorf("the daemon pairing was NOT removed, because saving the "+
 			"settings failed: %w", err)
 	}
@@ -865,9 +879,10 @@ func (ac *AppController) leaveDaemonEngineForUnpair() error {
 // пересоздаёт активный daemon-backend.
 func (ac *AppController) SetDaemonAddress(address string) error {
 	binDir := ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.DaemonAddress = strings.TrimSpace(address)
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.DaemonAddress = strings.TrimSpace(address)
+		return nil
+	}); err != nil {
 		return err
 	}
 	ac.reloadDaemonBackendIfActive()
@@ -882,10 +897,12 @@ func (ac *AppController) SetDaemonAddress(address string) error {
 // MITM'у (downgrade-атака), там решение остаётся за пользователем.
 func (ac *AppController) followDaemonPlainChannel() {
 	binDir := ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	debuglog.InfoLog("followDaemonPlainChannel: daemon at %s dropped TLS; clearing the pinned fingerprint to follow", st.DaemonAddress)
-	st.DaemonServerFingerprint = ""
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	debuglog.InfoLog("followDaemonPlainChannel: daemon at %s dropped TLS; clearing the "+
+		"pinned fingerprint to follow", locale.LoadSettings(binDir).DaemonAddress)
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.DaemonServerFingerprint = ""
+		return nil
+	}); err != nil {
 		debuglog.WarnLog("followDaemonPlainChannel: save settings: %v", err)
 		return
 	}
@@ -898,9 +915,10 @@ func (ac *AppController) followDaemonPlainChannel() {
 // сертификат — полный мандат, а секрет не используется.
 func (ac *AppController) SetDaemonSecret(secret string) error {
 	binDir := ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.DaemonSecret = strings.TrimSpace(secret)
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.DaemonSecret = strings.TrimSpace(secret)
+		return nil
+	}); err != nil {
 		return err
 	}
 	ac.reloadDaemonBackendIfActive()

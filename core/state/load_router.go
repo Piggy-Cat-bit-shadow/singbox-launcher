@@ -115,6 +115,16 @@ func Load(path string) (*State, error) {
 			}
 		}
 	}
+	// Identify the content that was actually read, derived from the bytes on disk
+	// rather than from anything the loader computed. A build captures this and compares
+	// it against a later read to answer "did anyone write while I was building?".
+	//
+	// Derived, not stored: a stored counter would be wrong for a file restored from a
+	// backup (its counter would be older than what it replaced) and absent for every
+	// file written before the field existed. The digest of the bytes has neither
+	// problem and needs no migration.
+	s.revision = contentRevision(data)
+	s.MarkLoaded()
 	return s, nil
 }
 

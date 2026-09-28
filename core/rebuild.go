@@ -131,6 +131,14 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
+	// The identity of the INPUT this build renders from, captured before any of the
+	// work below. It is compared against a fresh read at commit time: a build that
+	// started before a user edit must not clear the stale marker for a state it never
+	// saw (see the commit-time check).
+	//
+	// Note this is taken AFTER the auto-update branch's reload below re-reads state;
+	// that reload is part of producing this build's input, not an edit that raced it.
+	stateRevision := s.Revision()
 
 	// Step 1.5: load template — нужен раньше (SPEC 056) для preset.outbounds
 	// pre-patch внутри buildSnapshotFromState. Это лёгкая операция (file
@@ -168,6 +176,10 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 		if err != nil {
 			return fmt.Errorf("reload state after auto-update: %w", err)
 		}
+		// The auto-update we just ran changed the state ON PURPOSE, as part of
+		// producing this build. The baseline moves with it, or every build that
+		// needed an auto-update would report itself stale immediately.
+		stateRevision = s.Revision()
 		cacheSnap, parserRes, snapErr = buildSnapshotFromState(s, layout, nil, td)
 		if snapErr != nil {
 			feedParserDiagnosticsOnFailure(parserRes)
@@ -363,19 +375,56 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 		// незавершённой — записи в отчёте есть (их видно), но готовым он не
 		// считается.
 		config.FinishBuildReport(gen)
-		ac.StateService.ClearConfigStale()
-		if ac.EventBus != nil {
-			ac.EventBus.Publish(events.Event{
-				Kind: events.ConfigBuilt,
-				Payload: events.ConfigBuiltPayload{
-					OK:       true,
-					Warnings: res.Validation.Warnings,
-					// SPEC 132: список выключенных страховкой едет в событии,
-					// чтобы плашка главного экрана (волна UI) показала его
-					// после успешного старта.
-					DisabledNodes: coreRejectedPayload(outcome.Disabled),
-				},
-			})
+		// ONLY A BUILD MADE FROM THE CURRENT STATE MAY BE CALLED CURRENT.
+		//
+		// A config build is not instantaneous: it renders, runs `sing-box check`, and
+		// may loop several rounds while the core names nodes it refuses. If the user
+		// edits something in that window, the build commits a config rendered from the
+		// PREVIOUS state — and clearing the stale marker here would then report "the
+		// config is current" for a config that was never rendered from what is on disk.
+		// The user sees a converged launcher while the VPN is about to run something
+		// they did not ask for.
+		//
+		// `stateRevision` was captured BEFORE the state was rendered (see its
+		// declaration) and is compared against a FRESH read here. A mismatch means
+		// somebody saved while this build ran, so the result is an intermediate
+		// version: the config on disk is real and usable, but the stale marker must
+		// STAY SET so a rebuild follows.
+		//
+		// This is the conservative branch on purpose. Abandoning the promotion would
+		// throw away work the core already accepted and could loop forever against a
+		// user who keeps editing; keeping the marker honest is what the UI actually
+		// needs, and the next rebuild converges.
+		if revisionMovedSinceBuild(statePath, stateRevision) {
+			debuglog.InfoLog("RebuildConfigIfDirty: state changed while the config was "+
+				"being built (revision %d → newer); the config is promoted but stays "+
+				"marked stale so a rebuild follows", stateRevision)
+			ac.StateService.MarkConfigStale()
+			if ac.EventBus != nil {
+				ac.EventBus.Publish(events.Event{
+					Kind: events.ConfigBuilt,
+					Payload: events.ConfigBuiltPayload{
+						OK:            true,
+						Warnings:      res.Validation.Warnings,
+						DisabledNodes: coreRejectedPayload(outcome.Disabled),
+					},
+				})
+			}
+		} else {
+			ac.StateService.ClearConfigStale()
+			if ac.EventBus != nil {
+				ac.EventBus.Publish(events.Event{
+					Kind: events.ConfigBuilt,
+					Payload: events.ConfigBuiltPayload{
+						OK:       true,
+						Warnings: res.Validation.Warnings,
+						// SPEC 132: список выключенных страховкой едет в событии,
+						// чтобы плашка главного экрана (волна UI) показала его
+						// после успешного старта.
+						DisabledNodes: coreRejectedPayload(outcome.Disabled),
+					},
+				})
+			}
 		}
 	}
 
@@ -645,4 +694,27 @@ func (ac *AppController) SetConfigBuildProbe(probe func()) {
 		return
 	}
 	configBuildProbe.Store(&probe)
+}
+
+// revisionMovedSinceBuild reports whether state.json changed after a build captured its
+// input revision.
+//
+// Reads the file fresh rather than comparing an in-memory counter, because the whole
+// question is "did anyone ELSE write while this build ran" — and the answer can only come
+// from the file. A read failure reports "moved", which keeps the stale marker set: the
+// conservative direction, since the alternative is claiming the config is current on the
+// strength of a read that did not happen.
+func revisionMovedSinceBuild(statePath string, buildRevision uint64) bool {
+	if buildRevision == 0 {
+		// No baseline was captured, so nothing can be concluded. Report "moved" so the
+		// marker stays set rather than silently declaring the build current.
+		return true
+	}
+	fresh, err := state.Load(statePath)
+	if err != nil {
+		debuglog.WarnLog("rebuild: cannot re-read state to confirm the built config is "+
+			"current (%v); leaving it marked stale", err)
+		return true
+	}
+	return fresh.Revision() != buildRevision
 }

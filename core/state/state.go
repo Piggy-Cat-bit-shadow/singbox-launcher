@@ -70,6 +70,24 @@ type State struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
+	// revision identifies the CONTENT of this state, incremented on every Save.
+	//
+	// It is what lets a config build say "I rendered revision N", so a build that
+	// started before a user edit can refuse to mark the result fresh. Time cannot
+	// serve here: filesystem timestamps have one-second granularity in places, and a
+	// restored backup legitimately carries an old timestamp with new content.
+	//
+	// In-memory only, and deliberately so. The value only has to be comparable within
+	// one process lifetime, and persisting a monotonic counter across restores would
+	// mean a restored state could compare as NEWER than the state it replaced.
+	revision uint64
+
+	// loadedRevision is the revision this state had when it was read from disk, or 0
+	// for a state that was never loaded. A caller compares it against a fresh load to
+	// ask "has anyone written since I read this?" without holding a lock for the whole
+	// build.
+	loadedRevision uint64
+
 	// Target / TargetPlatform / TargetArch (SPEC 097) — для какой машины
 	// этот state готовит конфиг. Target: "local" | "remote"; пусто == local.
 	// Platform/Arch значимы только для remote (GOOS/GOARCH целевой машины).

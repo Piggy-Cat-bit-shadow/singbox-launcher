@@ -106,11 +106,14 @@ func TestUnpairLeavesTheDaemonEngineBeforeDeletingAnything(t *testing.T) {
 	body := src[idx : idx+end]
 
 	engine := indexOf(body, "leaveDaemonEngineForUnpair")
-	save := indexOf(body, "SaveSettings")
+	// The pairing is cleared through the settings TRANSACTION, not a bare SaveSettings:
+	// clearing the address, fingerprint and secret as one serialised update is what stops
+	// a concurrent settings write from interleaving and leaving a partial record.
+	save := indexOf(body, "locale.UpdateSettings")
 	remove := indexOf(body, "RemoveIdentity")
 	if engine < 0 || save < 0 || remove < 0 {
-		t.Fatalf("expected the engine switch, a settings save and an identity removal "+
-			"(engine=%d save=%d remove=%d)", engine, save, remove)
+		t.Fatalf("expected the engine switch, a settings transaction and an identity "+
+			"removal (engine=%d save=%d remove=%d)", engine, save, remove)
 	}
 	if engine > save || engine > remove {
 		t.Error("the app leaves the daemon engine AFTER the pairing is deleted, so a " +
@@ -183,10 +186,10 @@ func TestUnpairPersistenceFailureCannotLeaveTornPairingState(t *testing.T) {
 	}
 	body := src[idx : idx+end]
 
-	save := indexOf(body, "SaveSettings")
+	save := indexOf(body, "locale.UpdateSettings")
 	remove := indexOf(body, "RemoveIdentity")
 	if save < 0 || remove < 0 {
-		t.Fatal("expected both a settings save and an identity removal")
+		t.Fatal("expected both a settings transaction and an identity removal")
 	}
 	if remove < save {
 		t.Error("the identity is deleted BEFORE the settings are written; a failed " +

@@ -4,12 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 
 	"singbox-launcher/internal/debuglog"
-	"singbox-launcher/internal/platform"
 )
 
 // Settings represents the launcher settings stored in bin/settings.json.
@@ -362,25 +360,24 @@ func LoadSettings(binDir string) Settings {
 	return s
 }
 
-// SaveSettings writes settings to binDir/settings.json.
+// SaveSettings replaces settings.json with s, atomically.
 //
-// Writes are atomic: we stage to a sibling temp file then rename over the
-// real one. Protects against power loss or a crash mid-write leaving the
-// user with a zero-byte settings.json and losing language / ping / subs
-// preferences on next launch.
+// The whole write happens under the settings lock, so it cannot interleave with another
+// writer's read-modify-write. That matters because the overwhelmingly common call pattern
+// is `st := LoadSettings(dir); st.X = v; SaveSettings(dir, st)`: if that pattern is not
+// serialised, the later save writes a snapshot taken before the earlier change landed and
+// one preference silently reverts.
+//
+// The lock alone cannot fix a caller that already holds a stale snapshot, so mutating call
+// sites should prefer UpdateSettings, which reads the current contents INSIDE the
+// transaction. This function remains the primitive underneath it and stays safe for a
+// caller that genuinely intends to write a complete document.
+//
+// The staging file is a UNIQUE sibling, not `path + ".tmp"`. The fixed name made the write
+// atomic only against a crash: two concurrent writers truncated the same staging file and
+// raced to rename it, so the file that landed could be a mixture of both documents.
 func SaveSettings(binDir string, s Settings) error {
-	path := filepath.Join(binDir, "settings.json")
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Errorf("locale: marshal settings: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, platform.DefaultFileMode); err != nil {
-		return fmt.Errorf("locale: write temp settings: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("locale: rename settings: %w", err)
-	}
-	return nil
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return saveSettingsLocked(binDir, s)
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"singbox-launcher/internal/atomicfile"
 	"time"
 
 	"singbox-launcher/core/config/configtypes"
@@ -54,6 +55,23 @@ func (s *State) Save(path string) error {
 	if err != nil {
 		return err
 	}
+	// The revision identifies the CONTENT, not the time and not the number of writes.
+	//
+	// A build records the revision it rendered so it can refuse to mark a newer one
+	// fresh. mtime cannot serve: filesystem timestamps have one-second granularity in
+	// places, and a restored backup legitimately carries an old timestamp with new
+	// content.
+	//
+	// A COUNTER cannot serve either, which is why this is a content digest. A save
+	// counter is not idempotent, so writing then reading then writing the same state
+	// would produce different files — and this package guarantees a byte-identical
+	// roundtrip, which is a property worth more than a convenient counter. A digest has
+	// the opposite behaviour: the same content always produces the same revision, and
+	// any change produces a different one.
+	//
+	// Taken from the marshalled bytes, so it covers every field the file carries and
+	// automatically covers fields added later.
+	s.revision = contentRevision(data)
 
 	dir := filepath.Dir(path)
 	// Каталога состояний на свежей установке нет: его создавал только визард
@@ -64,34 +82,21 @@ func (s *State) Save(path string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("state: mkdir %s: %w", dir, err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("state: open %s: %w", tmp, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("state: write %s: %w", tmp, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("state: fsync %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("state: close %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("state: rename %s → %s: %w", tmp, path, err)
-	}
-
-	// Best-effort fsync на каталог. На Windows — no-op.
-	if dirF, err := os.Open(dir); err == nil {
-		_ = dirF.Sync()
-		_ = dirF.Close()
+	// A UNIQUE staging path per writer, not `path + ".tmp"`.
+	//
+	// The fixed name made this atomic only against a crash. Two concurrent saves
+	// truncated the SAME temp file, interleaved their bytes, and then raced to
+	// rename it — so the state that landed could be a mixture of both documents, or
+	// the rename could fail because the other writer had already moved it. Unique
+	// names plus the rename make one writer's content land whole.
+	//
+	// This does NOT by itself prevent a lost update: two writers each saving their
+	// own whole snapshot still means the later save wins. That is a transaction
+	// problem and it is solved above this layer, by loading under a lock and mutating
+	// through the store.
+	_ = dir
+	if err := atomicfile.Write(path, data, 0o644); err != nil {
+		return fmt.Errorf("state: %w", err)
 	}
 	return nil
 }

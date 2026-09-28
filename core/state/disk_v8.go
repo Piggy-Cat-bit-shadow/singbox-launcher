@@ -96,6 +96,10 @@ func parseV8(data []byte) (*State, error) {
 	if t, err := time.Parse(time.RFC3339, raw.Meta.UpdatedAt); err == nil {
 		s.UpdatedAt = t
 	}
+	// The content identity is NOT read from the file. It is derived from the content,
+	// so a file that carries no revision (or a stale one) still compares correctly —
+	// which is what makes the check work on states written before this existed and on
+	// states restored from a backup.
 
 	// Legacy CustomRules view — как в v6/v7-парсе: UI-код до Phase 6 читает его.
 	s.CustomRules = legacyCustomRulesFromV6(s.Rules)
