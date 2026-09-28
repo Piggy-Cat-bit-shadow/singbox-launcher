@@ -648,20 +648,32 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	} else {
 		ac.clearDaemonSystemProxy("the applied config asks for no system proxy")
 	}
-	// НЕ объявляем running здесь.
+	// RECONCILE AGAINST THE DAEMON'S CURRENT STATE, DO NOT WAIT FOR AN EDGE.
 	//
-	// Раньше стояло `ac.RunningState.Set(true)` с комментарием «стрим статусов
-	// подтвердит» — и это противоречие: если стрим авторитетен, то ПРИНЯТЫЙ
-	// apply ещё не STARTED. Ядро, которое падает сразу после приёма конфига
-	// (ровно сценарий `default outbound not found`), успевало показать
-	// пользователю «подключено» до того, как стало ясно, что оно не поднялось.
+	// This used to log "waiting for the daemon to report STARTED" and return
+	// without waiting at all, relying on the status stream to publish Running.
+	// The stream is a pure EDGE stream — `SubscribeServiceStatus` is opened with
+	// an empty request and carries no snapshot and no replay — so when the
+	// daemon's core was ALREADY started at subscribe time, the transition that
+	// would have published Running had already happened and was never delivered.
 	//
-	// Теперь running приходит ТОЛЬКО из потока статусов демона (STARTED), где
-	// он и является проверенным фактом. Apply означает «принято»: это видно
-	// как `starting` через фазу backend'а и operation-record, и этого
-	// достаточно, чтобы кнопка показала прогресс.
+	// That is the reported permanent hang: config applied, core running,
+	// "attaching without restart", then `waiting for the daemon to report
+	// STARTED` forever. The attach branch in consumeStatusStream cannot rescue it
+	// because it lives INSIDE the stream and only runs when a frame arrives.
+	//
+	// So the current state is read directly, after the apply, and reconciled.
+	// Subscribe-then-snapshot is the ordering that matters: the stream is already
+	// open (superviseStatus starts with the backend), so a transition that lands
+	// between the snapshot and the next frame is not lost in either direction —
+	// the snapshot is never the only evidence.
+	//
+	// Running is NOT declared merely because Apply was accepted: the point of the
+	// comment below still stands, and a core that dies immediately after
+	// accepting a config must not show "connected". The snapshot is what makes
+	// the difference — it reports what the daemon says is running NOW.
 	ac.StateService.ResetAutoUpdateFailedAttempts()
-	debuglog.InfoLog("daemon.%s: config applied; waiting for the daemon to report STARTED", caller)
+	b.reconcileDaemonRuntimeState(caller)
 	b.refreshUI()
 
 	go func() {
@@ -673,6 +685,99 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 		ac.AutoLoadProxies()
 	}()
 	return false, nil
+}
+
+// reconcileDaemonRuntimeState reads the daemon's CURRENT service status and
+// applies it to the authoritative runtime state.
+//
+// It exists because "wait for the next state change" is not a way to learn the
+// current state. A daemon that is already STARTED produces no further STARTED
+// transition, so a start that attaches to it would otherwise never settle.
+//
+// Deliberately tolerant of failure: this is a reconciliation, not a gate. A
+// daemon that cannot answer StatusCtx has already been reported as unreachable
+// by the reachability pre-flight, and the status stream remains authoritative for
+// every subsequent change. Returning an error here would fail a start that
+// succeeded on the daemon, which is worse than a briefly stale UI.
+func (b *DaemonBackend) reconcileDaemonRuntimeState(caller string) {
+	ac := b.ac
+	if ac == nil || b.admin == nil {
+		return
+	}
+	// Ownership before any state write: a backend the user has already left must
+	// not publish a state for an engine nobody selected. The apply path checks
+	// this immediately before Apply; the window between that check and this read
+	// is a full network round trip, so it is re-checked here.
+	if !b.isActive() {
+		debuglog.InfoLog("daemon.%s: backend retired before reconcile; not publishing a state", caller)
+		return
+	}
+	status, err := b.admin.StatusCtx(b.ctxOrNil())
+	if err != nil {
+		debuglog.WarnLog("daemon.%s: cannot read the daemon's current state to reconcile: %v; "+
+			"the status stream remains authoritative", caller, err)
+		return
+	}
+	running, known := daemonStatusMeansRunning(status.Status)
+	if !known {
+		debuglog.InfoLog("daemon.%s: the daemon reports status %q, which the launcher does not "+
+			"map to a runtime state; leaving the stream authoritative", caller, status.Status)
+		return
+	}
+	wasRunning := ac.RunningState.IsRunning()
+	if running {
+		// Set, not SetReasserted: the daemon CONFIRMED a running core, which is
+		// an observation of a core being up. `StartedHere` then means what it
+		// says — a core came up here — so the backend records config.json as what
+		// the core loaded, which is true.
+		ac.RunningState.Set(true)
+		atomic.StoreInt32(&b.rejectTries, 0)
+	} else {
+		ac.RunningState.Set(false)
+	}
+	debuglog.InfoLog("daemon.%s: reconciled against the daemon's current state: status=%q running=%v (was %v)",
+		caller, status.Status, running, wasRunning)
+
+	// Attaching to a core that was ALREADY up means no transition will arrive for
+	// it, so the post-attach work the stream does on a running edge has to happen
+	// here too. Otherwise the user sees "running" with an empty proxy list.
+	if running && !wasRunning {
+		debuglog.InfoLog("daemon.%s: attaching to a core the daemon already had running", caller)
+		// ctxOrNil, not b.ctx: a backend under construction (and every test) has no
+		// context yet, and `b.ctx.Done()` on a nil context is a nil dereference
+		// that takes the process down from an unattended goroutine.
+		ctx := b.ctxOrNil()
+		go func() {
+			select {
+			case <-time.After(daemonAttachProxyDelay):
+			case <-ctx.Done():
+				return
+			}
+			ac.AutoLoadProxies()
+		}()
+	}
+}
+
+// daemonAttachProxyDelay is how long to wait after attaching before asking for
+// the proxy list: the daemon's own Clash API needs a moment to serve the groups
+// of the config that was just applied.
+const daemonAttachProxyDelay = 2 * time.Second
+
+// daemonStatusMeansRunning maps the daemon's own status string to the runtime
+// state, reporting whether the value is one it recognises.
+//
+// The daemon's strings are the contract here (`idle | started | fatal`, see
+// StatusInfo). An unrecognised value is NOT silently treated as stopped: a
+// daemon that grows a new status would otherwise have its running core reported
+// as stopped, which is the failure this whole change is about.
+func daemonStatusMeansRunning(status string) (running bool, known bool) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "started", "running":
+		return true, true
+	case "idle", "stopped", "fatal", "failed", "error":
+		return false, true
+	}
+	return false, false
 }
 
 // retryCoreReject выключает названный узел, если не исчерпан потолок захода.

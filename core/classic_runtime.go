@@ -464,6 +464,23 @@ func (r *classicRuntime) commitPrivileged(gen uint64, scriptPID, singboxPID int,
 		pid = scriptPID
 	}
 	r.identity = ProcessIdentity{PID: pid, Executable: exe, StartedAt: time.Now()}
+	// THE PHASE MOVES HERE, WITH OWNERSHIP.
+	//
+	// This function records that a privileged core is now OURS — and a core that
+	// has committed is running. Leaving the phase at `starting` made
+	// `phaseToWireState` report `starting` indefinitely, which is the reported
+	// symptom exactly: the root core up, the PID file written, the proxy groups
+	// loaded, and the UI still showing "正在启动".
+	//
+	// It belongs HERE rather than at the call site for the same reason ownership
+	// does: the phase and the identity must never disagree, and the only way to
+	// guarantee that is to write them together under one lock. The late-adoption
+	// path already set ClassicRunning right after committing, which is why
+	// adoption of an already-running core worked while the FIRST start did not.
+	//
+	// Assigned directly rather than via setPhase, which would take the mutex this
+	// function already holds.
+	r.phase = ClassicRunning
 	return true
 }
 
