@@ -1,0 +1,192 @@
+// ActionPolicy — which core and daemon controls are offered, and why not.
+//
+// WHY THIS IS ITS OWN FILE. Every rule here answers "may the user press this, and
+// if not, what do we tell them". Both halves have been wrong in ways users feel
+// immediately: a Start button that produced a backend error instead of being
+// disabled, a Restart offered on a stopped core where it means nothing, an Import
+// that opened a file chooser before revealing the VPN had to be stopped first,
+// and — the worst of the family — a disabled control with NO explanation, which
+// reads as a broken app rather than a refused action.
+//
+// None of that can be checked by reading the source with confidence, and the
+// toolchain cannot build a Swift test target, so the decisions live in a file with
+// no SwiftUI dependency and are EXECUTED by the Go suite.
+
+import Foundation
+
+/// What the core screen may offer right now.
+struct CoreActionPolicy {
+    let canStart: Bool
+    let canStop: Bool
+    let canRestart: Bool
+    let canImportCore: Bool
+    let canSwitchEngine: Bool
+    /// Why an unavailable action is unavailable, for the tooltip.
+    ///
+    /// Reserved for a stated explanation; the CAUSE travels separately as a
+    /// `CoreActionRefusal` so the message can be localized by the view, which is
+    /// the layer that knows the language. A disabled control with nothing to say
+    /// is the defect this whole policy exists to prevent.
+    let reason: String?
+}
+
+/// The single answer to "may the daemon control plane be torn down?".
+struct DaemonDestructivePolicy: Equatable {
+    let allowed: Bool
+    let reason: DaemonDestructiveBlock?
+}
+
+/// Which precondition is missing, when teardown is refused.
+///
+/// A named cause rather than a bare bool, because the UI must say WHICH
+/// precondition is missing — and a caller that cannot tell them apart cannot
+/// phrase the refusal it is showing.
+enum DaemonDestructiveBlock: Equatable {
+    /// The daemon status has not been read, so we do not know what we would be
+    /// destroying.
+    case statusUnknown
+    /// The daemon is driving the core, but the core's state is unknown: the
+    /// control channel is in use and we cannot prove it is safe.
+    case coreStateUnknown
+    /// The VPN is running through the daemon.
+    case vpnRunning
+    /// The core is coming up or going down through the same channel.
+    case coreTransitioning
+    /// The core is in an error state: tearing down the channel now would discard
+    /// the diagnostics the user needs.
+    case coreError
+    /// Another operation is in flight.
+    case busy
+}
+
+/// Decide what the core screen offers, and WHY when it offers nothing.
+///
+/// Returns the policy together with the refusal cause, or nil when the actions
+/// are available. The cause is a separate value from the policy so this file
+/// stays free of the localization table (which imports SwiftUI and therefore
+/// cannot be compiled here).
+///
+/// - Parameters:
+///   - connected: the backend link is up, so the state below can be trusted.
+///   - busy: a core operation is outstanding. ONE OPERATION AT A TIME, ACROSS
+///     EVERY CONTROL — this is what makes a concurrent Restart impossible rather
+///     than merely unlikely, and it is checked before anything else.
+///   - state: the core's state, or nil when it is not yet known.
+///   - hasBinary: a core binary is present on disk.
+func decideCoreActions(connected: Bool,
+                      busy: Bool,
+                      state: CoreState?,
+                      hasBinary: Bool) -> (CoreActionPolicy, CoreActionRefusal?) {
+    func refuse(_ why: CoreActionRefusal) -> (CoreActionPolicy, CoreActionRefusal?) {
+        (CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
+                          canImportCore: false, canSwitchEngine: false, reason: nil), why)
+    }
+
+    guard connected else { return refuse(.backendNotConnected) }
+    if busy { return refuse(.operationInFlight) }
+    guard let state else { return refuse(.coreStateUnknown) }
+
+    let transitioning = state.isTransitioning
+
+    // Restart means "take a RUNNING core and bring it back running". It is not a
+    // synonym for Start: on a stopped core the honest action is Start, and on an
+    // errored one it is Retry. Offering Restart in those states presented a
+    // control whose semantics matched none of them.
+    let canRestart = state == .running && hasBinary
+
+    // The backend refuses an import unless the core is SETTLED STOPPED, and it
+    // says so with a distinct error. Checking only "no operation pending" let the
+    // user open a file chooser, pick a binary, and only then learn the VPN had to
+    // be stopped first.
+    let canImport = !transitioning && state == .stopped && hasBinary
+
+    // Engine switching is refused while the core is not stopped: the engine is
+    // what runs the core, so changing it underneath a live one is not a
+    // supported transition.
+    let canSwitch = !transitioning && state == .stopped
+
+    // The refusal EXPLAINS the disabled control. Every branch that disables
+    // something must produce one: a disabled control with no reason reads as a
+    // broken app rather than a refused action.
+    var why: CoreActionRefusal?
+    if transitioning {
+        why = .coreTransitioning
+    } else if state == .running {
+        why = .coreRunning
+    } else if !hasBinary {
+        why = .coreMissing
+    } else if state == .error {
+        why = .coreErrored
+    }
+
+    return (CoreActionPolicy(
+        canStart: !transitioning && (state == .stopped || state == .error) && hasBinary,
+        canStop: !transitioning && state == .running,
+        canRestart: canRestart,
+        canImportCore: canImport,
+        canSwitchEngine: canSwitch,
+        reason: nil), why)
+}
+
+/// The reasons a core action can be refused. Kept as causes rather than strings
+/// so the policy stays free of the localization table and can be tested without
+/// it.
+enum CoreActionRefusal: Equatable {
+    case backendNotConnected
+    case operationInFlight
+    case coreStateUnknown
+    case coreTransitioning
+    case coreRunning
+    case coreMissing
+    case coreErrored
+}
+
+/// Decide whether the daemon control plane may be torn down.
+///
+/// THE SAFETY RULE, STATED ONCE. The view's `destructiveBlocked` asked only
+/// whether the daemon was active and the core `running`. That is one state out of
+/// several that make the same teardown unsafe:
+///
+///   * `starting` — the core is coming up THROUGH the daemon, and removing the
+///     pairing under it aborts the start the user just requested;
+///   * `stopping` — the core is mid-teardown using the same channel;
+///   * an in-flight operation — the teardown would race whatever holds the
+///     channel.
+///
+/// So the rule is not "is it running" but "is the daemon engine SETTLED and
+/// IDLE". Expressed as a policy so the row's disabled state, its explanation and
+/// the confirmation all read the same answer — and so it can be executed under
+/// test without a UI.
+///
+/// Refusal is the default for anything unknown. "We could not determine the
+/// state" is not evidence that destroying a privileged service is safe, and this
+/// is one of the few actions a user cannot trivially undo.
+func decideDaemonDestructiveActions(status: DaemonStatus?,
+                                    pending: Bool,
+                                    coreState: CoreState?)
+    -> DaemonDestructivePolicy {
+    guard let status else {
+        return DaemonDestructivePolicy(allowed: false, reason: .statusUnknown)
+    }
+    guard status.active_mode else {
+        // Installed but not carrying traffic: nothing depends on it.
+        return DaemonDestructivePolicy(allowed: !pending,
+                                       reason: pending ? .busy : nil)
+    }
+    // Active engine: the control channel is in use unless the core is fully
+    // settled and nothing is in flight.
+    if pending { return DaemonDestructivePolicy(allowed: false, reason: .busy) }
+    guard let state = coreState else {
+        return DaemonDestructivePolicy(allowed: false, reason: .coreStateUnknown)
+    }
+    if state == .running {
+        return DaemonDestructivePolicy(allowed: false, reason: .vpnRunning)
+    }
+    if state.isTransitioning {
+        return DaemonDestructivePolicy(allowed: false, reason: .coreTransitioning)
+    }
+    if state == .error {
+        return DaemonDestructivePolicy(allowed: false, reason: .coreError)
+    }
+    return DaemonDestructivePolicy(allowed: true, reason: nil)
+}

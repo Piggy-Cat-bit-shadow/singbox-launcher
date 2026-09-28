@@ -301,7 +301,7 @@ struct HomeView: View {
     /// Disabled only during a transition or when there is nothing to start, with
     /// the reason in the help text rather than an unexplained dead control.
     /// The shared core policy, for every control on this screen.
-    private var corePolicy: AppModel.CoreActionPolicy {
+    private var corePolicy: CoreActionPolicy {
         model.coreActionPolicy(language: language)
     }
 

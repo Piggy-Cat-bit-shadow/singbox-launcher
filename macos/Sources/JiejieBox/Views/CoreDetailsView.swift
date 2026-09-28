@@ -140,7 +140,7 @@ struct CoreDetailsView: View {
         return path
     }
     /// The shared core policy, so this screen and Home cannot disagree.
-    private var corePolicy: AppModel.CoreActionPolicy {
+    private var corePolicy: CoreActionPolicy {
         model.coreActionPolicy(language: language)
     }
 

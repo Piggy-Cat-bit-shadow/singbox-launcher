@@ -741,6 +741,35 @@ struct CoreImportResult: Decodable {
 
 /// Daemon engine setup state.
 struct DaemonStatus: Decodable {
+    /// Memberwise init for the logic harness.
+    ///
+    /// The rule under test reads only `active_mode`; building a status requires
+    /// the DTO's full shape, so this keeps the harness from depending on
+    /// unrelated protocol fields it would otherwise have to invent values for.
+    init(activeMode: Bool, installed: Bool = true, paired: Bool = true) {
+        self.supported = true
+        self.service = "running"
+        self.service_detail = nil
+        self.installed = installed
+        self.paired = paired
+        self.reachable = true
+        self.ready = true
+        self.active_mode = activeMode
+        self.address = nil
+        self.fingerprint = nil
+        self.core_status = nil
+        self.daemon_version = nil
+        self.running_version = nil
+        self.launcher_version = nil
+        self.core_supports_lxd = true
+        self.needs_install = false
+        self.needs_start = false
+        self.persists_after_quit = true
+        self.error = nil
+        self.protocol_stale = false
+        self.missing_rpcs = nil
+    }
+
     let supported: Bool
     let service: String
     let service_detail: String?

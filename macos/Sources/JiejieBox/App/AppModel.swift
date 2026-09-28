@@ -138,20 +138,6 @@ final class AppModel {
     /// explanation is the interaction defect this whole audit is about: the user
     /// sees a grey control and cannot tell whether it is a bug, a permission
     /// problem, or a rule.
-    enum DaemonDestructiveBlock: Equatable {
-        case statusUnknown
-        case coreStateUnknown
-        case vpnRunning
-        case coreTransitioning
-        case coreError
-        case busy
-    }
-
-    /// The single answer to "may the daemon control plane be torn down?".
-    struct DaemonDestructivePolicy: Equatable {
-        let allowed: Bool
-        let reason: DaemonDestructiveBlock?
-    }
 
     /// A daemon setup step the user can request.
     enum DaemonSetupStep {
@@ -1283,76 +1269,40 @@ final class AppModel {
     /// The backend remains the authority — every one of these is checked again
     /// there — but the UI must not OFFER what the backend will refuse, because a
     /// button whose only outcome is an error is worse than a disabled one.
-    struct CoreActionPolicy {
-        let canStart: Bool
-        let canStop: Bool
-        let canRestart: Bool
-        let canImportCore: Bool
-        let canSwitchEngine: Bool
-        /// Why an unavailable action is unavailable, for the tooltip.
-        let reason: String?
-    }
 
     /// The current core policy, from live state.
+    ///
+    /// Delegates to ActionPolicy so the rule is EXECUTED by the Go suite rather
+    /// than described to it. The localized refusal text is attached here, because
+    /// this is the layer that knows the language; the decision itself does not
+    /// depend on it.
     func coreActionPolicy(language: Localization) -> CoreActionPolicy {
-        guard case .ready = connection else {
-            let why = L.backendNotConnected.tr(language)
-            return CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
-                                    canImportCore: false, canSwitchEngine: false, reason: why)
+        let (policy, refusal) = decideCoreActions(
+            connected: { if case .ready = connection { return true }; return false }(),
+            busy: coreOperationBusy,
+            state: core?.state,
+            hasBinary: core?.binary_exists ?? false)
+        guard let refusal else { return policy }
+        return CoreActionPolicy(canStart: policy.canStart,
+                                canStop: policy.canStop,
+                                canRestart: policy.canRestart,
+                                canImportCore: policy.canImportCore,
+                                canSwitchEngine: policy.canSwitchEngine,
+                                reason: coreRefusalText(refusal, language: language))
+    }
+
+    /// The localized text for a core refusal.
+    private func coreRefusalText(_ refusal: CoreActionRefusal,
+                                 language: Localization) -> String {
+        switch refusal {
+        case .backendNotConnected: return L.backendNotConnected.tr(language)
+        case .operationInFlight: return L.waitForOperation.tr(language)
+        case .coreStateUnknown: return L.coreStateUnknown.tr(language)
+        case .coreTransitioning: return L.waitForCoreTransition.tr(language)
+        case .coreRunning: return L.stopTheCoreFirst.tr(language)
+        case .coreMissing: return L.coreNotFound.tr(language)
+        case .coreErrored: return L.coreErrorResolveFirst.tr(language)
         }
-        // One operation at a time, across every control. This is what makes a
-        // concurrent Restart impossible rather than merely unlikely.
-        if coreOperationBusy {
-            let why = L.waitForOperation.tr(language)
-            return CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
-                                    canImportCore: false, canSwitchEngine: false, reason: why)
-        }
-        guard let core else {
-            let why = L.coreStateUnknown.tr(language)
-            return CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
-                                    canImportCore: false, canSwitchEngine: false, reason: why)
-        }
-
-        let hasBinary = core.binary_exists
-        let state = core.state
-        let transitioning = state.isTransitioning
-
-        // Restart means "take a RUNNING core and bring it back running". It is
-        // not a synonym for Start: on a stopped core the honest action is Start,
-        // and on an errored one it is Retry. Offering Restart in those states
-        // presented a control whose semantics did not match any of them.
-        let canRestart = state == .running && hasBinary
-
-        // The backend refuses an import unless the core is SETTLED STOPPED
-        // (`coreIsStoppedForReplacement`), and it says so with a distinct error.
-        // The row used to check only "no operation pending", so the user could
-        // open a file chooser, pick a binary, and only then be told the VPN had
-        // to be stopped.
-        let canImport = !transitioning && state == .stopped && hasBinary
-
-        // Engine switching is refused while the core is not stopped: the engine
-        // is what runs the core, so changing it underneath a live one is not a
-        // supported transition.
-        let canSwitch = !transitioning && state == .stopped
-
-        var reason: String?
-        if transitioning {
-            reason = L.waitForCoreTransition.tr(language)
-        } else if state == .running {
-            reason = L.stopTheCoreFirst.tr(language)
-        } else if !hasBinary {
-            reason = L.coreNotFound.tr(language)
-        } else if state == .error {
-            reason = L.coreErrorResolveFirst.tr(language)
-        }
-
-        return CoreActionPolicy(
-            canStart: !transitioning && (state == .stopped || state == .error) && hasBinary,
-            canStop: !transitioning && state == .running,
-            canRestart: canRestart,
-            canImportCore: canImport,
-            canSwitchEngine: canSwitch,
-            reason: reason)
     }
 
     /// True when a config reload can be started right now.
@@ -1653,44 +1603,14 @@ final class AppModel {
 
     /// True when the daemon control plane may be torn down.
     ///
-    /// THE SAFETY RULE, STATED ONCE. `destructiveBlocked` in the view asked only
-    /// whether the daemon was active and the core `running`. That is one state
-    /// out of several that make the same teardown unsafe:
+    /// The current teardown decision.
     ///
-    ///   * `starting` — the core is coming up through the daemon, and removing
-    ///     the pairing under it aborts the start the user just requested.
-    ///   * `stopping` — the core is mid-teardown using the same channel.
-    ///   * an in-flight lifecycle or apply operation — the teardown would race
-    ///     the operation holding the channel.
-    ///
-    /// So the rule is not "is it running" but "is the daemon engine SETTLED and
-    /// IDLE". Expressed as a policy object so the row's disabled state, its
-    /// explanation and the confirmation all read the same answer, and so it can
-    /// be tested without a UI.
+    /// Delegates to ActionPolicy so the rule is EXECUTED by the Go suite rather
+    /// than described to it — it decides whether a privileged service is removed.
     var daemonDestructivePolicy: DaemonDestructivePolicy {
-        guard let status = daemon else {
-            return DaemonDestructivePolicy(allowed: false, reason: .statusUnknown)
-        }
-        guard status.active_mode else {
-            // Installed but not carrying traffic: nothing depends on it.
-            return DaemonDestructivePolicy(allowed: pending == nil, reason: pending == nil ? nil : .busy)
-        }
-        // Active engine: the control channel is in use unless the core is fully
-        // settled and nothing is in flight.
-        if pending != nil { return DaemonDestructivePolicy(allowed: false, reason: .busy) }
-        guard let state = core?.state else {
-            return DaemonDestructivePolicy(allowed: false, reason: .coreStateUnknown)
-        }
-        if state == .running {
-            return DaemonDestructivePolicy(allowed: false, reason: .vpnRunning)
-        }
-        if state.isTransitioning {
-            return DaemonDestructivePolicy(allowed: false, reason: .coreTransitioning)
-        }
-        if state == .error {
-            return DaemonDestructivePolicy(allowed: false, reason: .coreError)
-        }
-        return DaemonDestructivePolicy(allowed: true, reason: nil)
+        decideDaemonDestructiveActions(status: daemon,
+                                       pending: pending != nil,
+                                       coreState: core?.state)
     }
 
     /// Whether the daemon control plane can be torn down right now.
