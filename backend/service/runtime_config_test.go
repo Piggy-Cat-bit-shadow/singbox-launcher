@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"singbox-launcher/core"
+	"singbox-launcher/core/events"
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/paths"
 )
@@ -200,4 +201,82 @@ func newTestBackendWithConfig(t *testing.T, config string) *Backend {
 	b.installOwnershipPolicy()
 	b.watchCoreState()
 	return b
+}
+
+// TestALifecycleRefreshDoesNotClearTheDivergence is statement 15's own main path, and the
+// case that made the original fix fail in practice.
+//
+// The runtime config was captured on ANY `VpnStateChanged` with Running==true. But that event
+// is published for refreshes too — a recorded lifecycle error clearing, a late privileged
+// adoption, the lifecycle picture being re-published — and NONE of those loads a config. On a
+// refresh the capture re-read the CURRENT config.json and recorded it as the document the
+// running core had loaded.
+//
+// That silently CLEARS the divergence. The exact sequence:
+//
+//  1. the core starts on config A;
+//  2. a rebuild promotes config B to disk while the core keeps serving A;
+//  3. an unrelated lifecycle refresh fires;
+//  4. B is recorded as live, so `RuntimeConfigDiverged()` goes false;
+//  5. the proxy surfaces stop reporting that a restart is needed, and the user — who is
+//     looking at a B that the core is not serving — is never told.
+//
+// The tests that shipped with the fix called `recordRunningConfig()` DIRECTLY, so they never
+// exercised the transition wiring and could not see any of this. This one drives the event.
+func TestALifecycleRefreshDoesNotClearTheDivergence(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configA := []byte(`{"outbounds":[{"type":"direct","tag":"A"}]}`)
+	configB := []byte(`{"outbounds":[{"type":"direct","tag":"B"}]}`)
+	if err := os.WriteFile(configPath, configA, 0o644); err != nil {
+		t.Fatalf("write config A: %v", err)
+	}
+
+	b := newTestBackendWithConfig(t, string(configA))
+	b.ac.FileService.ConfigPath = configPath
+
+	// 1. The core starts on A: the transition that carries StartedHere.
+	startEvent := events.Event{
+		Kind: events.VpnStateChanged,
+		Payload: events.VpnStateChangedPayload{
+			Running: true, StartedHere: true,
+		},
+	}
+	b.handleCoreStateEvent(startEvent)
+
+	if diverged := b.RuntimeConfigDiverged(); diverged {
+		t.Fatal("the fixture diverged immediately; the test would prove nothing")
+	}
+
+	// 2. A rebuild promotes B to disk while the core keeps serving A.
+	if err := os.WriteFile(configPath, configB, 0o644); err != nil {
+		t.Fatalf("write config B: %v", err)
+	}
+	if !b.RuntimeConfigDiverged() {
+		t.Fatal("the promoted config was not detected as diverged; the fixture is wrong")
+	}
+
+	// 3. An unrelated lifecycle REFRESH fires — Running is still true, nothing was loaded.
+	refresh := events.Event{
+		Kind: events.VpnStateChanged,
+		Payload: events.VpnStateChangedPayload{
+			Running: true, StartedHere: false,
+		},
+	}
+	b.handleCoreStateEvent(refresh)
+
+	// 4. The divergence must SURVIVE the refresh.
+	if !b.RuntimeConfigDiverged() {
+		t.Error("a lifecycle refresh CLEARED the divergence between the config the core " +
+			"loaded and the one on disk. Nothing was loaded by that event, so recording the " +
+			"current file as live makes the app claim the core is serving a config it has " +
+			"never read — and the restart prompt disappears")
+	}
+
+	// 5. And a genuine restart DOES re-capture, or the fix would be "never recapture".
+	b.handleCoreStateEvent(startEvent)
+	if b.RuntimeConfigDiverged() {
+		t.Error("a real start did not re-capture the config, so the record could never " +
+			"follow a legitimate restart")
+	}
 }

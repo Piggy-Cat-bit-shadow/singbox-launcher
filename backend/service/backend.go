@@ -261,21 +261,48 @@ func (b *Backend) watchCoreState() {
 	if b.ac == nil || b.ac.EventBus == nil {
 		return
 	}
-	b.cancelCoreWatch = b.ac.EventBus.Subscribe(events.VpnStateChanged, func(ev events.Event) {
+	b.cancelCoreWatch = b.ac.EventBus.Subscribe(events.VpnStateChanged, b.handleCoreStateEvent)
+}
+
+// handleCoreStateEvent reacts to a running-state change.
+//
+// A named method rather than an inline closure so a test drives the REAL wiring — the
+// previous inline form could only be tested by calling `recordRunningConfig` directly, which
+// is why the refresh bug survived its own test suite.
+func (b *Backend) handleCoreStateEvent(ev events.Event) {
+	{
 		running := false
 		teardown := events.TeardownNone
+		startedHere := false
 		if p, ok := ev.Payload.(events.VpnStateChangedPayload); ok {
 			running = p.Running
 			teardown = p.Teardown
+			startedHere = p.StartedHere
 			// Run the sampler exactly while the core is up: a menu bar should
 			// not keep polling a socket that is not listening.
 			if running {
 				b.Traffic().Start()
-				// Capture WHICH config just went live. This is the only moment the
-				// answer is knowable, and it is what lets the proxy surfaces tell the
-				// difference between "the core is serving what is on disk" and "the
-				// core is serving what was on disk when it started".
-				b.recordRunningConfig()
+				// Capture WHICH config just went live — but ONLY on the transition that
+				// actually started a core.
+				//
+				// `running` alone is not enough. This event is also published as a REFRESH
+				// (a recorded error clearing, a late privileged adoption, the lifecycle
+				// picture being re-published), and on a refresh nothing was loaded. Treating
+				// a refresh as a start made this re-read the CURRENT config.json and record
+				// it as the document the running core had loaded — which silently CLEARED
+				// the divergence between the two, and the divergence is the whole reason
+				// the record exists.
+				//
+				// The sequence that exposed it: core starts on config A → a rebuild
+				// promotes config B to disk while the core keeps serving A → an unrelated
+				// lifecycle refresh fires → B is recorded as live → the proxy surfaces stop
+				// reporting that a restart is needed, and the user is never told.
+				//
+				// `StartedHere` is set by `RunningState.Set` and nowhere else, so it means
+				// exactly "a core came up".
+				if startedHere {
+					b.recordRunningConfig()
+				}
 			} else {
 				b.Traffic().Stop()
 				// Nothing is live, so there is no runtime config to diverge from.
@@ -318,7 +345,7 @@ func (b *Backend) watchCoreState() {
 		// RunningState.Set can fire from any goroutine; emit is mutex-guarded,
 		// so publishing straight from the bus handler is safe.
 		b.EmitCoreState()
-	})
+	}
 }
 
 // Handshake returns the version and capability block.

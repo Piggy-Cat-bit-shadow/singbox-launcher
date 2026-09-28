@@ -281,9 +281,14 @@ func (ac *AppController) publishLifecycleChange() {
 		return
 	}
 	running := ac.RunningState != nil && ac.RunningState.IsRunning()
+	// StartedHere is FALSE by construction: this function refreshes the picture and loads
+	// nothing. Only `RunningState.Set` — the transition that observes a core coming up —
+	// publishes StartedHere=true.
 	ac.EventBus.Publish(events.Event{
-		Kind:    events.VpnStateChanged,
-		Payload: events.VpnStateChangedPayload{Running: running, Teardown: events.TeardownNone},
+		Kind: events.VpnStateChanged,
+		Payload: events.VpnStateChangedPayload{
+			Running: running, Teardown: events.TeardownNone, StartedHere: false,
+		},
 	})
 }
 

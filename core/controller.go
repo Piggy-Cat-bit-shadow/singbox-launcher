@@ -741,9 +741,15 @@ func (r *RunningState) set(value bool, reason events.TeardownReason) {
 		if !value {
 			publishReason = reason
 		}
+		// StartedHere is `value`, and this is the ONLY place it can be true: `Set` dedups
+		// no-op calls above, so reaching here with value=true means the running state just
+		// CHANGED — a core has come up and loaded a config. Every other publisher of this
+		// event is a refresh of an unchanged picture.
 		ac.EventBus.Publish(events.Event{
-			Kind:    events.VpnStateChanged,
-			Payload: events.VpnStateChangedPayload{Running: value, Teardown: publishReason},
+			Kind: events.VpnStateChanged,
+			Payload: events.VpnStateChangedPayload{
+				Running: value, Teardown: publishReason, StartedHere: value,
+			},
 		})
 	}
 }

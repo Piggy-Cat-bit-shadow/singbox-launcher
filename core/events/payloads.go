@@ -60,6 +60,20 @@ type VpnStateChangedPayload struct {
 	// Empty means "not a deliberate teardown" (a crash, or a plain state refresh),
 	// which is the safe default: an unlabelled false never ends a stop operation.
 	Teardown TeardownReason
+	// StartedHere marks the transition where the core BEGAN running, as opposed to a
+	// refresh of an already-running picture.
+	//
+	// Running==true has two very different meanings and they look identical on the wire.
+	// A genuine start means "a core just loaded a config", and that is the only moment at
+	// which "which config is live" is knowable. A refresh — recorded errors clearing,
+	// ownership adopted late, the picture re-published — means only "the lifecycle view
+	// changed", and NOTHING was loaded.
+	//
+	// A listener that cannot tell them apart must assume the stronger one, and that is
+	// actively wrong: the traffic sampler would re-read the CURRENT config.json on a
+	// refresh and record it as the document the running core loaded, which silently erases
+	// the divergence between the two — the exact condition the record exists to report.
+	StartedHere bool
 }
 
 // TeardownReason identifies a deliberate teardown of the core.
