@@ -229,7 +229,15 @@ bus.Publish(events.Event{Kind: events.ConfigBuilt, Payload: events.ConfigBuiltPa
 
 | Event | Payload | Publisher(s) | Subscriber(s) | Status |
 |-------|---------|--------------|---------------|--------|
-| **VpnStateChanged** | `VpnStateChangedPayload{Running, Teardown}` | `core/controller.go` (on `RunningState.Set` running-bool transition; `Teardown` says WHY when it went false) | `core/auto_update.go:71` (retry failed sources), `backend/service/backend.go` (**the menu bar backend**: republishes the core state to the SwiftUI frontend and starts/stops the traffic sampler) | **Wired on macOS** — the backend subscribes here rather than only emitting after a command, so the menu bar follows the core when it dies on its own. |
+| **VpnStateChanged** | `VpnStateChangedPayload{Running, Teardown, StartedHere}` | `core/controller.go` (on `RunningState.Set` running-bool transition; `Teardown` says WHY when it went false; **`StartedHere` is true only here**, because `Set` dedups no-op calls and a `true` therefore means a core actually came up). Also `core/lifecycle_error.go` (`publishLifecycleChange` — a REFRESH of the picture, `StartedHere=false` by construction). | `core/auto_update.go:71` (retry failed sources), `backend/service/backend.go` (**the menu bar backend**: republishes the core state to the SwiftUI frontend, starts/stops the traffic sampler, and records which config the core loaded **only when `StartedHere`**) | **Wired on macOS** — the backend subscribes here rather than only emitting after a command, so the menu bar follows the core when it dies on its own. |
+
+> **`Running` alone is not enough to mean "a core started".** The same event is published for
+> refreshes — a recorded lifecycle error clearing, a late privileged adoption, the picture
+> being re-published — and none of those loads a config. A listener that cannot tell them
+> apart must assume the stronger meaning, and that is actively wrong for the runtime-config
+> record: re-reading the CURRENT `config.json` on a refresh and calling it "what the core
+> loaded" silently erases the divergence between the two, which is the condition the record
+> exists to report. `StartedHere` is the distinction, and it has exactly one producer.
 | **ConfigBuilt** | `ConfigBuiltPayload{OK bool}` | `core/rebuild.go:188` (OK=false on check failure), `core/rebuild.go:221` (OK=true on successful write+validate) | **none** | **Dead-subscribe** — published, never consumed via the bus. Config-status UI is currently driven by the `UpdateConfigStatusFunc` callback instead. |
 | **StateChanged** | `StateChangedPayload` | `core/services/state_service.go:207` (dirty-marker mutations), `ui/configurator/presentation/presenter_save.go:174` (on Configurator Save) | **none** | **Dead-subscribe** — published, never consumed via the bus. |
 
@@ -587,6 +595,69 @@ straight from `ParsedNode` via a parallel pair of files
 > second caller waits for a correct config rather than being refused one. It is
 > acquired first and never held while another launcher lock is taken, so it cannot
 > invert with `CmdMutex`.
+
+---
+
+### 6.3z Guarantees that must be MECHANISMS, not sentences
+
+A recurring defect class in this codebase, and the reason several of the entries
+below exist: a comment, a method or a field describes a guarantee the code does
+not provide, and the mechanism that would provide it has **zero callers**. The
+check is always the same — grep the call count of a documented method before
+trusting it.
+
+Recorded here because each was found by finding the others:
+
+- **`ConnContext()`** was documented as the context that abandons in-flight IPC
+  work, exposed, and called by nothing. Requests ran under no context at all, so
+  `drain()` could only wait out its timeout, log that a handler was still running,
+  and leave the goroutine alive against a connection the caller had closed.
+  Requests now run under the connection's context, and **both** teardown paths
+  (`requestStop` and `failConnection`) cancel it — the normal stop path is the one
+  that matters, because the connection is still healthy there and nothing else
+  would.
+- **`verifiedAt`** on the daemon's Clash fallback was written on every successful
+  verification and read nowhere, so a verification never expired and a once-trusted
+  loopback endpoint stayed trusted for the life of the process. `transportIfReady`
+  now checks it against `fallbackVerificationTTL` and DEMOTES readiness rather
+  than refusing, so the next use re-verifies.
+- **`hashConfigBytes`** declared itself "the single content hash" while having no
+  caller; `configContentHash` was a second implementation, which is the drift the
+  comment promised to prevent. It now delegates.
+- **`SweepStale`** claimed "the writer that owns the target tidies up first" with
+  no callers, and was not safe to call: name-based removal deleted a live writer's
+  staging file (`TestConcurrentWriteDoesNotShareTempFile` caught it immediately).
+  It keys on age now. It remains uncalled, deliberately — see below.
+- **`ProxyMeasurementState.Generation`** was written at two sites and read by
+  nothing, so the supersession it existed for did not happen and a slower reply
+  could overwrite a newer measurement. `RecordMeasurementIfNewer` reads it.
+- **`ClearMeasurements`** cleared one of the two maps `SetMeasurement` writes.
+
+**On a bound you cannot distinguish from success.** Three separate places capped
+a read and returned the truncated result as if it were whole: the core import
+(256 MB), the remote resource fetch (64 MB), and the group-test budget. A limit
+that is exactly the maximum cannot tell "the whole file" from "the file cut to the
+maximum", so the caller receives a silently truncated artifact — a corrupt core, a
+rule-set that fails much later with a parse error pointing at the download that
+succeeded. Each now reads ONE BYTE PAST the limit and reports the overflow, and
+the tests drive real objects rather than grepping for the constant.
+
+**On locks and the files they guard.** A lock only protects the readers who use
+it, and a second lock over the same file is the same lost update as no lock,
+because the interleaving happens BETWEEN packages. `settings.json` has exactly one
+lock and it lives in `internal/locale`; every writer goes through
+`locale.UpdateSettings`, which also fails closed on an unparseable file — returning
+defaults is right for a READER and destructive for a WRITER, since it would wipe
+daemon pairing, engine mode and identity to satisfy one changed preference.
+
+**On asynchronous delivery.** `Backend.emit` numbers and enqueues under one lock
+and hands events to a single dispatcher goroutine. Ordering is provided by the one
+consumer, not by a lock held across subscriber calls: a subscriber that blocks (the
+production one writes to the client's pipe) must delay only LATER events, never the
+emitter — otherwise `shutting_down` itself queues behind a request that may never
+return, and teardown never begins. Numbering and enqueue must be atomic with
+respect to each other, or two emitters can be numbered 2 and 30 in that order and
+SEND them in the other, which a FIFO channel faithfully preserves as an inversion.
 
 ---
 
