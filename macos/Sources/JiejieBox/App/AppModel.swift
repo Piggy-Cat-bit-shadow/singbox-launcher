@@ -595,6 +595,23 @@ final class AppModel {
             // A failure here means there will be no baseline for this attempt, so the
             // barrier's premise is gone and it must not outlive it.
             disarmBaselineBarrier()
+
+            // RELEASE THE HELPER, OR RETRY CANNOT WORK.
+            //
+            // This branch is reached with the process ALREADY LAUNCHED — the handshake
+            // threw, the event stream could not be opened, or the snapshot request failed.
+            // `BackendClient.start` begins with `guard process == nil else { return }`, so
+            // leaving that helper running means the Retry button calls start(), which
+            // returns immediately without doing anything, and the UI reports the same
+            // failure again. The app looks broken rather than disconnected, and the only
+            // way out is to quit and relaunch — which nothing on screen says.
+            //
+            // `stop()` releases the process and clears the session state, so the next
+            // attempt is a genuine restart. Its own failure mode (a helper that will not
+            // die) is handled below by reporting that instead of starting a second one.
+            await stop()
+            // `stop()` sets `.idle` on success; the failure is what the user must see, so
+            // the message is applied after it.
             connection = .failed(error.localizedDescription)
         }
     }
