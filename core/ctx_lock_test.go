@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"strings"
 )
 
 // acquireWithContext is small, subtle and load-bearing: it decides ownership of
@@ -205,4 +207,41 @@ func waitFree(t *testing.T, mu *sync.Mutex, iteration int) {
 	}
 	t.Fatalf("iteration %d: the lock was never released; an abandoned acquisition "+
 		"leaked it", iteration)
+}
+
+// TestDaemonStopWaitIsCancellable — a stop must not be blocked past its deadline
+// by whatever apply it queues behind.
+//
+// `StopVPNContext` took a plain `applyMu.Lock()`. An apply can take tens of
+// seconds, so a caller's deadline bounded nothing: the stop had not started when
+// the timeout expired, and the reply described a teardown that never began. The
+// daemon RPC had the same problem — a service that accepts a stop and then does
+// not answer held the caller indefinitely.
+func TestDaemonStopWaitIsCancellable(t *testing.T) {
+	src := stripCommentsForTest(readCoreSource(t, "core/backend_daemon.go"))
+
+	idx := strings.Index(src, "func (b *DaemonBackend) StopVPNContext(")
+	if idx < 0 {
+		t.Fatal("StopVPNContext not found")
+	}
+	end := strings.Index(src[idx:], "\nfunc ")
+	if end < 0 {
+		end = len(src) - idx
+	}
+	body := src[idx : idx+end]
+
+	if strings.Contains(body, "b.applyMu.Lock()") {
+		t.Error("StopVPNContext waits for applyMu with a plain Lock; a stop queued " +
+			"behind a long apply ignores its own deadline entirely")
+	}
+	if !strings.Contains(body, "acquireWithContext(ctx, &b.applyMu)") {
+		t.Error("StopVPNContext does not acquire applyMu with a context")
+	}
+	if strings.Contains(body, "b.admin.Stop()") {
+		t.Error("StopVPNContext calls the non-contextual daemon Stop, so a daemon " +
+			"that accepts the request and never answers holds the caller forever")
+	}
+	if !strings.Contains(body, "StopCtx(ctx)") {
+		t.Error("StopVPNContext does not pass its context to the daemon stop RPC")
+	}
 }

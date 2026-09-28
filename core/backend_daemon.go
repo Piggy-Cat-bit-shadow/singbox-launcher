@@ -923,7 +923,13 @@ func (b *DaemonBackend) StopVPNContext(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	b.applyMu.Lock()
+	// The lock wait is CANCELLABLE. A plain Lock here queues behind whatever
+	// apply is running — and an apply can take tens of seconds — so the caller's
+	// deadline bounded nothing: the stop had not even started when its timeout
+	// expired, and the reply then described a teardown that never began.
+	if !acquireWithContext(ctx, &b.applyMu) {
+		return ctx.Err()
+	}
 	defer b.applyMu.Unlock()
 	ac := b.ac
 
@@ -931,7 +937,11 @@ func (b *DaemonBackend) StopVPNContext(ctx context.Context) error {
 		ac.BeginDaemonStop(b)
 	}
 
-	if err := b.admin.Stop(); err != nil {
+	// The stop itself is context-aware for the same reason: a daemon that accepts
+	// the request and then does not answer must not hold the caller past its
+	// deadline. A stop is not cancelled by that — RunStopContext cannot un-ask a
+	// stop — but the CALLER stops waiting and is told why.
+	if err := b.admin.StopCtx(ctx); err != nil {
 		msg := fmt.Errorf("daemon stop: %w", err).Error()
 		if ac != nil {
 			ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", msg, "", true)
