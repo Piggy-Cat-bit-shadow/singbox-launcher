@@ -280,10 +280,7 @@ func (b *Backend) coreState() protocol.CoreState {
 		version = ""
 	}
 
-	backend := "classic"
-	if b.ac.CorePersistsAfterAppExit() {
-		backend = "daemon"
-	}
+	backend := backendIdentity(b.ac)
 
 	return protocol.CoreState{
 		State:        state,
@@ -353,6 +350,29 @@ func (b *Backend) configStale() bool {
 		return true
 	}
 	return b.stateNewerThanConfig()
+}
+
+// backendIdentity names the ACTIVE engine, as a wire string.
+//
+// IDENTITY AND PERSISTENCE ARE INDEPENDENT AXES. This used to be derived from
+// `CorePersistsAfterAppExit()`, which answers a completely different question:
+// "when the launcher quits, does the core keep running?" Conflating them meant
+// that a user on the daemon engine who switched OFF "keep running after quit"
+// was reported as running the CLASSIC engine — the identity flipped because a
+// shutdown preference changed, while the actual engine never moved.
+//
+// That is not cosmetic. The frontend reads this field as `activeEngine` and
+// drives engine-specific UI from it: the wrong value shows the Classic engine
+// while the daemon is serving, mislabels the mode screen, and makes every
+// button whose behaviour depends on the engine act on the wrong one.
+//
+// The engine's own Mode() is the only authoritative answer, and BackendMode()
+// reads it from the live backend object rather than from any stored preference.
+func backendIdentity(ac *core.AppController) string {
+	if ac == nil {
+		return string(core.BackendClassic)
+	}
+	return string(ac.BackendMode())
 }
 
 // stateNewerThanConfig compares modification times of state.json and config.json.

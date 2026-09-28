@@ -85,11 +85,24 @@ func (b *Backend) DaemonStatus() (protocol.DaemonStatusDTO, error) {
 }
 
 // daemonModeActive reports whether the selected engine is the daemon.
+//
+// This is an IDENTITY question, not a preference one, and it used to be answered
+// with `CorePersistsAfterAppExit()` — the "keep running after quit" policy. With
+// the daemon selected and that option OFF (a user who wants the tunnel torn down
+// when the app closes), this reported false: the app believed it was on the
+// classic engine while the daemon was actually serving the tunnel.
+//
+// The damage was not just a wrong label. `DaemonStatus.ActiveMode` gates the
+// destructive actions on the daemon screen (`active_mode && core.running`), so
+// the protection around unpair/remove-service was lifted precisely when a real
+// daemon core was running — the one state those guards exist for. The two axes
+// are now separate: Active is identity, PersistsAfterQuit is policy, and both are
+// reported independently.
 func (b *Backend) daemonModeActive() bool {
 	if b.ac == nil {
 		return false
 	}
-	return b.ac.CorePersistsAfterAppExit()
+	return b.ac.BackendMode() == core.BackendDaemon
 }
 
 // daemonFingerprint reads the paired server fingerprint from settings.
