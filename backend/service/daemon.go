@@ -65,6 +65,8 @@ func (b *Backend) DaemonStatus() (protocol.DaemonStatusDTO, error) {
 		LauncherVersion: snap.Service.LauncherVersion,
 		CoreSupportsLxd: snap.CoreSupportsLxd,
 		NeedsInstall:    snap.Service.NeedsInstall(),
+		ProtocolStale:   len(snap.MissingRPCs) > 0,
+		MissingRPCs:     snap.MissingRPCs,
 		NeedsStart:      snap.Service.NeedsBootstrap(),
 		ActiveMode:      b.daemonModeActive(),
 	}

@@ -100,6 +100,16 @@ struct DaemonView: View {
             if let core = status.core_status, !core.isEmpty {
                 DetailLine(label: "VPN", value: core)
             }
+            // A daemon that is installed, paired, reachable and running the
+            // expected binary can STILL be unable to serve this launcher: the
+            // binary comparison above cannot see a protocol mismatch. Without
+            // this row the screen would say "Active" while the Proxies screen
+            // was disabled, and the user would have no way to connect the two.
+            if status.isProtocolStale {
+                DetailLine(label: L.daemonProtocolLabel.tr(language),
+                           value: L.daemonProtocolStale.tr(language),
+                           tone: .error)
+            }
             if let error = status.error, !error.isEmpty {
                 DetailLine(label: L.errorLabel.tr(language), value: error, tone: .error)
             }

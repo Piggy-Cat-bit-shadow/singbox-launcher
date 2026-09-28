@@ -41,6 +41,10 @@ type DaemonBackend struct {
 	connMu sync.Mutex
 	conn   *grpc.ClientConn
 
+	// caps — какие RPC реально реализует доступный демон. Определяется
+	// однократной пробой (core/daemon_rpc_compat.go): интерфейс сгенерированного
+	// клиента о сервере не говорит ничего.
+	caps *daemonCapabilities
 	// transport — этот backend's gRPC proxy-транспорт (установлен в
 	// APIService.transportOverride). Хранится, чтобы Close снимал ТОЛЬКО
 	// свой override, а setBackend мог переустановить его после Close чужого.
@@ -170,6 +174,7 @@ func newDaemonBackend(ac *AppController) (CoreBackend, error) {
 		admin:  lxdclient.New(cfg),
 		ctx:    ctx,
 		cancel: cancel,
+		caps:   &daemonCapabilities{},
 	}
 	b.transport = &daemonProxyTransport{b: b}
 	b.connTracker = newConnTracker()
@@ -812,8 +817,17 @@ func (b *DaemonBackend) PoolSlots(group string) ([]PoolSlotInfo, error) {
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, daemonRPCTimeout)
 	defer cancel()
+	// A daemon without the pool RPC has no pool to report. Gated so the answer
+	// is a capability rather than a wrapped gRPC string.
+	b.ensureProbed()
+	if !b.caps.supported(rpcGetPool) {
+		return nil, services.ErrProxyListUnsupported
+	}
 	pool, err := client.GetPool(ctx, &daemonpb.GetPoolRequest{GroupTag: group})
 	if err != nil {
+		if isUnimplemented(err) {
+			return nil, services.ErrProxyListUnsupported
+		}
 		return nil, fmt.Errorf("daemon GetPool: %w", err)
 	}
 	slots := make([]PoolSlotInfo, 0, len(pool.GetSlots()))
@@ -831,8 +845,15 @@ func (b *DaemonBackend) Chains() ([]ChainInfo, error) {
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, daemonRPCTimeout)
 	defer cancel()
+	b.ensureProbed()
+	if !b.caps.supported(rpcGetChains) {
+		return nil, services.ErrProxyListUnsupported
+	}
 	list, err := client.GetChains(ctx, &emptypb.Empty{})
 	if err != nil {
+		if isUnimplemented(err) {
+			return nil, services.ErrProxyListUnsupported
+		}
 		return nil, fmt.Errorf("daemon GetChains: %w", err)
 	}
 	return chainInfosFromPB(list.GetChains()), nil
@@ -850,12 +871,19 @@ func (b *DaemonBackend) ProbeLayer(chainTag string, pos int) (int64, string, err
 	// внутри ядра, второй страхует от повисшего RPC.
 	ctx, cancel := context.WithTimeout(b.ctx, chainProbeCallTimeout())
 	defer cancel()
+	b.ensureProbed()
+	if !b.caps.supported(rpcURLTestOutbound) {
+		return 0, "", services.ErrProxyListUnsupported
+	}
 	resp, err := client.URLTestOutbound(ctx, &daemonpb.URLTestOutboundRequest{
 		OutboundTag: chainProbeTag(chainTag, pos),
 		Link:        api.GetPingTestURL(),
 		Timeout:     uint32(api.GetPingTestTimeoutMs()),
 	})
 	if err != nil {
+		if isUnimplemented(err) {
+			return 0, "", services.ErrProxyListUnsupported
+		}
 		return 0, "", fmt.Errorf("daemon URLTestOutbound: %w", err)
 	}
 	return int64(resp.GetDelay()), resp.GetError(), nil
@@ -917,6 +945,12 @@ func (t *daemonProxyTransport) EndpointStatuses() (map[string]services.EndpointS
 		return nil, err
 	}
 	defer cancel()
+	// A daemon without GetOutbounds reports no endpoint state; that is a
+	// capability, so callers get the sentinel rather than a gRPC string.
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcGetOutbounds) {
+		return nil, services.ErrProxyListUnsupported
+	}
 	return services.EndpointStatusesRPC(ctx, client)
 }
 
@@ -927,6 +961,10 @@ func (t *daemonProxyTransport) SetEndpointEnabled(tag string, enabled bool) (str
 	client, err := t.b.grpcClient()
 	if err != nil {
 		return "", err
+	}
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcSetEndpointEnabled) {
+		return "", services.ErrProxyListUnsupported
 	}
 	ctx, cancel := context.WithTimeout(t.b.ctx, chainProbeCallTimeout())
 	defer cancel()
@@ -953,18 +991,54 @@ func (t *daemonProxyTransport) GroupProxies(group string) ([]api.ProxyInfo, stri
 		return nil, "", err
 	}
 	defer cancel()
-	groups, err := client.GetGroups(ctx, &emptypb.Empty{})
+
+	// Which method to use is a property of the SERVER, established once. Asking
+	// the generated client's interface instead is what produced the original
+	// "unknown method GetGroups" failure.
+	t.b.ensureProbed()
+
+	groups, err := t.groupsSnapshot(ctx, client)
 	if err != nil {
-		if isUnimplemented(err) {
-			return nil, "", services.ErrProxyListUnsupported
-		}
-		return nil, "", fmt.Errorf("daemon GetGroups: %w", err)
+		return nil, "", err
 	}
 	proxies, selected, ok := services.ProxyInfosFromGroups(groups, group)
 	if !ok {
 		return nil, "", fmt.Errorf("daemon: group %q not found", group)
 	}
 	return proxies, selected, nil
+}
+
+// groupsSnapshot reads the group list through the method the daemon has.
+//
+// GetGroups is the unary read. Where it is absent there is NO fallback to
+// SubscribeGroups, and that is a measured decision, not an oversight:
+//
+//   - the live daemon that reported this bug answers `Unknown: invalid argument`
+//     to SubscribeGroups(&emptypb.Empty{}), so the two do NOT take the same
+//     request — the vendored subscription request type is not what that server
+//     expects;
+//   - even where a subscription existed, its first frame is a stream's opening
+//     state, while this interface is request/response: silently reinterpreting
+//     one as the other would invent a contract neither side agreed to.
+//
+// Reconstructing the server's expected request from a binary would be guessing
+// at a private contract. So an engine without GetGroups is reported as unable to
+// list proxies, and the UI explains that instead of failing — which is the
+// honest outcome and the one this audit exists to produce.
+func (t *daemonProxyTransport) groupsSnapshot(ctx context.Context, client daemonpb.StartedServiceClient) (*daemonpb.Groups, error) {
+	if !t.b.caps.supported(rpcGetGroups) {
+		return nil, services.ErrProxyListUnsupported
+	}
+	g, err := client.GetGroups(ctx, &emptypb.Empty{})
+	if err != nil {
+		if isUnimplemented(err) {
+			// The probe said yes and the call says no: trust the call, and treat
+			// it as the capability it is rather than as a transient failure.
+			return nil, services.ErrProxyListUnsupported
+		}
+		return nil, fmt.Errorf("daemon GetGroups: %w", err)
+	}
+	return g, nil
 }
 
 // SwitchProxy implements services.ProxyTransport через SelectOutbound.
@@ -974,10 +1048,11 @@ func (t *daemonProxyTransport) SwitchProxy(group, name string) error {
 		return err
 	}
 	defer cancel()
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcSelectOutbound) {
+		return services.ErrProxyListUnsupported
+	}
 	if _, err := client.SelectOutbound(ctx, &daemonpb.SelectOutboundRequest{GroupTag: group, OutboundTag: name}); err != nil {
-		// Same reasoning as GroupProxies: a daemon without the lx command
-		// surface answers Unimplemented, which is a capability fact rather
-		// than a failure the user can retry away.
 		if isUnimplemented(err) {
 			return services.ErrProxyListUnsupported
 		}
@@ -992,6 +1067,12 @@ func (t *daemonProxyTransport) Delay(proxyName string) (int64, error) {
 	client, err := t.b.grpcClient()
 	if err != nil {
 		return 0, err
+	}
+	// Distinguished from "the node is slow": a daemon without the URL-test RPC
+	// cannot measure anything, which is a capability, not a failed measurement.
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcURLTestOutbound) {
+		return 0, services.ErrProxyListUnsupported
 	}
 	// Дедлайн вызова с запасом над бюджетом теста (как у ProbeLayer): при
 	// бюджете выше daemonRPCTimeout медленный узел получал бы транспортную

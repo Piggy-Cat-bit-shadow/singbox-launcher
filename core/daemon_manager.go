@@ -282,6 +282,13 @@ type DaemonUIStatus struct {
 	// launchd, root-owned ли это копия, то ли в ней ядро, что у лаунчера, и
 	// из того ли образа работает демон. Заменил сверку путей SPEC 135 §5.1.
 	Service DaemonServiceCheck
+	// MissingRPCs — StartedService-методы, которых у достижимого демона нет.
+	//
+	// Отдельно от Service: классификатор службы сверяет бинарники и версии и
+	// отвечает «эта ли копия установлена». На вопрос «умеет ли эта копия то,
+	// что нужно лаунчеру» он ответить не может — именно поэтому дефект и
+	// дожил до пользователя. Пусто = либо всё на месте, либо демон недостижим.
+	MissingRPCs []string
 }
 
 // DaemonStatusSnapshot собирает состояние службы/сопряжения/демона.
@@ -313,6 +320,11 @@ func (ac *AppController) DaemonStatusSnapshot() DaemonUIStatus {
 		return status
 	}
 	status.Reachable = true
+	// Протокольная проба — только когда демон уже ответил: у недостижимого
+	// демона «не поддерживает» было бы утверждением, которого мы не проверяли.
+	if missing, _ := ac.DaemonProtocolStaleness(); len(missing) > 0 {
+		status.MissingRPCs = missing
+	}
 	status.CoreStatus = info.Status
 	status.LastError = info.LastError
 	status.InterruptedApply = info.InterruptedApply

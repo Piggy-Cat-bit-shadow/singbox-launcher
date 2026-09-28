@@ -523,6 +523,24 @@ type DaemonStatusDTO struct {
 	PersistsAfterQuit bool `json:"persists_after_quit"`
 	// Error carries the daemon's last reported problem, if any.
 	Error string `json:"error,omitempty"`
+
+	// ProtocolStale reports that the reachable daemon does not implement the
+	// StartedService methods this launcher needs.
+	//
+	// A SEPARATE condition from `Service`, not folded into it. The existing
+	// classifier compares binaries, hashes and versions, which answers "is the
+	// installed service the copy we expect?" — it cannot see that a daemon is
+	// the right BUILD but the wrong PROTOCOL. Collapsing the two would lose
+	// which repair applies: reinstalling the service fixes a binary mismatch,
+	// while a protocol mismatch needs a daemon built from a newer proto.
+	//
+	// Measured on the reporting machine: daemon 1.15.0-jiejie-masquerade.6 was
+	// byte-correct and reported healthy, while answering Unimplemented for eight
+	// of the ten methods the proxy and chain screens call.
+	ProtocolStale bool `json:"protocol_stale"`
+	// MissingRPCs names the absent methods, for the Daemon screen's detail line
+	// and for a bug report. Sorted for stable output.
+	MissingRPCs []string `json:"missing_rpcs,omitempty"`
 }
 
 // Core state values used by CoreState.State.

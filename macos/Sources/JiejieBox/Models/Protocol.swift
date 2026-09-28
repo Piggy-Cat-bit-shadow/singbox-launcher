@@ -536,6 +536,20 @@ struct DaemonStatus: Decodable {
     let persists_after_quit: Bool
     let error: String?
 
+    /// True when the reachable daemon does not implement the StartedService
+    /// methods this launcher needs.
+    ///
+    /// Optional so that a backend predating the field reads as `false` rather
+    /// than failing to decode. Kept separate from `service`: that classifier
+    /// compares binaries and versions, which cannot see a daemon that is the
+    /// right build but the wrong protocol.
+    let protocol_stale: Bool?
+    /// The absent method names, for the detail line.
+    let missing_rpcs: [String]?
+
+    /// Whether the daemon needs updating for protocol reasons.
+    var isProtocolStale: Bool { protocol_stale ?? false }
+
     /// Short label for the service state, for a status row.
     ///
     /// Driven by the protocol value, not by the rendered `summary` string: a

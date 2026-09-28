@@ -403,6 +403,8 @@ enum L: CaseIterable {
     case daemonRunning
     case daemonActive
     case daemonStale
+    case daemonProtocolLabel
+    case daemonProtocolStale
     case service
     case address
     case fingerprint
@@ -778,6 +780,8 @@ extension L {
         case .daemonRunning: return "Running"
         case .daemonActive: return "Active"
         case .daemonStale: return "Update required"
+        case .daemonProtocolLabel: return "Compatibility"
+        case .daemonProtocolStale: return "Needs a newer daemon"
         case .service: return "Service"
         case .address: return "Address"
         case .fingerprint: return "Fingerprint"
@@ -1131,6 +1135,8 @@ extension L {
         case .daemonRunning: return "运行中"
         case .daemonActive: return "使用中"
         case .daemonStale: return "需要更新"
+        case .daemonProtocolLabel: return "兼容性"
+        case .daemonProtocolStale: return "需要更新守护服务"
         case .service: return "服务"
         case .address: return "地址"
         case .fingerprint: return "指纹"

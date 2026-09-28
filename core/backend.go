@@ -504,6 +504,20 @@ func (ac *AppController) DaemonCoreLogLines(max int) ([]string, bool) {
 	return src.CoreLogLines(max), true
 }
 
+// DaemonProtocolStaleness reports whether the reachable daemon lacks methods
+// this launcher requires, and which ones.
+//
+// Empty when the daemon is fine, when it is not reachable, or when classic mode
+// is active — in every one of those cases "protocol stale" would be a claim the
+// launcher cannot support.
+func (ac *AppController) DaemonProtocolStaleness() ([]string, string) {
+	b, ok := ac.Backend().(*DaemonBackend)
+	if !ok {
+		return nil, ""
+	}
+	return b.daemonProtocolStaleness()
+}
+
 // initBackendFromSettings поднимает daemon-режим при старте лаунчера, если
 // он включён в settings.json. Ошибка конструирования не фатальна — лаунчер
 // остаётся на classic (уже установлен в NewAppController) и пишет warning.
