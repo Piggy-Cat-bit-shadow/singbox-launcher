@@ -90,11 +90,33 @@ struct HomeView: View {
         case "config_check_failed": return L.startFailedConfigCheck.tr(language)
         case "clash_api_port_in_use": return L.startFailedPortInUse.tr(language)
         case "cancelled": return L.startFailedCancelled.tr(language)
+        // Codes added with the unified lifecycle error store. Each one maps to a
+        // sentence that says what to DO, not just that something failed: an
+        // occupied port and a missing protected copy need different actions from
+        // the user, and collapsing both into "start failed" would leave them
+        // guessing.
+        case "privileged_copy_unavailable": return L.startFailedPrivilegedCopy.tr(language)
+        case "permission_denied": return L.startFailedPermission.tr(language)
+        case "authorization_timeout": return L.startFailedAuthTimeout.tr(language)
+        case "core_fast_exit": return L.startFailedFastExit.tr(language)
+        case "restart_exhausted": return L.startFailedRestartExhausted.tr(language)
+        case "stop_failed": return L.stopFailed.tr(language)
         default:
             // An unrecognised code still means a failure happened, and `error`
             // state is never shown silently.
             return L.startFailed.tr(language)
         }
+    }
+
+    /// A reassurance appended to a CONFIG failure, or nil for other failures.
+    ///
+    /// The backend sets `config_error` only for failures from building or
+    /// activating the config — the cases where config.json was deliberately NOT
+    /// replaced. Saying "your previous working config is still in use" after a
+    /// spawn failure would be untrue, so it is gated on that field.
+    private var configFailureNote: String? {
+        guard let note = model.core?.config_error, !note.isEmpty else { return nil }
+        return " — " + L.configWasNotReplaced.tr(language)
     }
 
     // MARK: - Status and the primary control
@@ -339,7 +361,13 @@ struct HomeView: View {
             // The sentence is chosen by the backend's stable code and translated
             // here; the raw detail is attached as a tooltip rather than printed,
             // because it is untranslated and names internal functions.
-            Banner(kind: .warning, message: failure) {
+            // When the failure came from the CONFIG pipeline, the user's VPN
+            // story is not "it broke" but "you are still on the last working
+            // config". That is the fact that decides whether they need to act
+            // now, so it is said explicitly instead of being left to inference.
+            // Only shown for config failures: claiming it after a spawn failure
+            // would be false reassurance.
+            Banner(kind: .warning, message: failure + (configFailureNote ?? "")) {
                 Button(L.openLogs.tr(language)) { model.openLogs() }
                     .controlSize(.small)
             }

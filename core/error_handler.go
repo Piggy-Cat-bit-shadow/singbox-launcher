@@ -16,11 +16,61 @@ const (
 
 // showErrorUI logs the error and shows it in the UI if available.
 // category is used as a log prefix (e.g. "StartupError", "ParserError").
+// showErrorUI reports a user-facing error through every available channel.
+//
+// THIS IS THE HEADLESS FIX. It used to be log-only when no Fyne UI was attached,
+// and the macOS app talks to a HEADLESS backend: there is no uiPort, so every
+// error routed through here — startup failure, rebuild failure, parser failure —
+// existed only in a log file the user does not read. The SwiftUI client was
+// structurally incapable of learning that anything had gone wrong.
+//
+// Recording into the unified lifecycle store makes each existing caller reach the
+// frontend without being rewritten, which is why this is done here rather than at
+// the dozen call sites: one seam, every path covered.
 func (ac *AppController) showErrorUI(category string, err error) {
 	debuglog.ErrorLog("%s: %v", category, err)
+	if ac == nil {
+		return
+	}
+	// Only core lifecycle failures belong in the lifecycle store: it is read as
+	// "why is my VPN not working", and a parser warning would answer a different
+	// question.
+	if code, ok := lifecycleCodeForCategory(category); ok {
+		ac.RecordLifecycleError(code, lifecycleOperationForCategory(category),
+			err.Error(), "", true)
+	}
 	if ac.hasUI() {
 		ac.ui().ShowError(locale.T("Error"), err.Error())
 	}
+}
+
+// lifecycleCodeForCategory maps a reporting category onto a lifecycle code.
+//
+// Returns false for categories that are not core lifecycle problems, so the
+// store stays meaningful rather than becoming a general error log.
+func lifecycleCodeForCategory(category string) (LifecycleErrorCode, bool) {
+	switch category {
+	case "StartupError":
+		return LifecycleErrCoreStart, true
+	case "RebuildError":
+		return LifecycleErrConfigRebuild, true
+	case "StopError":
+		return LifecycleErrStopFailed, true
+	}
+	return "", false
+}
+
+// lifecycleOperationForCategory names the operation a category belongs to.
+func lifecycleOperationForCategory(category string) string {
+	switch category {
+	case "StartupError":
+		return "start"
+	case "RebuildError":
+		return "rebuild"
+	case "StopError":
+		return "stop"
+	}
+	return ""
 }
 
 // ShowStartupError shows an error when sing-box fails to start.

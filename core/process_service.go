@@ -244,15 +244,35 @@ func readFileTail(path string, maxBytes int64) (string, error) {
 // Показывает конкретную причину и действие вместо «не удалось
 // перезапустить»: авто-перезапуск прекращён осознанно, потому что повтор
 // ничего не изменит.
+// showDeterministicExitDialog reports a core exit that restarting cannot fix
+// (bad config, permissions, occupied port).
+//
+// The Fyne dialog is only one consumer. Returning early when no UI port exists
+// meant the headless backend — which is what the macOS app talks to — reported
+// NOTHING at all for the case where the core died for a reason that will recur.
+// The user saw a VPN that would not stay up and no explanation anywhere except
+// the log.
 func (ac *AppController) showDeterministicExitDialog(reason exitReason) {
-	if ac.uiPort == nil {
-		return
-	}
 	body := locale.T(deterministicExitText(reason))
 	if body == "" {
-		return
+		body = "the core exited for a reason that restarting will not fix"
 	}
-	ac.ui().ShowError(locale.T("Error"), body)
+	// Recorded regardless of UI: this is a lifecycle failure, and it is the
+	// actionable kind — the message names what to fix and the code lets the
+	// frontend localize it.
+	code := LifecycleErrCoreStart
+	switch reason {
+	case exitReasonPermission:
+		code = LifecycleErrPermission
+	case exitReasonPortInUse:
+		code = LifecycleErrPortInUse
+	case exitReasonConfigInvalid, exitReasonMissingResource:
+		code = LifecycleErrConfigCheck
+	}
+	ac.RecordLifecycleError(code, "start", body, reason.String(), false)
+	if ac.uiPort != nil {
+		ac.ui().ShowError(locale.T("Error"), body)
+	}
 }
 
 // NewProcessService constructs a ProcessService bound to the controller.
@@ -964,8 +984,13 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 
 	if action == actionMaxAttempts {
 		debuglog.DebugLog("monitorSingBox: Maximum restart attempts (%d) reached. Stopping auto-restart.", restartAttempts)
+		// Recorded before the UI branch: exhausting the restart budget is a
+		// lifecycle failure the frontend must show, and the headless backend has
+		// no uiPort to show it with.
+		msg := locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts)
+		ac.RecordLifecycleError(LifecycleErrRestartExhausted, "restart", msg, "", false)
 		if ac.uiPort != nil {
-			ac.uiPort.ShowError(locale.T("Error"), locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts))
+			ac.uiPort.ShowError(locale.T("Error"), msg)
 		}
 		return
 	}

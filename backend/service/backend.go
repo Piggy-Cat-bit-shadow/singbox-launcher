@@ -256,6 +256,24 @@ func (b *Backend) coreState() protocol.CoreState {
 		state = protocol.CoreStateError
 	}
 	errCode, errMessage := b.coreErrorInfo()
+	// The unified lifecycle error store is the SECOND source, and it is the one
+	// that survives: coreErrorInfo covers the operation record (a start that
+	// failed in this session), while the store also holds failures produced by
+	// paths that never run an operation — a rebuild rejected by the core, a
+	// refused reload, an authorization that was cancelled. Without this a
+	// rejected config reached the UI as a healthy "connected" state.
+	lifecycle := b.ac.LifecycleError()
+	if lifecycle != nil {
+		if errCode == "" {
+			errCode = string(lifecycle.Code)
+			errMessage = lifecycle.Detail
+		}
+		// A recorded failure makes the state an error even when nothing is
+		// running, which is the whole point: the user must see why.
+		if state == protocol.CoreStateStopped {
+			state = protocol.CoreStateError
+		}
+	}
 
 	version, err := b.ac.GetInstalledCoreVersion()
 	if err != nil {
@@ -284,7 +302,29 @@ func (b *Backend) coreState() protocol.CoreState {
 		// failure used to reach the screen as silence.
 		ErrorCode:   errCode,
 		ErrorDetail: errMessage,
+		ErrorMessage: func() string {
+			if lifecycle != nil {
+				return lifecycle.Message
+			}
+			return ""
+		}(),
+		Recoverable: func() bool { return lifecycle != nil && lifecycle.Recoverable }(),
+		Operation:   func() string { return lifecycleOp(lifecycle) }(),
+		ConfigError: func() string {
+			if lifecycle != nil && lifecycle.ConfigError {
+				return lifecycle.Message
+			}
+			return ""
+		}(),
 	}
+}
+
+// lifecycleOp returns the operation name for a recorded failure, or "".
+func lifecycleOp(e *core.LifecycleErrorSnapshot) string {
+	if e == nil {
+		return ""
+	}
+	return e.Operation
 }
 
 // configStale reports whether the built config has fallen behind the state.

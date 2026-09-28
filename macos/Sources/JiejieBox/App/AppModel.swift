@@ -92,6 +92,14 @@ final class AppModel {
     }
 
     private(set) var pending: PendingOperation?
+
+    /// Deadline for the in-flight core operation.
+    ///
+    /// Set when a core lifecycle command starts and cleared when the backend
+    /// settles. Not a UI timer: it only bounds how long the marker may survive a
+    /// LOST notification, so that a missed event degrades into "released, with
+    /// whatever state the backend last reported" rather than a permanent spinner.
+    private var coreOpDeadline: Date?
     /// Transient success line. Auto-clears; see `showTransient`.
     private(set) var transientStatus: String?
     /// Task that clears `transientStatus`, cancelled and restarted per message.
@@ -562,20 +570,20 @@ final class AppModel {
     /// asynchronously — so without a pending marker a rapid double click sent two
     /// start commands before the state had changed to `starting`.
     func startCore() async {
-        await withPending(.startingCore, success: nil) {
+        await withCorePending(.startingCore) {
             try await self.client.startCore()
         }
     }
 
     /// Stop the core. Same reasoning as `startCore`.
     func stopCore() async {
-        await withPending(.stoppingCore, success: nil) {
+        await withCorePending(.stoppingCore) {
             try await self.client.stopCore()
         }
     }
 
     func restartCore() async {
-        await withPending(.restarting, success: "Core restarting…") {
+        await withCorePending(.restarting) {
             try await self.client.restartCore()
         }
     }
@@ -1119,6 +1127,72 @@ final class AppModel {
     }
 
     /// Run an operation with a pending marker and consistent error reporting.
+    /// Run a core lifecycle command whose completion is NOT the IPC reply.
+    ///
+    /// THE BUG THIS FIXES. `start_core` returns as soon as the start is
+    /// ACCEPTED. Clearing the pending marker at that moment was wrong, because
+    /// the core may still be rebuilding its config, sitting in an authorization
+    /// dialog, or waiting on the daemon's apply — for seconds, or (with a
+    /// password prompt) minutes. During that window the UI looked idle: the
+    /// button reverted to "Start" and the spinner vanished, which is exactly the
+    /// "I clicked Start and it went back to stopped" report.
+    ///
+    /// The marker is now held until the BACKEND reports a settled state
+    /// (running, stopped or error) or the wait times out. That makes the
+    /// authoritative runtime state the only thing that clears the spinner, so a
+    /// slow start looks slow instead of looking broken.
+    ///
+    /// A failure still clears immediately and reports the reason: an operation
+    /// that failed must not leave the UI spinning forever.
+    private func withCorePending(_ op: PendingOperation,
+                                 _ body: @escaping () async throws -> Void) async {
+        guard pending == nil else {
+            lastError = L.anotherOperationRunning.tr(resolvedLanguage)
+            return
+        }
+        pending = op
+        lastError = nil
+        coreOpDeadline = Date().addingTimeInterval(Self.coreOperationTimeout)
+        do {
+            try await body()
+        } catch {
+            // The command itself was rejected — nothing is running, so the
+            // marker must go and the reason must be shown.
+            pending = nil
+            coreOpDeadline = nil
+            lastError = error.localizedDescription
+            return
+        }
+        // Hold the marker until a lifecycle event settles it. If no event ever
+        // arrives (a lost notification, a backend that died mid-operation), the
+        // deadline releases it rather than leaving the UI permanently busy.
+        await waitForCoreToSettle()
+    }
+
+    /// How long a core operation may hold the UI before the marker is released.
+    ///
+    /// Longer than the backend's own 45s budget so the normal slow path still
+    /// settles by EVENT rather than by this timeout; the value exists only to
+    /// release a UI that would otherwise spin forever.
+    private static let coreOperationTimeout: TimeInterval = 75
+
+    /// Wait until the backend reports a settled core state, or the deadline passes.
+    private func waitForCoreToSettle() async {
+        while Date() < (coreOpDeadline ?? .distantPast) {
+            if let state = core?.state, !state.isTransitioning {
+                // The backend has finished transitioning: running, stopped or
+                // error. Either way the operation is over and the marker goes.
+                break
+            }
+            // Poll the LOCAL snapshot rather than the backend: the state arrives
+            // through the event stream that is already running, and issuing a
+            // request here would add load without adding information.
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        pending = nil
+        coreOpDeadline = nil
+    }
+
     private func withPending(_ op: PendingOperation,
                              success: String?,
                              _ body: @escaping () async throws -> Void) async {

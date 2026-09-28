@@ -249,6 +249,13 @@ enum L: CaseIterable {
     case startFailedConfigCheck
     case startFailedPortInUse
     case startFailedCancelled
+    case startFailedPrivilegedCopy
+    case startFailedPermission
+    case startFailedAuthTimeout
+    case startFailedFastExit
+    case startFailedRestartExhausted
+    case stopFailed
+    case configWasNotReplaced
     case reload
     case openConfig
     case speed
@@ -667,6 +674,13 @@ extension L {
         case .startFailedConfigCheck: return "The core rejected the configuration. Open the config, fix the reported field, then start again."
         case .startFailedPortInUse: return "Clash API port 9090 is already in use. Free the port or change it in the config, then start again."
         case .startFailedCancelled: return "The start was cancelled."
+        case .startFailedPrivilegedCopy: return "The protected core copy needs to be installed or updated"
+        case .startFailedPermission: return "Permission denied"
+        case .startFailedAuthTimeout: return "Authorization did not complete in time. If you finished it, the core may still start."
+        case .startFailedFastExit: return "The core exited immediately after starting"
+        case .startFailedRestartExhausted: return "The core kept failing and automatic restart gave up"
+        case .stopFailed: return "The core could not be stopped and may still be running"
+        case .configWasNotReplaced: return "Your previous working config is still in use"
         case .reload: return "Reload"
         case .openConfig: return "Open Config"
         case .speed: return "Speed"
@@ -1043,6 +1057,13 @@ extension L {
         case .startFailedConfigCheck: return "内核拒绝了这份配置。请打开配置，修正报错的字段后重试。"
         case .startFailedPortInUse: return "Clash API 端口 9090 已被占用。请释放该端口或在配置中更改后重试。"
         case .startFailedCancelled: return "启动已取消。"
+        case .startFailedPrivilegedCopy: return "需要安装或更新受保护的内核副本"
+        case .startFailedPermission: return "权限不足"
+        case .startFailedAuthTimeout: return "授权未在时间内完成。如果你已完成授权，内核可能仍会启动。"
+        case .startFailedFastExit: return "内核启动后立即退出"
+        case .startFailedRestartExhausted: return "内核反复失败，已停止自动重启"
+        case .stopFailed: return "无法停止内核，它可能仍在运行"
+        case .configWasNotReplaced: return "仍在使用的上一份可用配置"
         case .reload: return "重新加载"
         case .openConfig: return "打开配置"
         case .speed: return "速度"

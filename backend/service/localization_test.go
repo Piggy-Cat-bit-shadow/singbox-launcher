@@ -538,3 +538,72 @@ func TestSwiftNeverInfersOwnershipFromRebuildable(t *testing.T) {
 			"default is .unknown")
 	}
 }
+
+// TestSwiftHoldsPendingUntilTheBackendSettles is the Swift half of the "Start
+// reverts immediately" fix.
+//
+// The backend command returns as soon as a start is ACCEPTED, while the core may
+// still be rebuilding, authorizing, or waiting on the daemon. Clearing the
+// pending marker on that reply is what made a slow start look like a broken
+// button — the spinner vanished and the control reverted to "Start" while work
+// was still under way.
+//
+// The invariant: the core lifecycle commands must not run through the generic
+// helper that clears pending on reply. They must use the variant that waits for
+// a settled backend state.
+func TestSwiftHoldsPendingUntilTheBackendSettles(t *testing.T) {
+	app := swiftSource(t, "App", "AppModel.swift")
+
+	// The mechanism must exist.
+	if !strings.Contains(app, "withCorePending") {
+		t.Fatal("AppModel has no withCorePending: nothing can hold the pending " +
+			"marker past the command reply for core lifecycle operations")
+	}
+	if !strings.Contains(app, "waitForCoreToSettle") {
+		t.Fatal("AppModel does not wait for a settled core state, so pending " +
+			"would still be released on the IPC reply alone")
+	}
+
+	// Each core lifecycle command must use it. Matched as whole statements so a
+	// mention in a comment cannot satisfy the check.
+	for _, cmd := range []string{"startCore", "stopCore", "restartCore"} {
+		generic := regexp.MustCompile(`withPending\(\.\w+\)\s*\{[^}]*client\.` + cmd + `\(\)`)
+		if generic.MatchString(app) {
+			t.Errorf("%s still runs through withPending, which clears the pending "+
+				"marker as soon as the backend acknowledges the command", cmd)
+		}
+		holding := regexp.MustCompile(`withCorePending\(\.\w+\)\s*\{[^}]*client\.` + cmd + `\(\)`)
+		if !holding.MatchString(app) {
+			t.Errorf("%s does not use withCorePending", cmd)
+		}
+	}
+}
+
+// TestSwiftShowsAReasonForEveryStartFailureCode keeps the two sides of the error
+// contract in step: a code the backend can emit but the UI cannot translate
+// reaches the user as a bare "Failed to start".
+func TestSwiftShowsAReasonForEveryStartFailureCode(t *testing.T) {
+	home := swiftSource(t, "Views", "HomeView.swift")
+
+	// Every lifecycle code the backend can produce for a start failure.
+	for _, code := range []string{
+		"config_rebuild_failed",
+		"config_check_failed",
+		"core_start_failed",
+		"clash_api_port_in_use",
+		"privileged_copy_unavailable",
+		"permission_denied",
+		"authorization_timeout",
+		"core_fast_exit",
+		"restart_exhausted",
+		"stop_failed",
+		"daemon_unreachable",
+		"daemon_apply_failed",
+		"cancelled",
+	} {
+		if !strings.Contains(home, `"`+code+`"`) {
+			t.Errorf("HomeView has no branch for error code %q, so the user would "+
+				"see a generic failure with no explanation", code)
+		}
+	}
+}

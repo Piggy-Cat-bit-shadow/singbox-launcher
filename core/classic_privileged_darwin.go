@@ -37,10 +37,19 @@ const (
 // одна sudo-команда, Copy the command / Run in Terminal / Retry / Close.
 // Retry повторяет Start тем же путём, что кнопка Start. command == "" (ядро
 // лаунчера копию не умеет) — вместо команды coreHint, кнопка одна: Close.
+// showPrivilegedCopyDialog explains why a privileged start cannot proceed and
+// what to do about it.
+//
+// The Fyne dialog was the ONLY outlet, and it returned immediately when no UI was
+// attached — which is always, for the headless backend the macOS app uses. So the
+// single most actionable failure in this area ("the protected core copy is
+// missing/outdated; run this command") reached nobody: the user pressed Connect,
+// nothing happened, and the reason sat in a log.
+//
+// The failure is now recorded with the full instruction text, and because the
+// privileged-copy states are distinct codes the frontend can render the right
+// wording and offer the command rather than a generic "start failed".
 func (ac *AppController) showPrivilegedCopyDialog(c privilegedCopyCheck, command string, viaService bool, coreHint string) {
-	if !ac.hasUI() {
-		return
-	}
 	var title, reason string
 	switch c.State {
 	case privilegedCopyMissing:
@@ -56,14 +65,33 @@ func (ac *AppController) showPrivilegedCopyDialog(c privilegedCopyCheck, command
 	parts := []string{reason}
 	if command == "" {
 		parts = append(parts, coreHint)
-		ac.ui().ShowCommandNeedsTerminal(title, strings.Join(parts, "\n\n"), "")
+		ac.recordPrivilegedCopyFailure(title, parts)
+		if ac.hasUI() {
+			ac.ui().ShowCommandNeedsTerminal(title, strings.Join(parts, "\n\n"), "")
+		}
 		return
 	}
 	if viaService {
 		parts = append(parts, locale.T(privilegedCopyServiceNoteText))
 	}
 	parts = append(parts, locale.T(privilegedCopyInstructionText))
-	ac.ui().ShowCommandNeedsTerminal(title, strings.Join(parts, "\n\n"), command)
+	ac.recordPrivilegedCopyFailure(title, parts)
+	if ac.hasUI() {
+		ac.ui().ShowCommandNeedsTerminal(title, strings.Join(parts, "\n\n"), command)
+	}
+}
+
+// recordPrivilegedCopyFailure stores the privileged-copy problem with its fix.
+//
+// The command is part of the MESSAGE rather than a separate field on purpose: it
+// is a sudo command the user must run themselves, and the launcher must never
+// execute it automatically. Sending it as text keeps it advisory — the frontend
+// shows it, it does not run it.
+func (ac *AppController) recordPrivilegedCopyFailure(title string, parts []string) {
+	if ac == nil {
+		return
+	}
+	ac.RecordLifecycleError(LifecycleErrPrivilegedCopy, "start", title, strings.Join(parts, "\n\n"), true)
 }
 
 // classicElevatedUsesCopy — на macOS привилегированный старт идёт своим

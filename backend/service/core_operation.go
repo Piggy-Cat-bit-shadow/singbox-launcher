@@ -148,6 +148,27 @@ func (s *coreOpState) clearError() {
 // pending states likewise outrank a stale error, so a retry shows "starting"
 // rather than the previous failure.
 func (b *Backend) coreLifecycleState() string {
+	// The classic runtime's PHASE is authoritative when it exists, because it is
+	// the only thing that knows the difference between "a start was accepted and
+	// is still authorizing" and "nothing is happening". The operation record
+	// below is a fallback for the daemon engine, which has its own runtime.
+	//
+	// Preferring the phase is what makes `starting` and `stopping` REAL states
+	// rather than protocol fields the backend never produced: SwiftUI already
+	// renders them, and a client that waits for a transition which never arrives
+	// is worse off than one that was never given the state.
+	if phase, ok := b.classicPhase(); ok {
+		if state := phaseToWireState(phase); state != "" {
+			// A recorded failure is reported as an error even though the phase
+			// says stopped: the user needs the reason, not just the fact that
+			// nothing runs.
+			if state == protocol.CoreStateStopped && b.hasLifecycleError() {
+				return protocol.CoreStateError
+			}
+			return state
+		}
+	}
+
 	kind, lastErr := b.ops.snapshot()
 	if b.ac != nil && b.ac.RunningState != nil && b.ac.RunningState.IsRunning() {
 		return protocol.CoreStateRunning
@@ -161,7 +182,43 @@ func (b *Backend) coreLifecycleState() string {
 	if lastErr != nil {
 		return protocol.CoreStateError
 	}
+	if b.hasLifecycleError() {
+		return protocol.CoreStateError
+	}
 	return protocol.CoreStateStopped
+}
+
+// classicPhase reads the classic runtime phase, if the runtime is available.
+func (b *Backend) classicPhase() (core.ClassicPhase, bool) {
+	if b.ac == nil {
+		return "", false
+	}
+	return b.ac.ClassicPhase(), true
+}
+
+// phaseToWireState maps a runtime phase onto the wire state.
+//
+// Returns "" for phases that carry no wire meaning on their own, letting the
+// caller fall through to the operation record.
+func phaseToWireState(p core.ClassicPhase) string {
+	switch p {
+	case core.ClassicStarting:
+		return protocol.CoreStateStarting
+	case core.ClassicRunning:
+		return protocol.CoreStateRunning
+	case core.ClassicStopping, core.ClassicRestarting:
+		return protocol.CoreStateStopping
+	case core.ClassicFailed:
+		return protocol.CoreStateError
+	case core.ClassicStopped:
+		return protocol.CoreStateStopped
+	}
+	return ""
+}
+
+// hasLifecycleError reports whether the unified error store holds a failure.
+func (b *Backend) hasLifecycleError() bool {
+	return b.ac != nil && b.ac.HasLifecycleError()
 }
 
 // coreErrorInfo reports the last start failure as wire fields.

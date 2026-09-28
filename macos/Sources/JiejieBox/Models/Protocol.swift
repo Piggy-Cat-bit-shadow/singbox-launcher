@@ -238,6 +238,16 @@ struct CoreStatus: Decodable {
     /// Technical explanation of the failure, for logs and the help tooltip.
     /// Never shown as-is: it is untranslated and may name internal functions.
     let error_detail: String?
+    /// Set when the failure came from building or activating the config rather
+    /// than from the core process. The UI uses it to say "your previous working
+    /// config is still in use" — which is only true for these.
+    let config_error: String?
+    /// Whether retrying the same action can plausibly succeed. A deterministic
+    /// failure (occupied port, missing copy) is not retryable, and presenting it
+    /// as such is what makes a user click Start in a loop.
+    let recoverable: Bool?
+    /// The lifecycle operation the failure belongs to (start/stop/restart/rebuild).
+    let operation: String?
     let error_message: String?
 }
 

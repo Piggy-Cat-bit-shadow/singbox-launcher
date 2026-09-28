@@ -327,6 +327,21 @@ type CoreState struct {
 	ErrorDetail string `json:"error_detail,omitempty"`
 	// ErrorMessage carries the last failure, if any.
 	ErrorMessage string `json:"error_message,omitempty"`
+	// Recoverable tells the frontend whether retrying the same action can
+	// plausibly succeed. It exists because the alternative — the UI guessing
+	// from the error text — is how "needs update" style advice gets shown for
+	// conditions an update cannot fix.
+	Recoverable bool `json:"recoverable,omitempty"`
+	// Operation names the lifecycle operation the error belongs to
+	// ("start"/"stop"/"restart"/"rebuild"), so the frontend can attach the
+	// failure to the action the user actually took.
+	Operation string `json:"operation,omitempty"`
+	// ConfigError is set when the failure came from building or activating the
+	// config rather than from the core process. The frontend uses it to say
+	// "config.json was NOT replaced; the previous working config is still in
+	// use", which is the fact that decides whether the user still has a working
+	// VPN. Empty for process-level failures.
+	ConfigError string `json:"config_error,omitempty"`
 }
 
 // SettingsState is the subset of business settings the frontend displays.
