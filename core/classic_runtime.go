@@ -336,6 +336,27 @@ func (r *classicRuntime) logOffsetFor(gen uint64) int64 {
 	return r.logOffsets[gen]
 }
 
+// SetOwnedProcessForTest records an owned process identity, so an IPC-layer test
+// can exercise the paths that must not report a live core as stopped.
+//
+// The identity is deliberately one that does not exist on the machine: these tests
+// assert on the OWNERSHIP record, and must not touch a real process.
+func (ac *AppController) SetOwnedProcessForTest(pid int, exe string) {
+	if ac == nil {
+		return
+	}
+	gen := ac.classic.currentGeneration()
+	ac.classic.commitPrivileged(gen, pid, pid, "", exe)
+}
+
+// ClearOwnedProcessForTest forgets the owned process.
+func (ac *AppController) ClearOwnedProcessForTest() {
+	if ac == nil {
+		return
+	}
+	ac.classic.clearOwnership(ac.classic.currentGeneration())
+}
+
 // SetClassicPhaseForTest installs a phase directly.
 //
 // Exported for the backend's state tests, which must be able to state the

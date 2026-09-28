@@ -135,6 +135,12 @@ type AppController struct {
 	// reads here, so the frontend has one authoritative source instead of
 	// depending on which UI happened to be attached.
 	lifecycleErr lifecycleErrors
+	// teardownReason carries WHY a deliberate teardown is happening, for the next
+	// state transition to publish (see noteTeardown/publishTeardown).
+	//
+	// Stored as a string because atomic.Value cannot hold a named string type
+	// consistently across Store/Load without a fixed concrete type.
+	teardownReason atomic.Value
 
 	// --- Context for goroutine cancellation ---
 	ctx        context.Context    // Context for cancellation
@@ -678,10 +684,24 @@ func (r *RunningState) Set(value bool) {
 	// the Core-tab icon (ui/app.go) were previously dead — nothing published
 	// this event; only the legacy UpdateCoreStatusFunc callback fired.
 	if ac != nil && ac.EventBus != nil {
+		// The reason travels WITH the transition, because `false` alone cannot
+		// distinguish the causes and they need opposite responses: a user stop
+		// ends a stop operation, while a restart's teardown must not — the core is
+		// coming back, and reporting the stop as complete would be a lie told
+		// moments before a new core appears.
+		//
+		// An unlabelled `false` is a crash or a routine refresh, and ends nothing.
+		reason := events.TeardownNone
+		if !value {
+			reason = ac.pendingTeardown()
+		}
 		ac.EventBus.Publish(events.Event{
 			Kind:    events.VpnStateChanged,
-			Payload: events.VpnStateChangedPayload{Running: value},
+			Payload: events.VpnStateChangedPayload{Running: value, Teardown: reason},
 		})
+		if !value {
+			ac.teardownReason.Store("")
+		}
 	}
 }
 

@@ -1,0 +1,52 @@
+package core
+
+import "context"
+
+// Test seams for the classic backend.
+//
+// They live in the production package because the IPC-layer acceptance tests need
+// to drive the REAL call chain — Backend.StartCore → AppController.StartVPNContext
+// → LegacyBackend → the process operation — and substitute only the PROCESS step
+// at the bottom.
+//
+// The reason this matters: an earlier generation of these tests replaced
+// `runCoreOp`'s closure, which proves only that `runCoreOp` awaits what it was
+// given. The actual defect was that the production closure returned immediately,
+// so `StartCore` reported success while nothing had been spawned. Catching that
+// requires the fake to sit where the real work happens.
+
+// LegacyOpsForTest overrides the ProcessService operations the classic backend
+// calls. A nil field falls back to the real implementation.
+type LegacyOpsForTest struct {
+	StartContext   func(ctx context.Context, skipRunningCheck bool) error
+	RestartContext func(ctx context.Context) error
+	Stop           func()
+}
+
+// SetLegacyOpsForTest installs the override on a LegacyBackend.
+func SetLegacyOpsForTest(b *LegacyBackend, ops *LegacyOpsForTest) {
+	if b == nil || ops == nil {
+		return
+	}
+	existing := b.opsOrDefault()
+	if ops.StartContext != nil {
+		existing.startContext = ops.StartContext
+	}
+	if ops.RestartContext != nil {
+		existing.restartContext = ops.RestartContext
+	}
+	if ops.Stop != nil {
+		existing.stop = ops.Stop
+	}
+	b.ops = &existing
+}
+
+// SetBackendForTest swaps the active backend without the persistence and
+// lifecycle machinery SwitchBackendMode performs, so a test can exercise one
+// backend's call chain in isolation.
+func (ac *AppController) SetBackendForTest(b CoreBackend) {
+	if ac == nil {
+		return
+	}
+	ac.setBackend(b)
+}

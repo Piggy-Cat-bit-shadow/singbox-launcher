@@ -741,6 +741,18 @@ func (ac *AppController) StopVPNContext(ctx context.Context) error {
 	return nil
 }
 
+// OwnedProcess reports the process identity this launcher currently owns.
+//
+// Exposed so the IPC layer can answer "is a core of ours alive" from OWNERSHIP
+// rather than from the running-state belief, which can be false while a process
+// is still up.
+func (ac *AppController) OwnedProcess() (ProcessIdentity, bool, bool) {
+	if ac == nil {
+		return ProcessIdentity{}, false, false
+	}
+	return ac.classic.ownedProcess()
+}
+
 // RestartVPNContext — перезапуск ядра с возвратом ошибки. См. StartVPNContext.
 func (ac *AppController) RestartVPNContext(ctx context.Context) error {
 	if ac == nil {

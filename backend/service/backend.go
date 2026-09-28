@@ -38,6 +38,9 @@ type Backend struct {
 	// daemon apply, and holding the snapshot mutex for that long would stall
 	// every other IPC call.
 	ops coreOpState
+	// opTimeoutOverride shortens the operation deadline for tests. Zero means the
+	// production constant.
+	opTimeoutOverride time.Duration
 
 	mu sync.Mutex
 	// seq is the monotonic event sequence. It lets the frontend discard an
@@ -125,8 +128,10 @@ func (b *Backend) watchCoreState() {
 	}
 	b.cancelCoreWatch = b.ac.EventBus.Subscribe(events.VpnStateChanged, func(ev events.Event) {
 		running := false
+		teardown := events.TeardownNone
 		if p, ok := ev.Payload.(events.VpnStateChangedPayload); ok {
 			running = p.Running
+			teardown = p.Teardown
 			// Run the sampler exactly while the core is up: a menu bar should
 			// not keep polling a socket that is not listening.
 			if running {
@@ -150,7 +155,10 @@ func (b *Backend) watchCoreState() {
 		// the current one — a crash leaves no stop operation to settle, and the
 		// crash path keeps its own decision about restarting.
 		if !running {
-			b.completeStop("the runtime reported the core is down")
+			// The REASON travels with the transition, because "the flag went
+			// false" cannot distinguish a user stop from a restart's teardown —
+			// and the two require opposite responses.
+			b.completeStop(string(teardown))
 		}
 
 		// RunningState.Set can fire from any goroutine; emit is mutex-guarded,
@@ -532,7 +540,7 @@ func (b *Backend) StartCore() error {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
 	debuglog.InfoLog("backend: start_core requested")
-	return b.runCoreOp("start", coreOpTimeout, func(ctx context.Context) error {
+	return b.runCoreOp("start", b.opTimeout(), func(ctx context.Context) error {
 		return b.ac.StartVPNContext(ctx)
 	})
 }
@@ -632,7 +640,7 @@ func (b *Backend) RestartCore() error {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
 	debuglog.InfoLog("backend: restart_core requested")
-	return b.runCoreOp("restart", coreOpTimeout, func(ctx context.Context) error {
+	return b.runCoreOp("restart", b.opTimeout(), func(ctx context.Context) error {
 		return b.ac.RestartVPNContext(ctx)
 	})
 }

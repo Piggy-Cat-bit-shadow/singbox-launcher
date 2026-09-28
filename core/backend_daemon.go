@@ -663,10 +663,30 @@ func (b *DaemonBackend) retryCoreReject(errText string) bool {
 // The failure is now recorded with the daemon's own message, which is the only
 // place the true cause exists — it comes from the core, not from the launcher.
 func (b *DaemonBackend) retryAfterCoreFatal(msg string) {
+	if b == nil || b.ac == nil {
+		return
+	}
+
+	// A RETIRED BACKEND MUST NOT REPAIR ANYTHING — and the check has to come
+	// FIRST, before anything is mutated.
+	//
+	// `retryCoreReject` below calls DisableNodeNamedByCore, which PERSISTS a node
+	// as disabled in the user's state. It is not a cache update or a hint: the
+	// node disappears from the working set. The isActive guard used to sit after
+	// it, so a late FATAL frame arriving after the user switched to the classic
+	// engine still disabled a node — an irreversible, user-visible mutation made
+	// on behalf of an engine nobody is running any more, and the log said only
+	// that the retry had been skipped.
+	//
+	// This runs on a status-supervisor goroutine nobody owns, triggered by a
+	// frame that may have been produced seconds ago, so the window is real rather
+	// than theoretical.
+	if !b.isActive() {
+		debuglog.InfoLog("daemon: backend is no longer active; ignoring the FATAL frame entirely")
+		return
+	}
+
 	if !b.retryCoreReject(msg) {
-		if b == nil || b.ac == nil {
-			return
-		}
 		// Not a node problem, or we are out of retries. Either way the core is
 		// down for a reason the user needs to see, verbatim: the message names
 		// the offending tag, which is what makes it actionable.
@@ -675,15 +695,12 @@ func (b *DaemonBackend) retryAfterCoreFatal(msg string) {
 			"the core refused the configuration", msg, false)
 		return
 	}
-	// A RETIRED BACKEND MUST NOT REPAIR ANYTHING.
-	//
-	// This runs on a goroutine nobody owns, triggered by a status frame. If the
-	// user switched engines in the meantime, applying here would write the
-	// config and start a daemon core for an engine they have left — the same
-	// stale-side-effect class as the apply path, on a path that is harder to
-	// notice because it is not user-initiated at all.
+
+	// Re-checked after the node mutation: disabling a node is not instantaneous,
+	// and a switch can land inside it. The apply is what must not happen for a
+	// retired backend; the mutation above was already gated on being active.
 	if !b.isActive() {
-		debuglog.InfoLog("daemon: backend is no longer active; skipping the FATAL retry")
+		debuglog.InfoLog("daemon: backend retired while handling the FATAL; not re-applying")
 		return
 	}
 	b.applyCurrentConfig("core-reject-fatal", true)

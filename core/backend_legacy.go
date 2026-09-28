@@ -226,9 +226,38 @@ func (b *LegacyBackend) Close() {
 		return
 	}
 	gen := b.ac.classic.currentGeneration()
-	// Renew first, then report: a start that was mid-flight samples the
-	// generation at entry, so bumping it here makes that start's commit point
-	// fail and its just-spawned process get stopped instead of adopted.
+
+	// AN ENGINE MUST NOT RELEASE A PROCESS IT STILL OWNS.
+	//
+	// Renewing the generation only invalidates the bookkeeping; it does nothing
+	// to a process that is still alive. That was safe while the engine switch
+	// required `!RunningState.IsRunning()` — but a CRASH already clears that flag
+	// while the core may still be running (the crash path clears it as soon as
+	// the exit is observed, and the process can outlive that observation). So the
+	// user could switch engines and leave a live classic core holding the TUN
+	// while the daemon's core started alongside it: two engines, one VPN, which is
+	// the exact situation the runtime's ownership model exists to prevent.
+	//
+	// Stopping here is unconditional and synchronous: `Close` is called while the
+	// engine is being replaced, so there is no later moment at which anyone would
+	// notice the orphan.
+	if owned, hasOwned, _ := b.ac.classic.ownedProcess(); hasOwned && owned.PID > 0 {
+		debuglog.WarnLog("classic backend closing with a live owned core (pid=%d); stopping it "+
+			"before the engine is replaced", owned.PID)
+		if b.ac.ProcessService != nil {
+			if !b.ac.ProcessService.ForceStopOwnedCore() {
+				// Reported rather than swallowed: a core that survived the stop
+				// will keep the TUN, and the daemon about to start will fight it.
+				b.ac.RecordLifecycleError(LifecycleErrStopFailed, "engine_switch",
+					"the core could not be stopped while switching engines",
+					"a core left running will keep the tunnel while the new engine starts", false)
+			}
+		}
+	}
+
+	// Renew AFTER the stop: a start that was mid-flight sampled the generation at
+	// entry, so bumping it now makes that start's commit point fail and its
+	// just-spawned process get stopped instead of adopted.
 	newGen := b.ac.classic.renewGeneration()
 	debuglog.InfoLog("classic backend closed: generation %d abandoned, %d is now current", gen, newGen)
 }

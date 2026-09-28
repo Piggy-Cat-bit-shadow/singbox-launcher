@@ -31,6 +31,8 @@ import (
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
 	"singbox-launcher/internal/debuglog"
+
+	"singbox-launcher/core/events"
 )
 
 // coreOperation is the in-flight start/stop request, if any.
@@ -380,6 +382,25 @@ func (b *Backend) coreLifecycleState() string {
 			// so it is the one that must speak for it.
 			acceptedStartPending := (kind == "start" || kind == "restart") &&
 				(state == protocol.CoreStateStopped || state == protocol.CoreStateError)
+
+			// A LIVE OWNED PROCESS OUTRANKS A SETTLED PHASE.
+			//
+			// `isSettled()` counts the empty phase and `ClassicStopped` as "not
+			// doing anything", and the phase is genuinely not a statement about
+			// whether a PROCESS exists — an adopted privileged root core records
+			// its identity without ever passing through a start operation here, so
+			// the phase can read stopped while a root sing-box holds the TUN.
+			// Reporting `stopped` then shows a clean Start button for a machine
+			// that is actively routed, and the next Start collides with the core
+			// nobody admitted was running.
+			//
+			// This is exactly the desynchronisation the ownership model exists to
+			// prevent, so the liveness question is answered from ownership rather
+			// than inferred from the phase.
+			if state == protocol.CoreStateStopped && b.ownsALiveProcess() {
+				return protocol.CoreStateRunning
+			}
+
 			if !acceptedStartPending {
 				// A recorded failure is reported as an error even though the
 				// phase says stopped: the user needs the reason, not just the
@@ -510,6 +531,24 @@ func isStartAborted(err error) bool {
 // arrives.
 const coreOpTimeout = 45 * time.Second
 
+// SetCoreOpTimeoutForTest shortens the operation deadline so a test can drive the
+// timeout path without waiting 45 real seconds. Test-only: nothing in production
+// calls it, and it affects only the fire-and-forget path's own timer.
+func (b *Backend) SetCoreOpTimeoutForTest(d time.Duration) {
+	if b == nil {
+		return
+	}
+	b.opTimeoutOverride = d
+}
+
+// opTimeout returns the deadline an operation should use.
+func (b *Backend) opTimeout() time.Duration {
+	if b.opTimeoutOverride > 0 {
+		return b.opTimeoutOverride
+	}
+	return coreOpTimeout
+}
+
 // runCoreOp runs a start/restart as one operation and returns a structured
 // error on failure.
 //
@@ -568,17 +607,30 @@ func (b *Backend) runCoreOp(kind string, timeout time.Duration, fn func(context.
 		return nil
 	}
 	if refusal, ok := asPreconditionRefusal(err); ok {
-		// A precondition declined the start. On the GUI path the precondition
-		// showed its own dialog; on the headless path nothing was shown at all,
-		// so the refusal must travel as a structured error rather than being
-		// silently swallowed. See preconditionRefusal for why "aborted" is not
-		// the same statement as "the user has been told".
+		// A precondition declined the start.
+		//
+		// IT IS REPORTED EITHER WAY, and `Silent` decides only HOW MUCH is said:
+		// a silent refusal has no message the user has already seen, so its own
+		// message is the whole explanation and travels to the frontend. A refusal
+		// that showed its own dialog must not produce a SECOND, contradictory
+		// message, so it travels as a flag-only error with no text.
+		//
+		// Returning nil for the silent case — which this originally did — was
+		// exactly the defect this type was introduced to remove, inverted: the
+		// one situation where NOBODY was told was the one reported as success.
+		// The user pressed Start, the precondition declined, and the IPC reply
+		// said the start succeeded.
 		if refusal.Silent {
-			return nil
+			return &protocol.Error{
+				Code:        string(refusal.Code),
+				Message:     refusal.Message,
+				Recoverable: refusal.Recoverable,
+			}
 		}
+		// Already explained on screen; report the fact without repeating the text.
 		return &protocol.Error{
 			Code:        string(refusal.Code),
-			Message:     refusal.Message,
+			Message:     "",
 			Recoverable: refusal.Recoverable,
 		}
 	}
@@ -635,7 +687,7 @@ func (b *Backend) runCoreOpFireAndForget(kind string, fn func(context.Context) e
 	// The completion arrives from the runtime transition (see completeStop),
 	// which is the only event that can honestly end a stop. The goroutine below
 	// exists to observe the FAILURE, which the transition cannot express.
-	ctx, cancel := context.WithTimeout(context.Background(), coreOpTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), b.opTimeout())
 	if !b.ops.attachCancel(op, cancel) {
 		cancel()
 		return nil
@@ -645,6 +697,21 @@ func (b *Backend) runCoreOpFireAndForget(kind string, fn func(context.Context) e
 		defer cancel()
 		err := fn(ctx)
 		if err == nil {
+			// THE CONTEXTUAL STOP SUCCEEDED, so the operation is over whether or
+			// not a transition reaches us.
+			//
+			// The runtime transition normally ends a stop, but it is not
+			// guaranteed to fire: RunningState dedups a no-op write, so a stop
+			// that completes while the flag is already false produces NO event,
+			// and the record would sit at `stopping` forever. A stop whose own
+			// contextual call returned success has, by definition, completed.
+			//
+			// completeStop still owns the user-stop case and stays the primary
+			// path — this only closes the gap where the event never arrives.
+			if settled := b.ops.finishOp(op, nil); settled == settleCommitted {
+				debuglog.InfoLog("core op: stop (id=%d) completed contextually", op.id)
+				b.EmitCoreState()
+			}
 			return
 		}
 		// Superseded: the world moved on and this failure describes a state that
@@ -669,6 +736,21 @@ func (b *Backend) runCoreOpFireAndForget(kind string, fn func(context.Context) e
 	return nil
 }
 
+// ownsALiveProcess reports whether an engine still owns a process it started.
+//
+// Distinct from RunningState, which is a BELIEF updated at transitions and can be
+// false while a process is alive (a crash clears it on observation, and a core can
+// outlive that observation). Ownership is the record of what this launcher
+// actually launched and has not yet confirmed dead, so it is the honest source for
+// "is something of ours still running".
+func (b *Backend) ownsALiveProcess() bool {
+	if b == nil || b.ac == nil {
+		return false
+	}
+	owned, hasOwned, _ := b.ac.OwnedProcess()
+	return hasOwned && owned.PID > 0
+}
+
 // completeStop settles a stop operation once the runtime confirms the core is
 // gone, and reports whether it did anything.
 //
@@ -683,6 +765,20 @@ func (b *Backend) runCoreOpFireAndForget(kind string, fn func(context.Context) e
 // decision to make about restarting. Callers therefore pass how the transition
 // happened, and only a deliberate stop settles the operation.
 func (b *Backend) completeStop(reason string) bool {
+	// ONLY A DELIBERATE USER STOP ENDS A STOP OPERATION.
+	//
+	// Running==false has several causes that are indistinguishable on the wire,
+	// and they need opposite responses. A RESTART's teardown also flips the flag,
+	// and it is followed by a fresh core: settling a pending stop on that reading
+	// reported the user's stop as SUCCESS moments before a new core came up. The
+	// transition now carries WHY it happened (events.TeardownReason), so the
+	// restart, an engine switch, a shutdown and a crash all leave the stop
+	// operation alone to be ended by its own contextual result.
+	if events.TeardownReason(reason) != events.TeardownUserStop {
+		debuglog.InfoLog("core op: the runtime went down (%q), which is not a user stop; "+
+			"the stop operation is not settled by this transition", reason)
+		return false
+	}
 	op := b.ops.snapshotOp()
 	if op == nil || op.kind != "stop" {
 		return false

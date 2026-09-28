@@ -20,6 +20,8 @@ import (
 	"singbox-launcher/internal/locale"
 	"singbox-launcher/internal/platform"
 	"singbox-launcher/internal/process"
+
+	"singbox-launcher/core/events"
 )
 
 // Длинные тексты локализации: ключ = английский текст (SPEC 111).
@@ -188,7 +190,7 @@ func (ac *AppController) CoreLogPath() string {
 // последние строки. Лог недоступен — exitReasonUnknown: отсутствие лога
 // не доказательство отсутствия ошибки, и неизвестная причина остаётся
 // транзиентной, то есть авто-восстановление не отключается зря.
-func (ac *AppController) classifyCoreExitReason() exitReason {
+func (ac *AppController) classifyCoreExitReason(gen uint64) exitReason {
 	path := ac.CoreLogPath()
 	if path == "" {
 		return exitReasonUnknown
@@ -212,7 +214,13 @@ func (ac *AppController) classifyCoreExitReason() exitReason {
 	//
 	// The offset recorded when this generation's core started is the boundary:
 	// text before it belongs to a world that is already over.
-	if start := ac.classic.logOffsetFor(ac.classic.currentGeneration()); start > 0 {
+	//
+	// The generation is a PARAMETER for the same reason every other callback in
+	// this file takes one: a lookup of the current generation would classify an
+	// exiting process against a successor's log window, which can turn a transient
+	// crash into a reported deterministic config failure (or hide one), and a
+	// deterministic verdict stops auto-restart.
+	if start := ac.classic.logOffsetFor(gen); start > 0 {
 		if skipped := skipToOffset(text, path, start); skipped >= 0 {
 			text = text[skipped:]
 		}
@@ -773,7 +781,7 @@ func (svc *ProcessService) reportEarlyExit(gen uint64, pid int) {
 		debuglog.InfoLog("startSingBox: the exit of PID %d was already classified; not reporting a start failure", pid)
 		return
 	}
-	reason := svc.ac.classifyCoreExitReason()
+	reason := svc.ac.classifyCoreExitReason(gen)
 	code := LifecycleErrFastExit
 	recoverable := true
 	switch reason {
@@ -1108,7 +1116,7 @@ func (svc *ProcessService) onPrivilegedScriptExited(gen uint64) {
 	//
 	// SPEC 143: причина классифицируется по логу ядра — детерминированный
 	// отказ (права, порт, конфиг) не перезапускается.
-	reason := ac.classifyCoreExitReason()
+	reason := ac.classifyCoreExitReason(gen)
 	action, newAttempts := decideCrashActionReason(ac.StoppedByUser, ac.RestartRequestedByUser, false, ac.ConsecutiveCrashAttempts, restartAttempts, reason)
 	ac.ConsecutiveCrashAttempts = newAttempts
 	switch action {
@@ -1286,7 +1294,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	// SPEC 143: причина берётся из лога ядра. Детерминированная ошибка
 	// (конфиг, права, порт) прекращает авто-перезапуск сразу, а не после
 	// трёх одинаковых попыток.
-	reason := ac.classifyCoreExitReason()
+	reason := ac.classifyCoreExitReason(monGen)
 	action, newAttempts := decideCrashActionReason(ac.StoppedByUser, ac.RestartRequestedByUser, err == nil, ac.ConsecutiveCrashAttempts, restartAttempts, reason)
 
 	// 2. Then StoppedByUser (did user stop it?)
@@ -1471,6 +1479,7 @@ func (svc *ProcessService) ForceStopOwnedCore() bool {
 	gen := ac.classic.currentGeneration()
 	ac.classic.clearOwnership(gen)
 	ac.classic.setPhase(gen, ClassicStopped)
+	ac.noteTeardown(events.TeardownUserStop)
 	ac.RunningState.Set(false)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
@@ -1582,6 +1591,7 @@ func (svc *ProcessService) Stop() {
 	ac.SingboxPrivilegedSingboxPID = 0
 	ac.SingboxPrivilegedPIDFile = ""
 	ac.StoppedByUser = false
+	ac.noteTeardown(events.TeardownUserStop)
 	ac.RunningState.Set(false)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
@@ -1741,6 +1751,7 @@ func (svc *ProcessService) KillForRestart() {
 	ac.SingboxPrivilegedPID = 0
 	ac.SingboxPrivilegedSingboxPID = 0
 	ac.SingboxPrivilegedPIDFile = ""
+	ac.noteTeardown(events.TeardownRestart)
 	ac.RunningState.Set(false)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
@@ -1852,6 +1863,12 @@ func (svc *ProcessService) RestartContext(ctx context.Context) error {
 	ac.SingboxPrivilegedPID = 0
 	ac.SingboxPrivilegedSingboxPID = 0
 	ac.SingboxPrivilegedPIDFile = ""
+	// Label the transition BEFORE flipping the flag. This teardown is part of a
+	// restart, and the core is expected back — so the state change must not be
+	// readable as "the user's stop completed". Without the label, a stop that
+	// superseded this restart was settled as SUCCESS right here, and the restart
+	// then went on to spawn a new core (see the StartContext call at the end).
+	ac.noteTeardown(events.TeardownRestart)
 	ac.RunningState.Set(false)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)

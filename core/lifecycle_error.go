@@ -273,14 +273,71 @@ func (ac *AppController) EmitCoreStateChange() {
 
 // publishLifecycleChange nudges listeners that the lifecycle picture changed.
 func (ac *AppController) publishLifecycleChange() {
+	ac.publishLifecycleChangeReason(events.TeardownNone)
+}
+
+// publishTeardown announces a DELIBERATE teardown and why it happened.
+//
+// The reason is cleared as soon as it has been announced, because it describes a
+// SINGLE transition rather than a lasting condition: leaving it set would label
+// every later refresh with a stale cause, and a later crash would be reported as
+// the restart that preceded it.
+func (ac *AppController) publishTeardown(reason events.TeardownReason) {
+	ac.publishLifecycleChangeReason(reason)
+	ac.teardownReason.Store("")
+}
+
+// publishLifecycleChangeReason publishes the current running state with a reason.
+func (ac *AppController) publishLifecycleChangeReason(reason events.TeardownReason) {
 	if ac == nil || ac.EventBus == nil {
 		return
 	}
+	// An explicitly supplied reason wins; otherwise fall back to whatever a caller
+	// recorded just before flipping the flag (see noteTeardown).
+	if reason == events.TeardownNone {
+		reason = ac.pendingTeardown()
+	}
 	running := ac.RunningState != nil && ac.RunningState.IsRunning()
+	if running {
+		// A running core has no teardown to report, whatever was pending: the
+		// pending reason belonged to a transition that did not happen.
+		reason = events.TeardownNone
+		ac.teardownReason.Store("")
+	}
 	ac.EventBus.Publish(events.Event{
 		Kind:    events.VpnStateChanged,
-		Payload: events.VpnStateChangedPayload{Running: running},
+		Payload: events.VpnStateChangedPayload{Running: running, Teardown: reason},
 	})
+}
+
+// noteTeardown records why the core is about to be taken down, for the NEXT
+// state transition to carry.
+//
+// This exists because the flag flip (`RunningState.Set(false)`) happens deep
+// inside code that has no business knowing about the operation state machine, and
+// the reason is known only at the call site that DECIDED to tear down. Recording
+// it here keeps the two facts together without threading a parameter through
+// every teardown path.
+func (ac *AppController) noteTeardown(reason events.TeardownReason) {
+	if ac == nil {
+		return
+	}
+	ac.teardownReason.Store(string(reason))
+}
+
+// NoteTeardownForTest records a teardown reason without performing a teardown, so
+// an IPC-layer test can simulate a transition that the real teardown paths produce.
+func (ac *AppController) NoteTeardownForTest(reason events.TeardownReason) {
+	ac.noteTeardown(reason)
+}
+
+// pendingTeardown returns the recorded reason, if any.
+func (ac *AppController) pendingTeardown() events.TeardownReason {
+	if ac == nil {
+		return events.TeardownNone
+	}
+	v, _ := ac.teardownReason.Load().(string)
+	return events.TeardownReason(v)
 }
 
 // RecordConfigError records a config-pipeline failure.

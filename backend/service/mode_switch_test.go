@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
 	"singbox-launcher/internal/locale"
 )
@@ -650,5 +652,158 @@ func TestDaemonApplyLockWaitIsCancellable(t *testing.T) {
 	if !contains(src, "acquireWithContext(ctx, &b.applyMu)") {
 		t.Error("the daemon apply waits for applyMu with a plain Lock; the operation " +
 			"timeout cannot interrupt that wait")
+	}
+}
+
+// --- The real call chain, not a fake closure -------------------------------
+
+// TestBackendStartCoreActuallyWaitsForClassicCommit is the acceptance test for
+// the original defect, driven through the REAL chain:
+//
+//	Backend.StartCore → AppController.StartVPNContext → LegacyBackend.StartVPNContext
+//	  → fake legacyOps.startContext (blocks, simulating a slow spawn)
+//
+// Every earlier version of this test substituted a fake for `runCoreOp`'s closure,
+// which proves only that `runCoreOp` awaits WHAT IT WAS GIVEN. The bug was that the
+// production closure returned immediately: the start was fire-and-forget all the
+// way down, so `StartCore` reported success while nothing had been spawned and the
+// UI had already returned to "Start".
+//
+// So the fake here is the PROCESS OPERATION, at the bottom of the chain, and the
+// assertion is that the top-level IPC call is still blocked while it runs.
+func TestBackendStartCoreActuallyWaitsForClassicCommit(t *testing.T) {
+	b := backendWithConfig(t)
+
+	committed := make(chan struct{})
+	entered := make(chan struct{})
+
+	lb := core.NewLegacyBackend(b.ac)
+	core.SetLegacyOpsForTest(lb, &core.LegacyOpsForTest{
+		StartContext: func(ctx context.Context, skipRunningCheck bool) error {
+			close(entered)
+			select {
+			case <-committed:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	b.ac.SetBackendForTest(lb)
+
+	done := make(chan error, 1)
+	go func() { done <- b.StartCore() }()
+
+	// The process operation must have been entered...
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartCore never reached the process operation")
+	}
+
+	// ...and StartCore must still be BLOCKED, because nothing has committed.
+	select {
+	case err := <-done:
+		t.Fatalf("StartCore returned (%v) before the start committed; the caller is "+
+			"told the core started while nothing has been spawned", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Publish the commit point; only now may StartCore return.
+	close(committed)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartCore failed after a successful commit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartCore did not return after the start committed")
+	}
+}
+
+// TestBackendStartCoreReportsFailureFromTheProcessOperation — a failure at the
+// bottom of the chain must reach the top as a failure. The old fire-and-forget
+// path could not report anything at all.
+func TestBackendStartCoreReportsFailureFromTheProcessOperation(t *testing.T) {
+	b := backendWithConfig(t)
+
+	lb := core.NewLegacyBackend(b.ac)
+	core.SetLegacyOpsForTest(lb, &core.LegacyOpsForTest{
+		StartContext: func(ctx context.Context, skipRunningCheck bool) error {
+			return core.NewPreconditionRefusal(
+				core.StartErrPrivilegedCopyUnavailable,
+				"the protected copy of the core is missing", true, true, nil)
+		},
+	})
+	b.ac.SetBackendForTest(lb)
+
+	err := b.StartCore()
+	if err == nil {
+		t.Fatal("a failing process operation was reported as a successful start")
+	}
+
+	// The reason must survive the whole chain. It crosses IPC as a protocol error
+	// — that is the wire type the frontend reads — but the STABLE CODE must come
+	// through unchanged, because that is what the frontend localizes. A generic
+	// message would tell the user nothing actionable.
+	var perr *protocol.Error
+	if !errors.As(err, &perr) {
+		t.Fatalf("the precondition reason crossed IPC as %T (%v); the frontend reads "+
+			"protocol.Error", err, err)
+	}
+	if perr.Code != string(core.StartErrPrivilegedCopyUnavailable) {
+		t.Fatalf("code = %q, want %q", perr.Code, core.StartErrPrivilegedCopyUnavailable)
+	}
+	if perr.Message == "" {
+		t.Fatal("a SILENT refusal arrived with no message; nothing was shown on screen " +
+			"and nothing was sent to the frontend, so the user is told nothing at all")
+	}
+}
+
+// TestBackendStartCoreAbandonedWhenContextExpires — the process operation is
+// blocked, the operation deadline passes, and the operation must stop waiting
+// without claiming a start that never happened.
+func TestBackendStartCoreAbandonedWhenContextExpires(t *testing.T) {
+	b := backendWithConfig(t)
+
+	observed := make(chan struct{})
+	released := make(chan struct{})
+	defer close(released)
+
+	lb := core.NewLegacyBackend(b.ac)
+	core.SetLegacyOpsForTest(lb, &core.LegacyOpsForTest{
+		StartContext: func(ctx context.Context, skipRunningCheck bool) error {
+			select {
+			case <-released: // the test is over; do not hang the goroutine
+			case <-ctx.Done():
+				// The operation observed its OWN cancellation, which is the point:
+				// the deadline has to reach the bottom of the chain.
+				close(observed)
+			}
+			return ctx.Err()
+		},
+	})
+	b.ac.SetBackendForTest(lb)
+
+	// Drive the timer directly instead of waiting 45 real seconds, so the test is
+	// as fast as the logic it checks.
+	b.SetCoreOpTimeoutForTest(120 * time.Millisecond)
+
+	// A timeout deliberately does NOT report a failure: the operation may still
+	// succeed a moment later, and the runtime transition reports the truth when it
+	// arrives. What must be true is that the DEADLINE REACHED THE BOTTOM of the
+	// chain — the process operation observed its own cancellation — rather than
+	// the IPC call returning while the work ran on unwatched.
+	if err := b.StartCore(); err != nil {
+		t.Fatalf("a timeout surfaced as %v; the design is to stop WAITING, not to "+
+			"claim the start failed, because it may still commit", err)
+	}
+
+	select {
+	case <-observed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the process operation never observed its cancellation; the operation " +
+			"deadline does not reach the work it is supposed to bound")
 	}
 }

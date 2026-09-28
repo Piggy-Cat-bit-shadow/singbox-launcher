@@ -8,6 +8,8 @@ import (
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
+
+	"singbox-launcher/core/events"
 )
 
 // The operation state machine, tested as a state machine.
@@ -58,7 +60,11 @@ func TestStopOperationTerminatesAtStopped(t *testing.T) {
 		t.Fatalf("state after a stop request = %q, want stopping", got)
 	}
 
-	// The runtime confirms the core is gone. This is the transition that ends it.
+	// The runtime confirms the core is gone, having been taken down by the user's
+	// stop. The transition must say so: a bare `false` is deliberately not enough
+	// to end a stop operation, because a restart's teardown also flips this flag
+	// and would otherwise be reported as a completed stop.
+	b.ac.NoteTeardownForTest(events.TeardownUserStop)
 	b.ac.RunningState.Set(false)
 
 	if op := b.ops.snapshotOp(); op != nil {
@@ -109,7 +115,8 @@ func TestStoppingVisibleWhileRuntimeStillAlive(t *testing.T) {
 func TestStopCompletionIsNotDrivenByABooleanAlone(t *testing.T) {
 	b := backendWithConfig(t)
 
-	// A crash with no stop operation in flight must not conjure a completion.
+	// A CRASH: the flag drops with no teardown reason. It must not conjure a
+	// completion for a stop that was never requested.
 	b.ac.RunningState.Set(true)
 	b.ac.RunningState.Set(false)
 	if got := b.coreLifecycleState(); got != protocol.CoreStateStopped {
@@ -132,7 +139,14 @@ func TestStopCompletionIsNotDrivenByABooleanAlone(t *testing.T) {
 // duplicate, and completing twice must not resurrect or double-clear anything.
 func TestStopAfterStopIsIdempotent(t *testing.T) {
 	b := backendWithConfig(t)
-	b.ac.RunningState.Set(true)
+
+	// Drive the stop to completion through the REAL chain, with only the process
+	// operation faked. The runtime transition is emitted by the fake, so the test
+	// does not depend on the package-global RunningState singleton's value left
+	// over from another test — a dependency that made this test order-sensitive
+	// and let a stop appear "never completed" when the flag happened to be false
+	// already (a no-op Set publishes no event).
+	installStoppingLegacy(t, b)
 
 	if err := b.StopCore(); err != nil {
 		t.Fatalf("first StopCore: %v", err)
@@ -141,13 +155,30 @@ func TestStopAfterStopIsIdempotent(t *testing.T) {
 		t.Fatalf("second StopCore must be accepted as a duplicate, got %v", err)
 	}
 
-	b.ac.RunningState.Set(false)
-	if op := b.ops.snapshotOp(); op != nil {
-		t.Fatalf("operation still registered: %v", op)
-	}
-	if b.completeStop("second completion") {
+	waitUntil(t, "the stop operation to settle", func() bool {
+		return b.ops.snapshotOp() == nil
+	})
+
+	if b.completeStop(string(events.TeardownUserStop)) {
 		t.Fatal("completing an already-settled stop must do nothing")
 	}
+}
+
+// installStoppingLegacy makes the classic stop path complete deterministically:
+// the process operation succeeds and announces a user-stop teardown, which is
+// exactly what the real teardown does.
+func installStoppingLegacy(t *testing.T, b *Backend) {
+	t.Helper()
+	lb := core.NewLegacyBackend(b.ac)
+	core.SetLegacyOpsForTest(lb, &core.LegacyOpsForTest{
+		Stop: func() {
+			// The real Stop() notes the reason before flipping the flag; the fake
+			// does the same, so the transition carries the same information.
+			b.ac.NoteTeardownForTest(events.TeardownUserStop)
+			b.ac.RunningState.Set(false)
+		},
+	})
+	b.ac.SetBackendForTest(lb)
 }
 
 // --- F: superseding actually cancels -----------------------------------------
