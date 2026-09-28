@@ -153,6 +153,14 @@ const (
 // (TUN на macOS → лог под root). Его читают Core-вкладка логов и тейлер
 // профайлера трафика; дёшево после первого вызова.
 func (ac *AppController) CoreLogPath() string {
+	if ac.FileService == nil {
+		// Only reachable from a partially constructed controller (tests, and the
+		// window during startup before services are wired). Returning "" makes
+		// callers treat the log as unavailable, which is the honest answer —
+		// dereferencing here would panic inside a crash-classification path that
+		// runs on a background goroutine, taking the process down.
+		return ""
+	}
 	privileged := platform.PrivilegedCoreLogPath()
 	if privileged == "" || ac.ProcessService == nil {
 		return ac.FileService.ChildLogPath
@@ -376,10 +384,10 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	}
 
 	// Check capabilities on Linux before starting
-	if suggestion := platform.CheckAndSuggestCapabilities(ac.FileService.SingboxPath); suggestion != "" {
+	if suggestion := platform.CheckAndSuggestCapabilities(ac.coreBinaryPath()); suggestion != "" {
 		debuglog.WarnLog("startSingBox: Capabilities check failed: %s", suggestion)
 		if ac.uiPort != nil {
-			cmd := platform.GetSetCapCommand(ac.FileService.SingboxPath)
+			cmd := platform.GetSetCapCommand(ac.coreBinaryPath())
 			ac.uiPort.ShowCommandNeedsTerminal(locale.T("Linux capabilities required"), locale.T("Linux capabilities required")+"\n\n"+suggestion, cmd)
 		}
 		ac.RecordLifecycleError(LifecycleErrPermission, "start",
@@ -813,8 +821,14 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 	<-time.After(2 * time.Second)
 	// Same window as the child-process monitor, same guard: after the delay the
 	// runtime may belong to another engine entirely.
+	//
+	// The lock is RE-ACQUIRED before returning. The deferred Unlock further up
+	// is still armed, so returning while the mutex is released would unlock a
+	// mutex this goroutine does not hold — a fatal runtime error, not a benign
+	// one. Taking it back first keeps the defer balanced on every path.
 	if !ac.classic.isCurrent(gen) {
 		debuglog.InfoLog("onPrivilegedScriptExited: generation %d superseded during the restart delay; not restarting", gen)
+		ac.CmdMutex.Lock()
 		return
 	}
 	svc.Start(true)
@@ -1166,6 +1180,16 @@ func signalLocalProcess(cmd *exec.Cmd, pid int, force bool) error {
 		return platform.KillProcessByPID(pid)
 	}
 	return proc.Signal(os.Interrupt)
+}
+
+// coreBinaryPath returns the core binary path, or "" when the controller is not
+// fully wired yet. Used on paths that can run on a background goroutine, where a
+// nil dereference would take the whole process down rather than fail one start.
+func (ac *AppController) coreBinaryPath() string {
+	if ac == nil || ac.FileService == nil {
+		return ""
+	}
+	return ac.FileService.SingboxPath
 }
 
 // currentCorePath returns the core binary path this launcher would run.
@@ -1579,7 +1603,7 @@ func (svc *ProcessService) killVerifiedCores() {
 func (svc *ProcessService) adoptRunningCore(pid int) {
 	svc.ac.CmdMutex.Lock()
 	defer svc.ac.CmdMutex.Unlock()
-	if svc.ac.RunningState.IsRunning() {
+	if svc.ac.RunningState != nil && svc.ac.RunningState.IsRunning() {
 		return
 	}
 	svc.ac.SingboxPrivilegedMode = true

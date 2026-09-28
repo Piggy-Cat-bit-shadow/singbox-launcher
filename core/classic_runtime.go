@@ -74,7 +74,11 @@ const (
 // "stopped just because RunningState is false" — the mistake that allowed a
 // classic core to appear after the switch to daemon.
 func (p ClassicPhase) isSettled() bool {
-	return p == ClassicStopped || p == ClassicFailed
+	// The zero value counts as stopped on purpose. A classicRuntime that has
+	// never run an operation has phase "", and treating that as "busy" would
+	// refuse the very first start of the process's life. Encoding the zero value
+	// as settled keeps the struct usable without an explicit constructor.
+	return p == "" || p == ClassicStopped || p == ClassicFailed
 }
 
 // ProcessIdentity identifies a process well enough to kill it safely.
@@ -479,6 +483,9 @@ func (r *classicRuntime) adoptExisting(exe string, pid int, privileged bool) uin
 // this whole exercise is meant to remove.
 func (p ClassicPhase) wireState() string {
 	switch p {
+	case "":
+		// Never ran an operation: nothing is happening.
+		return "stopped"
 	case ClassicStarting:
 		return "starting"
 	case ClassicRunning:
