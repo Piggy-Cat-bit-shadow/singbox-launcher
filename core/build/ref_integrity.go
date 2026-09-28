@@ -542,6 +542,44 @@ func checkRuleSetRefs(rule map[string]interface{}, path string, cfg map[string]i
 		}
 	}
 	var issues []RefIssue
+	// A REMOTE rule_set may name a `download_detour`, which is an outbound
+	// reference on a rule_set rather than on a rule.
+	//
+	// Nothing in the shipped template uses it — the launcher converts rule_sets
+	// to `type: local` and drops the remote-only fields (preset_merge.go) — but a
+	// hand-written or imported config can carry one, and an unresolved detour
+	// there fails the same way `route.final` did: the core refuses to load the
+	// whole config. Checked against the same outbound set, with the sentinel
+	// literals honoured, so `download_detour: "direct"` is not a false positive.
+	for _, listKey := range []string{"route", ""} {
+		var holder map[string]interface{}
+		if listKey == "" {
+			holder = cfg
+		} else if r, ok := cfg[listKey].(map[string]interface{}); ok {
+			holder = r
+		} else {
+			continue
+		}
+		sets, _ := holder["rule_set"].([]interface{})
+		for i, raw := range sets {
+			s, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			det, _ := s["download_detour"].(string)
+			if det == "" || isSentinelOutbound(det) {
+				continue
+			}
+			idx := buildRefIndex(cfg)
+			if !idx.defined[det] {
+				issues = append(issues, RefIssue{
+					Kind: RefMissingTarget, Path: fmt.Sprintf("%s.rule_set[%d].download_detour", listKey, i),
+					Tag:    det,
+					Detail: "the rule_set downloads through an outbound that does not exist",
+				})
+			}
+		}
+	}
 	for _, ref := range refs {
 		if !declared[ref] {
 			issues = append(issues, RefIssue{

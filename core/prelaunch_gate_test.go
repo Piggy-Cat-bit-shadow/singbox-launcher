@@ -156,3 +156,69 @@ func TestPreLaunchGateDoesNotFailOnAMissingFile(t *testing.T) {
 		t.Fatalf("an absent config.json is the start path's business, not the gate's: %v", err)
 	}
 }
+
+// TestPreLaunchGateNeverRewritesTheConfig is the Classic Mode contract.
+//
+// Classic Mode runs a config the USER wrote. The launcher does not own those
+// bytes, so it must VALIDATE AND REPORT rather than silently repair: rewriting a
+// hand-written config to suit the launcher would change the user's routing
+// without telling them, which is the failure this whole change exists to prevent,
+// just pointed the other way.
+//
+// The generated-config path may repair, because there the launcher owns the
+// output and the repair is bounded to a declared-correct answer. The gate that
+// this test covers is shared by BOTH engines, so it must be read-only.
+func TestPreLaunchGateNeverRewritesTheConfig(t *testing.T) {
+	original := `{
+      "outbounds": [
+        {"type": "direct", "tag": "direct-out"},
+        {"type": "selector", "tag": "my-group", "outbounds": ["direct-out"]}
+      ],
+      "route": {"final": "my-missing-group", "rules": []}
+    }`
+	ac := newGateController(t, original)
+	path := ac.FileService.ConfigPath
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ac.validateConfigBeforeLaunch(); err == nil {
+		t.Fatal("expected a refusal")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("the gate MODIFIED the user's config.\nbefore: %s\nafter:  %s", before, after)
+	}
+	if !strings.Contains(string(after), "my-missing-group") {
+		t.Error("the offending route.final must be left exactly as the user wrote it")
+	}
+}
+
+// TestPreLaunchGateReportsRatherThanRepairsUnrepairable — the difference between
+// "we fixed it" and "we refused" must be observable, or a caller cannot tell a
+// repaired config from an untouched one.
+func TestPreLaunchGateReportsRatherThanRepairsUnrepairable(t *testing.T) {
+	ac := newGateController(t, `{
+      "outbounds": [{"type": "direct", "tag": "direct-out"}],
+      "route": {"final": "gone", "rules": []}
+    }`)
+	err := ac.validateConfigBeforeLaunch()
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	var sf *StartFailure
+	if !errors.As(err, &sf) {
+		t.Fatalf("want a StartFailure, got %T", err)
+	}
+	if sf.Code != StartErrConfigCheckFailed {
+		t.Errorf("want %q, got %q", StartErrConfigCheckFailed, sf.Code)
+	}
+	// A refusal must not be a bare code: the user has to learn what to fix.
+	if len(strings.TrimSpace(sf.Error())) < 20 {
+		t.Errorf("the refusal is too terse to act on: %q", sf.Error())
+	}
+}

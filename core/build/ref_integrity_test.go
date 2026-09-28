@@ -591,3 +591,57 @@ func TestDeclaredGroupTagsReadsRequiredGroups(t *testing.T) {
 		t.Errorf("proxy-out is declared required=true but was not reported; got %v", groups)
 	}
 }
+
+// TestRemoteRuleSetDownloadDetourIsChecked — `download_detour` is an outbound
+// reference carried by a rule_set rather than by a rule, and it was the one
+// reference kind in the requested audit list that no check covered.
+//
+// Nothing in the shipped template uses it (the launcher converts rule_sets to
+// local and drops the remote-only fields), so this is coverage for imported and
+// hand-written configs — the same population Classic Mode serves, where a
+// dangling reference is a config the core refuses to load at all.
+func TestRemoteRuleSetDownloadDetourIsChecked(t *testing.T) {
+	dangling := decodeCfg(t, `{
+      "outbounds": [{"type": "direct", "tag": "direct-out"}],
+      "route": {
+        "final": "direct-out",
+        "rules": [{"rule_set": ["rs1"], "outbound": "direct-out"}],
+        "rule_set": [
+          {"type": "remote", "tag": "rs1", "format": "binary",
+           "url": "https://example.test/rs1.srs", "download_detour": "gone-outbound"}
+        ]
+      }
+    }`)
+	rep := ValidateConfigReferences(dangling)
+	if rep.OK() {
+		t.Fatal("a rule_set that downloads through a non-existent outbound must be reported")
+	}
+	found := false
+	for _, issue := range rep.Issues {
+		if strings.Contains(issue.Path, "download_detour") && issue.Tag == "gone-outbound" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the report must name the download_detour path and tag; got: %s", rep.Error())
+	}
+
+	// A SENTINEL literal is not a dangling reference: `direct` resolves without
+	// a declaration, and reporting it would be a false positive that gets the
+	// whole check ignored.
+	valid := decodeCfg(t, `{
+      "outbounds": [{"type": "direct", "tag": "direct-out"}],
+      "route": {
+        "final": "direct-out",
+        "rules": [{"rule_set": ["rs1"], "outbound": "direct-out"}],
+        "rule_set": [
+          {"type": "remote", "tag": "rs1", "format": "binary",
+           "url": "https://example.test/rs1.srs", "download_detour": "direct"}
+        ]
+      }
+    }`)
+	if rep := ValidateConfigReferences(valid); !rep.OK() {
+		t.Errorf("download_detour: \"direct\" is a literal the core resolves and must not "+
+			"be reported; got: %s", rep.Error())
+	}
+}
