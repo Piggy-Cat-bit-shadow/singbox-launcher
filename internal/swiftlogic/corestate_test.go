@@ -1,23 +1,32 @@
 package swiftlogic_test
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
 	"singbox-launcher/internal/swiftlogic"
 )
 
-// requireHarness compiles nothing itself; it fails loudly when the Swift sources
-// exist but the compiler does not, because a silently skipped suite is how a
-// whole layer of invariants disappears from CI without anyone noticing.
+// requireHarness decides whether the Swift harness can run here.
+//
+// THE DISTINCTION THAT MATTERS. A suite that quietly skips is how an entire layer
+// of invariants disappears from CI without anyone noticing — the tests stay green
+// while testing nothing. So the skip is allowed ONLY where the platform genuinely
+// has no Swift compiler at all (a non-Darwin dev box), and it is forbidden on
+// macOS, where `swiftc` ships with the command line tools and the product is
+// built. On macOS a missing compiler is a broken environment and must fail.
 func requireHarness(t *testing.T) {
 	t.Helper()
-	if !swiftlogic.Available() {
-		if _, err := swiftlogic.Run(""); err == nil {
-			t.Fatal("swiftc missing but the harness claimed to build")
-		}
-		t.Skip("swiftc is not installed on this machine; the macOS CI runner has it")
+	if swiftlogic.Available() {
+		return
 	}
+	if runtime.GOOS == "darwin" {
+		t.Fatal("swiftc is missing on macOS, so the frontend logic suite cannot run. " +
+			"These assertions are the only execution of that code in this repository; " +
+			"skipping here would leave them untested while reporting success.")
+	}
+	t.Skip("no Swift toolchain on " + runtime.GOOS + "; the macOS CI runner has one")
 }
 
 func runSwift(t *testing.T, body string) {
