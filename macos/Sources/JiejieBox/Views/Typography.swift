@@ -75,45 +75,59 @@ extension Metrics {
     static let contentInset: CGFloat = 10
     /// Extra inset of the section HEADER, on top of `contentInset`.
     ///
-    /// The header needs to sit clearly outside the row geometry. Header text is
-    /// aligned to the row's ICON edge rather than its background edge, so the
-    /// label visually starts the same column as the icons below it — without
-    /// this the header sits further left than the content it labels, which is
-    /// the misalignment that made the old layout look accidental.
+    /// The header is aligned to the row's TITLE column, not to its icon and not
+    /// to its background edge.
     ///
-    /// Derived from `rowPaddingH` rather than hardcoded, so
-    /// `contentInset + sectionHeaderInset` is by construction the column the row
-    /// icons occupy. A 2pt drift is invisible in a single screenshot and obvious
-    /// once two sections are compared, so the two values must not be free to
-    /// diverge.
-    static var sectionHeaderInset: CGFloat { rowPaddingH }
+    /// Aligning to the ICON was the long-standing mistake: the reader compares
+    /// the header against the words under it, so a header parked over the icon
+    /// column sits one icon-plus-gap too far left and looks like a stray caption
+    /// belonging to nothing. That is the "still not aligned" complaint.
+    ///
+    /// Derived from the same three tokens the rows themselves use, so the title
+    /// column is defined ONCE. Hardcoding a number here would let the header and
+    /// the titles drift apart the moment any row's icon geometry changes — a 2pt
+    /// drift is invisible in one screenshot and obvious across two sections.
+    static var sectionHeaderInset: CGFloat { rowPaddingH + iconColumn + iconToTextSpacing }
+    /// Gap between a row's leading icon and its text column.
+    ///
+    /// ONE token for every row type. The row views had drifted to 8pt (MenuRow,
+    /// MenuToggleRow) and 10pt (MenuRow's permission and page variants), so "the
+    /// title column" was not actually one column: one variant's title started
+    /// 2pt right of another's, visible as a wobble down the list and as a header
+    /// that matched only some of its own rows.
+    static let iconToTextSpacing: CGFloat = 8
     /// Gap between a section header and its first row.
     ///
-    /// Tight (3pt) and deliberately smaller than `groupSpacing`: the header
-    /// belongs to the rows UNDER it, so it must sit closer to them than the
-    /// previous section's content sits to it. When the two values were equal the
-    /// page had no readable grouping — every gap looked the same size, so the
-    /// eye had nothing to group by.
-    static let headerToRowGap: CGFloat = 3
+    /// Deliberately smaller than `groupSpacing`: the header belongs to the rows
+    /// UNDER it, so it must sit closer to them than the previous section's
+    /// content sits to it. When the two values were equal the page had no
+    /// readable grouping — every gap looked the same size, so the eye had
+    /// nothing to group by.
+    static let headerToRowGap: CGFloat = 2
     /// Gap between rows inside one section.
     ///
-    /// 2, not 0: rows draw a hover/selection background, and at 0 the rounded
+    /// 1, not 0: rows draw a hover/selection background, and at 0 the rounded
     /// corners of adjacent rows touch, which reads as one tall block.
-    static let rowGap: CGFloat = 2
+    static let rowGap: CGFloat = 1
     /// Gap between sections.
     ///
-    /// The rhythm, from smallest to largest: `rowGap` (2, within a group) <
-    /// `headerToRowGap` (3, header to its own rows) < `groupSpacing` (11,
+    /// The rhythm, from smallest to largest: `rowGap` (1, within a group) <
+    /// `headerToRowGap` (2, header to its own rows) < `groupSpacing` (8,
     /// between groups). Three distinct steps are what makes the grouping
     /// legible without a divider or a card behind every section.
-    static let groupSpacing: CGFloat = 11
+    ///
+    /// The scale was tightened about 10% because the panel still read as airy.
+    /// Only the WHITESPACE moved: `rowHeight` stays 34, because the row is the
+    /// hit target and shrinking it would trade a real ergonomic property for a
+    /// cosmetic one.
+    static let groupSpacing: CGFloat = 8
     /// Top padding of page content, below the header divider.
-    static let contentTopPadding: CGFloat = 8
+    static let contentTopPadding: CGFloat = 6
     /// Bottom padding, so the last row is not flush against the panel edge.
     /// Smaller than the old 12 for the same reason as the top: the panel is a
     /// fixed-height menu bar surface, so every point of end padding is a point
     /// of content the user has to scroll for.
-    static let contentBottomPadding: CGFloat = 10
+    static let contentBottomPadding: CGFloat = 8
     /// Leading icon column width. Fixed so titles line up across rows whether or
     /// not a row has an icon.
     static let iconColumn: CGFloat = 18

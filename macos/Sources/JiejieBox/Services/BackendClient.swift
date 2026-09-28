@@ -523,8 +523,18 @@ actor BackendClient {
             // arrives in milliseconds. Waiting 20 s for it would only delay a
             // quit when something is already wrong.
             seconds = 2
+        case BackendMethod.startCore, BackendMethod.restartCore:
+            // Started/restarted cores are now AWAITED by the backend until the
+            // start is genuinely committed (process spawned, or the daemon
+            // accepted the config), because returning early is exactly what
+            // made a failed start look like an instant revert to "stopped".
+            //
+            // The backend's own budget is 45 s, so this must sit ABOVE it:
+            // aborting first would abandon a healthy but slow daemon apply and
+            // present it as a failure. 60 s leaves room for the reply to travel
+            // after the backend gives up.
+            seconds = 60
         case BackendMethod.switchProxy, BackendMethod.setCoreMode,
-             BackendMethod.restartCore, BackendMethod.startCore,
              BackendMethod.stopCore,
              BackendMethod.addSubscription, BackendMethod.updateSubscription,
              BackendMethod.removeSubscription, BackendMethod.setSubscriptionEnabled,
@@ -675,6 +685,11 @@ actor BackendClient {
 
     func reloadConfig() async throws -> MaintenanceResult {
         try await request(BackendMethod.reloadConfig, as: MaintenanceResult.self)
+    }
+
+    /// Hand ownership of config.json to JiejieBox.
+    func adoptConfig() async throws -> MaintenanceResult {
+        try await request(BackendMethod.adoptConfig, as: MaintenanceResult.self)
     }
 
     func updateSubscriptions() async throws -> MaintenanceResult {

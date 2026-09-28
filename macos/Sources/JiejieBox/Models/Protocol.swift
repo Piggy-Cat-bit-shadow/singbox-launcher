@@ -78,6 +78,9 @@ enum BackendMethod {
     static let testProxy = "test_proxy"
     static let testProxyGroup = "test_proxy_group"
     static let reloadConfig = "reload_config"
+    /// Hands ownership of config.json to JiejieBox. Sent only after the user
+    /// confirms a prompt that names the overwrite consequence.
+    static let adoptConfig = "adopt_config"
     static let updateSubscriptions = "update_subscriptions"
     static let listSubscriptions = "list_subscriptions"
     static let addSubscription = "add_subscription"
@@ -218,6 +221,23 @@ struct CoreStatus: Decodable {
     /// not offer a Reload action in that case — the backend would refuse it, and
     /// a button whose only outcome is an error is worse than no button.
     let config_rebuildable: Bool
+    /// Who owns the config on disk: "managed", "unknown" or "external".
+    ///
+    /// Optional so a snapshot from an older backend still decodes — an absent
+    /// value means "this backend cannot say", which the UI treats as unknown
+    /// rather than guessing.
+    ///
+    /// The UI reads THIS and never infers ownership from
+    /// `config_rebuildable == false`: a config built by an older JiejieBox has
+    /// no provenance marker and is therefore UNKNOWN, not owned by another
+    /// tool, and saying otherwise accuses the user's own file.
+    let config_ownership: String?
+    /// Stable token naming why the core failed to start, for localization.
+    /// Empty/absent when there is no failure to report.
+    let error_code: String?
+    /// Technical explanation of the failure, for logs and the help tooltip.
+    /// Never shown as-is: it is untranslated and may name internal functions.
+    let error_detail: String?
     let error_message: String?
 }
 
@@ -875,4 +895,29 @@ struct ProxyGroupTestResult: Decodable {
     let proxies: ProxyList
 
     var wasCancelled: Bool { cancelled ?? false }
+}
+
+// MARK: - Config ownership
+
+/// Who owns the config.json on disk, as reported by the backend.
+///
+/// A three-state value rather than a boolean, because the interesting case is
+/// the middle one. `managed` and `external` are proven facts; `unknown` is the
+/// honest answer when the launcher cannot tell — typically a config written by
+/// an older JiejieBox, before provenance markers existed.
+///
+/// Collapsing `unknown` into `external` is precisely the bug this type prevents:
+/// it told long-standing users that another tool owns their own config, and it
+/// withheld the reload they were entitled to.
+enum ConfigOwnership: String {
+    /// JiejieBox built this config and may rebuild it.
+    case managed
+    /// Provenance cannot be established. Neither claim is made, and nothing is
+    /// overwritten without the user explicitly asking for it.
+    case unknown
+    /// Positive evidence that another tool owns the file.
+    case external
+
+    /// Whether the config may be rebuilt without asking.
+    var mayRebuild: Bool { self == .managed }
 }

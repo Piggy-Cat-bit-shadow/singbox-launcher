@@ -1126,6 +1126,53 @@ the service layer and core v1.14.2-lx.2 land). Linux and Win7 (`windows/386`,
 client and the remote-machine code are untagged. The daemon protobuf stubs are
 vendored from the fork via `scripts/sync_daemonpb.sh`.
 
+### 11.1a Config ownership — one seam, three states
+
+> **A rebuild REPLACES `config.json`, so it may only run for a file the launcher
+> owns.** The rule lives in exactly one place and every writer consults it.
+
+`backend/service/provenance.go` decides ownership and publishes it to core through
+`AppController.SetConfigOwnershipPolicy`; `core/rebuildConfigBeforeStart` — the
+pre-start hook shared by `ProcessService.Start` (classic) and
+`DaemonBackend.applyOnce` (daemon) — asks `mayRebuildConfig()`. Copying the marker
+parser into `core` was rejected deliberately: a second implementation of a rule
+that decides whether user data is overwritten would eventually disagree with the
+first.
+
+| `ConfigOwnership` | Meaning | Rebuild? | UI |
+|---|---|---|---|
+| `managed` | no config yet, a valid marker saying `managed: true`, or an adopted config | yes | Reload offered |
+| `unknown` | **no marker**, an unreadable/malformed marker, or a marker without the `managed` key | no | explains the ambiguity, offers **Open config** and an explicit *Let JiejieBox manage it* |
+| `external` | an explicit `managed: false` — positive evidence of another owner | no | "managed by another tool" |
+
+`config_rebuildable` remains as a **derived permission** (`managed → true`,
+`unknown`/`external → false`), and the UI must branch on `config_ownership`, never
+on the permission: reading "cannot rebuild" as "external" is what told users that
+a config their own launcher had written was someone else's.
+
+`unknown` resolves by **safe legacy adoption** (`adoptLegacyConfig`): build the
+candidate config from the already-materialised state through
+`AppController.BuildConfigReadOnly` — which never writes, never fetches the
+template and never touches dirty markers — then compare **structurally**
+(`canonicalJSON`, key order and formatting irrelevant, every value including
+secrets participating). A match proves the current state reproduces the file, so
+the marker may be written; anything else stays `unknown`. Location is never
+evidence: a hand-written config in the data directory does not reproduce and is
+therefore never adopted.
+
+**Start/stop state machine.** `StartCore`/`RestartCore` AWAIT the commit point
+(process spawned, or `/admin/apply` accepted) and return a structured
+`*protocol.Error` carrying a stable `error_code`
+(`config_rebuild_failed`, `core_start_failed`, `daemon_unreachable`,
+`daemon_apply_failed`, `config_check_failed`, `clash_api_port_in_use`,
+`cancelled`). `coreState()` resolves the runtime state with a documented priority
+— `RunningState` true → `running`; else a pending start/restart → `starting`; else
+a pending stop → `stopping`; else a remembered failure → `error`; else `stopped`
+— so a pending request never impersonates a runtime transition and a stale
+`stopped` is never emitted between `starting` and `running`. Error codes are
+resolved to translated sentences in Swift; the technical detail travels in
+`error_detail` for the log and the tooltip.
+
 ### 11.2 `ProxyTransport` — the proxy-operation seam
 
 Proxy-group operations (list groups, select a node, latency test, balancer pool)

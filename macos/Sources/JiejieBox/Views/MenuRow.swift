@@ -99,7 +99,7 @@ struct MenuRow<Trailing: View>: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: Metrics.iconToTextSpacing) {
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.system(size: Metrics.iconSize))
@@ -217,11 +217,12 @@ enum Metrics {
 
 /// A titled group of rows.
 ///
-/// The header is aligned to the ROW's icon column, not to the panel edge. A
-/// group label that starts further left than the icons below it reads as a
-/// stray caption; aligned to the icon column it reads as the label of that
-/// group. This is done with padding rather than a fixed frame width, so it holds
-/// at any panel size and in either language.
+/// The header is aligned to the ROW's TITLE column — the same column the words
+/// under it start in — via `Metrics.sectionHeaderInset`. Aligning it to the icon
+/// column instead (the previous behaviour) left every header one icon-plus-gap
+/// too far left, so it read as a caption belonging to nothing. Done with padding
+/// rather than a fixed frame width, so it holds at any panel size and in either
+/// language.
 ///
 /// No hairline separator any more: with `Metrics.groupSpacing` larger than
 /// `Metrics.rowGap`, whitespace alone expresses the grouping. A rule between
@@ -340,7 +341,7 @@ struct MenuPickerRow<Option: Hashable & Identifiable>: View {
                 }
             }
         } label: {
-            HStack(spacing: 10) {
+            HStack(spacing: Metrics.iconToTextSpacing) {
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.system(size: Metrics.iconSize))
@@ -448,7 +449,7 @@ struct MenuActionRow: View {
                 .disabled(action.disabled)
             }
         } label: {
-            HStack(spacing: 10) {
+            HStack(spacing: Metrics.iconToTextSpacing) {
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.system(size: Metrics.iconSize))

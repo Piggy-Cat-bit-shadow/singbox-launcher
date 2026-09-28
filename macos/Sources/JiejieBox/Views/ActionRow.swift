@@ -110,13 +110,13 @@ private struct ActionRowButton: View {
 
     var body: some View {
         Button(action: action.action) {
-            HStack(spacing: 10) {
+            HStack(spacing: Metrics.iconToTextSpacing) {
                 if let leading = action.leading {
                     leading
                 } else if let systemImage = action.systemImage {
                     Image(systemName: systemImage)
                         .font(Typography.rowTitle)
-                        .frame(width: 18)
+                        .frame(width: Metrics.iconColumn)
                         .foregroundStyle(action.role == .destructive ? Color.red : .secondary)
                 }
 

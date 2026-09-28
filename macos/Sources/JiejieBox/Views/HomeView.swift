@@ -21,6 +21,16 @@ import SwiftUI
 struct HomeView: View {
     let model: AppModel
     @Environment(\.localization) private var language
+    /// Gates the ownership handover behind an explicit confirmation.
+    ///
+    /// Not a convenience: adopting means the launcher may from then on REBUILD
+    /// AND OVERWRITE config.json, so it must be a deliberate act that names the
+    /// consequence, never a side effect of dismissing a warning.
+    ///
+    /// A reference-type holder rather than `@State`: this toolchain (Swift 6.4
+    /// command-line, SwiftUI macros unavailable) cannot compile `@State`, and
+    /// the rest of the app already uses this pattern for transient UI state.
+    private let adoptPrompt = FieldState()
 
     var body: some View {
         PanelScaffold(model: model, title: "JiejieBox") {
@@ -33,6 +43,57 @@ struct HomeView: View {
             }
             .padding(.top, Metrics.contentTopPadding)
             .padding(.bottom, Metrics.contentBottomPadding)
+        }
+        .confirmationDialog(L.adoptConfig.tr(language),
+                            isPresented: Binding(
+                                get: { adoptPrompt.text == "confirm" },
+                                set: { if !$0 { adoptPrompt.text = "" } }),
+                            titleVisibility: .visible) {
+            Button(L.adoptConfig.tr(language)) {
+                adoptPrompt.text = ""
+                Task { await model.adoptConfig() }
+            }
+            Button(L.cancel.tr(language), role: .cancel) { adoptPrompt.text = "" }
+        } message: {
+            // States the consequence in full: the config may be REBUILT and
+            // OVERWRITTEN from now on. An ownership handover that does not say
+            // so is not consent.
+            Text(L.adoptConfigConfirm.tr(language))
+        }
+    }
+
+    /// The banner text for the current ownership.
+    ///
+    /// UNKNOWN gets its own sentence, deliberately NOT the external one: it says
+    /// what is actually known ("cannot confirm that JiejieBox produced this")
+    /// instead of asserting an owner we have no evidence for.
+    private var ownershipMessage: String {
+        switch model.configOwnership {
+        case .managed: return L.configChanged.tr(language)
+        case .unknown: return L.configChangedUnknown.tr(language)
+        case .external: return L.configChangedExternal.tr(language)
+        }
+    }
+
+    /// The localized reason the last start failed, or nil when it did not.
+    ///
+    /// Keyed off the backend's STABLE error code rather than off the message
+    /// text, so the explanation survives translation and can be improved without
+    /// touching the backend.
+    private var startFailure: String? {
+        guard let code = model.core?.error_code, !code.isEmpty else { return nil }
+        switch code {
+        case "config_rebuild_failed": return L.startFailedConfigRebuild.tr(language)
+        case "core_start_failed": return L.startFailedSpawn.tr(language)
+        case "daemon_unreachable": return L.startFailedDaemonUnreachable.tr(language)
+        case "daemon_apply_failed": return L.startFailedDaemonApply.tr(language)
+        case "config_check_failed": return L.startFailedConfigCheck.tr(language)
+        case "clash_api_port_in_use": return L.startFailedPortInUse.tr(language)
+        case "cancelled": return L.startFailedCancelled.tr(language)
+        default:
+            // An unrecognised code still means a failure happened, and `error`
+            // state is never shown silently.
+            return L.startFailed.tr(language)
         }
     }
 
@@ -267,15 +328,37 @@ struct HomeView: View {
                 Button(L.subscriptions.tr(language)) { model.path.append(.subscriptions) }
                     .controlSize(.small)
             }
+        } else if let failure = startFailure {
+            // The reason a start failed, next to the control that failed.
+            //
+            // Before this, a failed start produced NOTHING on screen: the button
+            // returned to "Start" and the explanation existed only in a log
+            // file. The forbidden sequence — press Start, immediately see Start
+            // again, with no explanation — was exactly this banner's absence.
+            //
+            // The sentence is chosen by the backend's stable code and translated
+            // here; the raw detail is attached as a tooltip rather than printed,
+            // because it is untranslated and names internal functions.
+            Banner(kind: .warning, message: failure) {
+                Button(L.openLogs.tr(language)) { model.openLogs() }
+                    .controlSize(.small)
+            }
+            .help(model.core?.error_detail ?? "")
         } else if model.core?.config_stale == true {
-            // Reload only when JiejieBox owns the config; otherwise the only
-            // possible outcome is the backend refusing, so the banner points at
-            // the file instead.
-            Banner(kind: .warning,
-                   message: model.configRebuildable
-                       ? L.configChanged.tr(language)
-                       : L.configChangedExternal.tr(language)) {
-                if model.configRebuildable {
+            // Three distinct situations, three distinct messages.
+            //
+            // The message keys off OWNERSHIP, not off `configRebuildable`.
+            // Reading "cannot rebuild" as "somebody else owns it" is what told
+            // users that a config their own copy of JiejieBox had written was
+            // managed by another tool: such a config predates provenance
+            // markers, so it is UNKNOWN — unproven, not foreign.
+            //
+            // UNKNOWN is never silently repaired either. It offers the file and,
+            // only behind an explicit confirmation that says what will happen,
+            // the option to hand ownership over.
+            Banner(kind: .warning, message: ownershipMessage) {
+                switch model.configOwnership {
+                case .managed:
                     Button(L.reload.tr(language)) {
                         Task {
                             await model.reloadConfig()
@@ -283,7 +366,14 @@ struct HomeView: View {
                         }
                     }
                     .controlSize(.small)
-                } else {
+                case .unknown:
+                    Button(L.openConfig.tr(language)) { model.revealConfig() }
+                        .controlSize(.small)
+                    Button(L.adoptConfig.tr(language)) {
+                        adoptPrompt.text = "confirm"
+                    }
+                    .controlSize(.small)
+                case .external:
                     Button(L.openConfig.tr(language)) { model.revealConfig() }
                         .controlSize(.small)
                 }

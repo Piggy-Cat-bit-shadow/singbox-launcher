@@ -237,6 +237,18 @@ enum L: CaseIterable {
     case noConfigYet
     case configChanged
     case configChangedExternal
+    case configChangedUnknown
+    case configOwnershipUnknownHelp
+    case adoptConfig
+    case adoptConfigConfirm
+    case startFailed
+    case startFailedConfigRebuild
+    case startFailedSpawn
+    case startFailedDaemonUnreachable
+    case startFailedDaemonApply
+    case startFailedConfigCheck
+    case startFailedPortInUse
+    case startFailedCancelled
     case reload
     case openConfig
     case speed
@@ -643,6 +655,18 @@ extension L {
         case .noConfigYet: return "No config.json yet. Add a subscription to build one."
         case .configChanged: return "The configuration has changed since it was built."
         case .configChangedExternal: return "The configuration changed, but it is managed outside JiejieBox."
+        case .configChangedUnknown: return "The configuration has changed, but JiejieBox cannot confirm that it produced this configuration."
+        case .configOwnershipUnknownHelp: return "JiejieBox did not build this config.json, or it was built before JiejieBox started recording that. Nothing is overwritten unless you allow it."
+        case .adoptConfig: return "Let JiejieBox Manage It"
+        case .adoptConfigConfirm: return "JiejieBox will be able to rebuild and overwrite config.json from now on. Continue?"
+        case .startFailed: return "Failed to start"
+        case .startFailedConfigRebuild: return "The configuration could not be rebuilt, so the core was not started. Open the log for the build error."
+        case .startFailedSpawn: return "The core process could not be started."
+        case .startFailedDaemonUnreachable: return "The VPN service did not respond. Check that it is installed and running."
+        case .startFailedDaemonApply: return "The VPN service rejected or could not apply the configuration."
+        case .startFailedConfigCheck: return "The core rejected the configuration. Open the config, fix the reported field, then start again."
+        case .startFailedPortInUse: return "Clash API port 9090 is already in use. Free the port or change it in the config, then start again."
+        case .startFailedCancelled: return "The start was cancelled."
         case .reload: return "Reload"
         case .openConfig: return "Open Config"
         case .speed: return "Speed"
@@ -1007,6 +1031,18 @@ extension L {
         case .noConfigYet: return "还没有 config.json。添加订阅后即可生成。"
         case .configChanged: return "配置在生成之后已被修改。"
         case .configChangedExternal: return "配置已变化，但它由 JiejieBox 之外的工具管理。"
+        case .configChangedUnknown: return "检测到配置变化，但无法确认这个配置是否由 JiejieBox 生成。"
+        case .configOwnershipUnknownHelp: return "JiejieBox 无法确认这份 config.json 是否由自己生成，或者它是在 JiejieBox 开始记录之前生成的。除非你允许，否则不会覆盖它。"
+        case .adoptConfig: return "设为 JiejieBox 管理"
+        case .adoptConfigConfirm: return "以后 JiejieBox 可以重建并覆盖 config.json。是否继续？"
+        case .startFailed: return "启动失败"
+        case .startFailedConfigRebuild: return "无法重新生成配置，因此内核未启动。请打开日志查看构建错误。"
+        case .startFailedSpawn: return "无法启动内核进程。"
+        case .startFailedDaemonUnreachable: return "VPN 服务没有响应。请检查它是否已安装并正在运行。"
+        case .startFailedDaemonApply: return "VPN 服务拒绝或无法应用该配置。"
+        case .startFailedConfigCheck: return "内核拒绝了这份配置。请打开配置，修正报错的字段后重试。"
+        case .startFailedPortInUse: return "Clash API 端口 9090 已被占用。请释放该端口或在配置中更改后重试。"
+        case .startFailedCancelled: return "启动已取消。"
         case .reload: return "重新加载"
         case .openConfig: return "打开配置"
         case .speed: return "速度"

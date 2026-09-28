@@ -39,7 +39,7 @@ struct MenuToggleRow: View {
         Button {
             set(!isOn)
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: Metrics.iconToTextSpacing) {
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.system(size: Metrics.iconSize))

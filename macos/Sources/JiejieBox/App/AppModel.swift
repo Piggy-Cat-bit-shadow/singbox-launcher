@@ -1080,6 +1080,19 @@ final class AppModel {
         }
     }
 
+    /// Take ownership of an UNKNOWN config after the user confirmed it.
+    ///
+    /// Refreshes core state so the banner switches from the UNKNOWN message to
+    /// the normal "configuration changed" one with a working Reload: the new
+    /// ownership is exactly what makes that action possible.
+    func adoptConfig() async {
+        await withPending(.reloadingConfig, success: "JiejieBox now manages config.json.") {
+            let result = try await self.client.adoptConfig()
+            self.report(result, success: "JiejieBox now manages config.json.")
+            await self.refreshCoreState()
+        }
+    }
+
     func updateSubscriptions() async {
         await withPending(.updatingSubscriptions, success: nil) {
             let result = try await self.client.updateSubscriptions()
@@ -1276,6 +1289,21 @@ final class AppModel {
     /// provenance marker rather than from whether a state file happens to
     /// exist. The frontend never inspects files itself.
     var configRebuildable: Bool { core?.config_rebuildable ?? false }
+
+    /// Who owns the config on disk.
+    ///
+    /// Derived from the backend's explicit `config_ownership`, NOT from
+    /// `configRebuildable`. Those are different questions, and treating
+    /// "cannot rebuild" as "somebody else owns it" is what made a config written
+    /// by an older JiejieBox — which has no provenance marker — get reported to
+    /// its owner as a foreign file.
+    ///
+    /// An absent field (older backend) reads as `.unknown`: the honest answer
+    /// when the backend did not say, and one that cannot libel the user's file.
+    var configOwnership: ConfigOwnership {
+        guard let raw = core?.config_ownership else { return .unknown }
+        return ConfigOwnership(rawValue: raw) ?? .unknown
+    }
 
     /// True when the saved preference and the running engine disagree, which is
     /// what happens when a switch succeeded but persisting it did not. Surfaced
