@@ -244,10 +244,24 @@ func buildRevisionPath(configPath string) string {
 }
 
 // writeBuildRevision records the digest of the config bytes that were promoted.
+//
+// Written through a temp file and a rename, like the config it describes. A
+// truncate-in-place write interrupted partway leaves a malformed digest, which reads
+// as "no revision recorded" and silently drops the staleness check back to the legacy
+// mtime comparison — a self-inflicted degradation, in the same transaction as the
+// config, avoidable by using the same discipline the config already uses.
 func writeBuildRevision(configPath string, data []byte) error {
 	sum := sha256.Sum256(data)
-	return os.WriteFile(buildRevisionPath(configPath),
-		[]byte(hex.EncodeToString(sum[:])), platform.DefaultFileMode)
+	path := buildRevisionPath(configPath)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(hex.EncodeToString(sum[:])), platform.DefaultFileMode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // readBuildRevision returns the recorded digest, or "" when none was recorded.

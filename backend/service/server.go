@@ -363,11 +363,15 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		// outstanding must not stop the reader from delivering them — the
 		// frontend applies progress and only then sees this return.
 		group, _ := req.Params["group"].(string)
-		// The request's own lifetime is bounded by the connection, which the
-		// server does not model as a context here; the run has its own budget
-		// and its own cancellation (supersede / core stop / shutdown), which is
-		// what actually needs to interrupt it.
-		result, err := s.backend.RunGroupTest(context.Background(), group)
+		// The run is bounded by the CONNECTION as well as by its own budget and its
+		// subsystem cancellation (supersede / core stop / shutdown).
+		//
+		// This passed context.Background() with a comment saying the server modelled
+		// no connection context — true when it was written, and no longer true. The
+		// gap it left: a frontend that went away left the group test running to its
+		// full network budget with nobody to receive the progress or the result, and
+		// the backend holding a worker pool against a client that no longer exists.
+		result, err := s.backend.RunGroupTest(s.connCtx, group)
 		if err != nil {
 			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
 		}

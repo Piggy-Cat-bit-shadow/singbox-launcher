@@ -70,6 +70,8 @@ actor BackendClient {
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var readTask: Task<Void, Never>?
+    /// Drains the helper's stderr. Cancelled with its generation; see start().
+    private var stderrTask: Task<Void, Never>?
 
     /// Pending requests keyed by id, each awaiting one response line.
     private var pending: [String: CheckedContinuation<Data, Error>] = [:]
@@ -184,12 +186,18 @@ actor BackendClient {
         log.info("backend started pid=\(proc.processIdentifier) gen=\(generation)")
 
         // Drain stderr so a chatty backend cannot block on a full pipe.
+        //
+        // Tracked and generation-scoped, for the same reason the read task is: this
+        // task holds a file handle from ONE helper, and an untracked one keeps
+        // reading a dead process's pipe after a restart. It is cancelled with the
+        // generation that created it, so a superseded helper's drain cannot run
+        // against the client's current state.
         let errHandle = errPipe.fileHandleForReading
-        Task.detached {
-            while let line = try? errHandle.readline() {
+        stderrTask?.cancel()
+        stderrTask = Task.detached { [weak self] in
+            while !Task.isCancelled, let line = try? errHandle.readline() {
                 if line.isEmpty { break }
-                Logger(subsystem: "com.piggycat.jiejiebox", category: "backend")
-                    .debug("\(line, privacy: .public)")
+                await self?.noteStderr(line, generation: generation)
             }
         }
 
@@ -302,6 +310,13 @@ actor BackendClient {
         log.info("quit: ack \(ackText) stdin \(stdinText) exit \(exitText) total \(totalText)\(fallbackText)\(ackNote)")
     }
 
+    /// noteStderr logs one helper log line, ignoring a superseded generation.
+    private func noteStderr(_ data: Data, generation: UInt64) {
+        guard generation == activeGeneration else { return }
+        guard let line = String(data: data, encoding: .utf8) else { return }
+        log.debug("\(line, privacy: .public)")
+    }
+
     /// Milliseconds, for the quit timing line.
     private func ms(_ interval: TimeInterval) -> String {
         String(format: "%.0fms", interval * 1000)
@@ -340,6 +355,8 @@ actor BackendClient {
     private func cleanupOwnedState() {
         readTask?.cancel()
         readTask = nil
+        stderrTask?.cancel()
+        stderrTask = nil
 
         if let stdinHandle {
             try? stdinHandle.close()
