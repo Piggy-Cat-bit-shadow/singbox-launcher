@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
@@ -70,6 +71,19 @@ type FileService struct {
 	// WintunPath — wintun.dll рядом с выбранным ядром: Dir(SingboxPath)/wintun.dll
 	// (только Windows, пустая строка на других платформах).
 	WintunPath string
+
+	// coreMu guards the five core-resolution fields below as ONE group.
+	//
+	// A single mutex rather than one per field because callers read them COMBINED: a
+	// daemon install command is built from SingboxPath while a version check describes
+	// CoreSource, and a reader that took them one at a time could observe the new path
+	// with the old source — a command naming one binary and describing another. The
+	// fields are published together, so they must be read together.
+	//
+	// The exported fields remain directly accessible for the Fyne and legacy targets
+	// that predate this lock; new code should use the accessors below, which are the
+	// only way to read a CONSISTENT set.
+	coreMu sync.RWMutex
 
 	// MainLogFile — лог приложения (singbox-launcher.log).
 	// Используется как вывод стандартного log пакета.
@@ -154,11 +168,18 @@ func stampPreMigrationDataRoot(data paths.DataDir, source string) {
 // Зовётся из NewFileService и после успешного скачивания ядра (оно ложится
 // в Data/bin и должно сменить поставляемое или системное).
 func (fs *FileService) ResolveCore() {
+	// The resolve itself runs OUTSIDE the lock: it touches the filesystem, and holding a
+	// write lock across I/O would stall every reader for the duration of a directory
+	// scan.
 	r := platform.ResolveSingboxExecPath(fs.Layout, os.Getenv)
 	wintun := platform.GetWintunPathFor(filepath.Dir(r.Path))
-	// Поля читают другие горутины без блокировки; пишем только изменившиеся,
-	// чтобы повторный вызов с тем же итогом (обычный случай после скачивания
-	// в Data/bin) ничего не трогал.
+
+	// ONE critical section for all four fields, so a reader can never observe a
+	// half-applied resolution.
+	fs.coreMu.Lock()
+	defer fs.coreMu.Unlock()
+	// Write only what changed, so a repeat resolve with the same result — the common case
+	// after a download into Data/bin — does not invalidate caches keyed on these values.
 	if fs.SingboxPath != r.Path {
 		fs.SingboxPath = r.Path
 	}
@@ -171,6 +192,40 @@ func (fs *FileService) ResolveCore() {
 	if fs.WintunPath != wintun {
 		fs.WintunPath = wintun
 	}
+}
+
+// CoreResolution returns the resolved core path and its source as ONE consistent snapshot.
+//
+// The pair is returned together because callers use them together: a command line is built
+// from the path and a version message describes the source, and reading them separately
+// lets a concurrent resolve pair one resolution's path with another's source.
+func (fs *FileService) CoreResolution() (path, source string) {
+	fs.coreMu.RLock()
+	defer fs.coreMu.RUnlock()
+	return fs.SingboxPath, fs.CoreSource
+}
+
+// CoreBinaryPath returns the resolved path to the sing-box binary.
+func (fs *FileService) CoreBinaryPath() string {
+	fs.coreMu.RLock()
+	defer fs.coreMu.RUnlock()
+	return fs.SingboxPath
+}
+
+// CoreSourceName returns where the resolved core came from (env/data/app/path).
+func (fs *FileService) CoreSourceName() string {
+	fs.coreMu.RLock()
+	defer fs.coreMu.RUnlock()
+	return fs.CoreSource
+}
+
+// CoreResolutionFull returns every resolved field as one snapshot: the path, its source,
+// the shadowed alternative and the wintun companion. The wintun path is derived from the
+// selected core's directory, so it belongs to the same resolution as the path.
+func (fs *FileService) CoreResolutionFull() (path, source, shadowed, wintun string) {
+	fs.coreMu.RLock()
+	defer fs.coreMu.RUnlock()
+	return fs.SingboxPath, fs.CoreSource, fs.ShadowedCorePath, fs.WintunPath
 }
 
 // OpenLogFiles открывает все лог-файлы приложения с ротацией.

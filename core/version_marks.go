@@ -118,32 +118,40 @@ func (ac *AppController) logCoreResolution() {
 		return
 	}
 	fs := ac.FileService
-	src := fs.CoreSource
+	// ONE snapshot for the pair, because a concurrent ResolveCore — a core download
+	// re-resolves while this runs on the startup version goroutine — can otherwise pair
+	// one resolution's path with another's source, and the log line then names a binary
+	// and describes its origin inconsistently.
+	corePath, src := fs.CoreResolution()
 	if src == "" {
 		src = "none"
 	}
-	debuglog.WarnLog("core: %s (source=%s)", fs.SingboxPath, src)
+	debuglog.WarnLog("core: %s (source=%s)", corePath, src)
 	// Ядро из PATH, которое выбранное затеняет: версию не спрашиваем, только
 	// путь — иначе «в терминале sing-box другой» не объяснить по логу.
-	switch fs.CoreSource {
+	switch src {
 	case platform.CoreSourceData, platform.CoreSourceApp, platform.CoreSourceEnv:
 		if p, err := exec.LookPath(platform.GetExecutableNames()); err == nil {
 			if abs, err := filepath.Abs(p); err == nil {
 				p = abs
 			}
-			if !sameCoreFile(p, fs.SingboxPath) {
-				debuglog.WarnLog("core: %s %s shadows path %s", fs.CoreSource, fs.SingboxPath, p)
+			if !sameCoreFile(p, corePath) {
+				debuglog.WarnLog("core: %s %s shadows path %s", src, corePath, p)
 			}
 		}
 	}
-	if fs.ShadowedCorePath == "" {
+	// The shadowed path comes from the same snapshot as the selected one: they are two
+	// halves of one resolution, and reading the second later could describe a resolution
+	// that has already been replaced.
+	_, _, shadowedPath, _ := fs.CoreResolutionFull()
+	if shadowedPath == "" {
 		return
 	}
 	cur, err := ac.GetInstalledCoreVersion()
 	if err != nil || cur == "" {
 		cur = "?"
 	}
-	shadowed, err := coreVersionAt(fs.ShadowedCorePath)
+	shadowed, err := coreVersionAt(shadowedPath)
 	if err != nil || shadowed == "" {
 		shadowed = "?"
 	}
