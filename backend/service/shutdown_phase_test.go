@@ -25,10 +25,15 @@ func TestShutdownStartedSignalClosesBeforeTeardown(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	installControllableLegacy(t, b)
-	b.ac.SetExitHookForTest(func() {
+	// The restore is deferred, not forgotten: this hook BLOCKS the teardown, so
+	// leaving it installed would make every later GracefulExit in this package hang on
+	// a channel nobody closes.
+
+	restoreExitHook := b.ac.SetExitHookForTest(func() {
 		close(entered)
 		<-release
 	})
+	defer restoreExitHook()
 
 	done := make(chan struct{})
 	go func() { b.Shutdown(); close(done) }()
@@ -81,10 +86,15 @@ func TestShutdownCancelsGroupTestImmediately(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	b.ac.SetExitHookForTest(func() {
+	// The restore is deferred, not forgotten: this hook BLOCKS the teardown, so
+	// leaving it installed would make every later GracefulExit in this package hang on
+	// a channel nobody closes.
+
+	restoreExitHook := b.ac.SetExitHookForTest(func() {
 		close(entered)
 		<-release
 	})
+	defer restoreExitHook()
 
 	cancelled := make(chan struct{})
 	var once sync.Once
@@ -118,10 +128,15 @@ func TestShutdownDoneSignalIsSeparate(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	b.ac.SetExitHookForTest(func() {
+	// The restore is deferred, not forgotten: this hook BLOCKS the teardown, so
+	// leaving it installed would make every later GracefulExit in this package hang on
+	// a channel nobody closes.
+
+	restoreExitHook := b.ac.SetExitHookForTest(func() {
 		close(entered)
 		<-release
 	})
+	defer restoreExitHook()
 
 	done := make(chan struct{})
 	go func() { b.Shutdown(); close(done) }()

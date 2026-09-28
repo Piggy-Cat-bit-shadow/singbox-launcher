@@ -87,11 +87,24 @@ func SetSwitchModeSeamForTest(fn func(mode BackendMode) (bool, error)) func() {
 // "shutdown has finished" can be observed as two distinct states.
 var exitHookForTest func()
 
-// SetExitHookForTest installs a hook that runs at the START of GracefulExit and
-// replaces any previous one. Passing nil clears it.
-func (ac *AppController) SetExitHookForTest(fn func()) {
+// SetExitHookForTest installs a hook that runs at the START of GracefulExit, and returns a
+// function that restores the previous hook.
+//
+// THE RESTORE IS THE POINT, and its absence was a real hazard. This seam exists so a test can
+// BLOCK the teardown and observe "shutdown has begun" as distinct from "shutdown has
+// finished" — which means the hook it installs deliberately waits on a channel. The previous
+// version stored it in a package-level variable and offered no way to remove it, unlike
+// `SetSwitchModeSeamForTest` directly above, which returns a restore function for exactly this
+// reason. A test that installed a blocking hook and did not finish the shutdown left it in
+// place for every later test in the package, and the next `GracefulExit()` blocked forever on
+// a channel nobody would close.
+//
+// Callers should `defer restore()`. Passing nil is still allowed and clears the hook.
+func (ac *AppController) SetExitHookForTest(fn func()) func() {
 	if ac == nil {
-		return
+		return func() {}
 	}
+	prev := exitHookForTest
 	exitHookForTest = fn
+	return func() { exitHookForTest = prev }
 }

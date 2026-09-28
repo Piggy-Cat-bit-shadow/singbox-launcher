@@ -84,24 +84,44 @@ func TestSingleTestGenerationIsDisjointFromGroupRuns(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		run := m.begin("g", []proxyNode{{Name: "n"}}, nil)
 		groupIDs[run.id] = true
+		// A group id must never land in the single-test space either. Checking only one
+		// direction would leave the other open, and it is the direction that matters: a
+		// group id inside the single-test range would outrank every hand test forever.
+		if run.id >= singleTestGenerationBase {
+			t.Fatalf("a group run was assigned id %d, which is inside the single-test "+
+				"generation space (base %d) — a hand test's result would then compare as "+
+				"older than an unrelated group run", run.id, singleTestGenerationBase)
+		}
 		m.finish(run.id)
 	}
 
+	// The properties that actually make the space usable, rather than "the two numbers
+	// differ", which a base of 1 would satisfy just as well:
+	//
+	//   * zero is reserved for "no identity", so a single test must never take it;
+	//   * the values must be STRICTLY INCREASING, because supersession is decided by
+	//     comparison — two generations that merely differ cannot say which is newer;
+	//   * they must stay inside the single-test space, or they would collide with group ids.
+	var prev uint64
 	for i := 0; i < 50; i++ {
 		got := m.NextSingleTestGeneration()
 		if got == 0 {
-			t.Fatal("a single test got generation 0, which is the 'no run' sentinel")
+			t.Fatal("a single test got generation 0, which is the 'no identity' sentinel " +
+				"and would compare as older than everything")
+		}
+		if got < singleTestGenerationBase {
+			t.Fatalf("a single test got generation %d, below the single-test base %d, so "+
+				"it collides with the space group runs draw from", got, singleTestGenerationBase)
 		}
 		if groupIDs[got] {
 			t.Fatalf("a single test's generation (%d) collides with a group run's id, so "+
 				"the two cannot be told apart in the measurement store", got)
 		}
-	}
-
-	// Two single tests must differ, or a newer one cannot supersede an older one.
-	a := m.NextSingleTestGeneration()
-	b := m.NextSingleTestGeneration()
-	if a == b {
-		t.Fatal("two single tests got the same generation")
+		if prev != 0 && got <= prev {
+			t.Fatalf("generations went %d then %d; supersession compares them, so a "+
+				"non-increasing value means a newer test cannot supersede an older one",
+				prev, got)
+		}
+		prev = got
 	}
 }
