@@ -299,3 +299,37 @@ These are stated so they are not mistaken for gaps:
 - **Real Terminal launch.** `osascript` is not run in tests; the exit-status rule
   is executed, the process is not.
 - **Keyboard traversal and focus rings.** Not asserted anywhere in this repository.
+
+### Dimension sweep results
+
+Every dimension was checked across **all** views rather than only the controls that
+changed, and each finding below was fixed or is stated as a deliberate non-issue.
+
+| # | Dimension | Method | Result |
+|---|---|---|---|
+| 1 | When visible | read every view's branch structure | ✅ no control rendered in a state where it cannot act; the empty-state branches are shared (`BackendDownView`) |
+| 2 | When enabled | enumerated all 34 `.disabled(` sites | ✅ each delegates to a named policy or a documented local rule |
+| 3 | When disabled | same list, cross-checked for an explanation | ✅ page-level `PendingRow` covers the daemon rows that use a bare `pending != nil`; every other disabled control has `.help` from its policy |
+| 4 | What it calls | traced each control to `AppModel` → `BackendClient` | ✅ no control calls a backend method directly |
+| 5 | Backend precondition parity | compared each guard to the Go handler's own precondition | ✅ reload requires `config_rebuildable`; import requires settled `stopped`; engine switch requires settled `stopped`; `AddSubscription` URL rule compared against `service.LooksLikeURLForTest` by test |
+| 6 | Double-click policy | searched for claim-after-await | ✅ Restart and Test All claim state at the CLICK; `SingleFlight.begin()` returns whether it was admitted |
+| 7 | Concurrency | audited every `withPending` entry point | ✅ one operation at a time; proxy reads are generation-stamped; daemon reads coalesce |
+| 8 | Pending shown | checked each pending case renders | ✅ `PendingRow` per case, plus `daemonOperationProgress` page-level |
+| 9 | Success visible | checked each success path | ✅ transient banner or a state change from the backend |
+| 10 | Failure visible | checked each `catch` | ✅ `lastError` banner outside the scroll view; no empty `catch` remains |
+| 11 | Navigation after async | **mechanical check over all views** | ✅ 5 owning async pops, 0 unowned; **new test** |
+| 11b | Navigation from `onChange` | **mechanical check over all views** | ✅ the only surviving `onChange` is draft priming; **new test** |
+| 12 | Stale reply | audited every async read | ✅ `RequestGeneration` for lists, `CoalescingRefresh` for daemon status |
+| 13 | Destructive confirmation | enumerated every destructive Model method | ✅ 3 of 3 (`removeSubscription`, `unpairDaemon`, `uninstall`) behind `confirmationDialog` with `role: .destructive` |
+| 14 | Hover / hit target | checked the two row primitives | ✅ `ActionRow`, `MenuRow`, `MenuToggleRow`, `MenuPickerRow` all gate hover on `!disabled` and use `contentShape(Rectangle())` |
+| 15 | Accessibility label | **mechanical check over all views** | ✅ every icon-only `Button` carries an explicit label; **new test**. `MenuPickerRow`/`MenuToggleRow` supply one from their title |
+
+Two of these were real defects found by the sweep rather than by reading the
+changed controls: the **three unlabelled icon-only buttons** (dimension 15) and the
+confirmation that the **navigation split** holds everywhere (dimension 11). Both
+now have mechanical checks, so the next view added cannot reintroduce them.
+
+One candidate finding was withdrawn after checking properly: `MenuPickerRow`
+declares a `disabled` property, and a narrow grep window suggested it was never
+applied — it is applied (`.disabled(disabled)`), along with hover gating. Recorded
+here because a withdrawn finding that is not written down gets re-reported.
