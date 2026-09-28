@@ -43,7 +43,10 @@ struct BackendDownView: View {
                 }
             }
             .controlSize(.small)
-            .disabled(model.connection == .connecting)
+            // A restart that is under way leaves `connection` at `.failed`
+            // until the helper is actually gone, so the connection state alone
+            // cannot describe it — the in-flight flag is what closes the window.
+            .disabled(model.connection == .connecting || model.backendRestartInFlight)
         }
         .padding(.horizontal, Metrics.rowPaddingH)
         .padding(.vertical, 12)

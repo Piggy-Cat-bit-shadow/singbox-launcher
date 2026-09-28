@@ -43,11 +43,23 @@ struct CoreDetailsView: View {
                 }
 
                 MenuSection {
+                    // Restart is offered only when it MEANS something.
+                    //
+                    // This row had no condition at all, so it was clickable with
+                    // the core stopped, starting, stopping, in error, or while
+                    // another operation held the model — and every one of those
+                    // is a case where "restart" is not the action the user
+                    // wants. The label, the disabled state and the tooltip all
+                    // come from the shared core policy, so they cannot disagree.
                     MenuRow(L.restartCore.tr(language),
-                            subtitle: L.restartCoreHelp.tr(language),
+                            subtitle: restartSubtitle,
                             systemImage: "arrow.clockwise") {
                         Task { await model.restartCore() }
                     }
+                    .disabled(!corePolicy.canRestart)
+                    .help(corePolicy.canRestart
+                          ? L.restartCoreHelp.tr(language)
+                          : (corePolicy.reason ?? L.restartNeedsRunningCore.tr(language)))
                     if model.pending == .restarting {
                         pendingRow(L.restarting.tr(language))
                     }
@@ -127,4 +139,18 @@ struct CoreDetailsView: View {
         }
         return path
     }
+    /// The shared core policy, so this screen and Home cannot disagree.
+    private var corePolicy: AppModel.CoreActionPolicy {
+        model.coreActionPolicy(language: language)
+    }
+
+    /// The restart row's subtitle: the normal help, or the reason it is blocked.
+    private var restartSubtitle: String {
+        corePolicy.canRestart
+            ? L.restartCoreHelp.tr(language)
+            : (model.core?.state == .running
+                ? L.waitForOperation.tr(language)
+                : L.restartNeedsRunningCore.tr(language))
+    }
+
 }

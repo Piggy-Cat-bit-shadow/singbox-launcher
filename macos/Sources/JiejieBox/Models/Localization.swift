@@ -375,6 +375,20 @@ enum L: CaseIterable {
     /// Outcome of handing a command to Terminal, reported from osascript's exit.
     case terminalOpened
     case terminalOpenFailed
+    /// Core action policy reasons.
+    case backendNotConnected
+    case coreStateUnknown
+    case waitForCoreTransition
+    case stopTheCoreFirst
+    case coreErrorResolveFirst
+    /// Restart is only meaningful for a running core.
+    case restartNeedsRunningCore
+    /// The import row's reason while the core is not settled stopped.
+    case stopVPNBeforeReplacingCore
+    /// Primary action for a failure the backend says cannot be retried.
+    case reviewDetails
+    /// The active engine has not been read yet.
+    case engineUnknown
 
     // Core
     case core
@@ -826,6 +840,15 @@ extension L {
         case .unpairingDaemon: return "Removing pairing…"
         case .terminalOpened: return "Command opened in Terminal."
         case .terminalOpenFailed: return "Could not open Terminal. Copy the command and run it yourself."
+        case .backendNotConnected: return "The helper is not connected."
+        case .coreStateUnknown: return "The core state has not been loaded yet."
+        case .waitForCoreTransition: return "The core is still starting or stopping."
+        case .stopTheCoreFirst: return "Stop the VPN first."
+        case .coreErrorResolveFirst: return "The core is in an error state. Use Retry to start it again."
+        case .restartNeedsRunningCore: return "Restart is available while the VPN is running."
+        case .stopVPNBeforeReplacingCore: return "Stop the VPN before replacing the core."
+        case .reviewDetails: return "Review details"
+        case .engineUnknown: return "The active engine has not been reported yet."
 
         case .core: return "Core"
         case .restartCore: return "Restart Core"
@@ -1233,6 +1256,15 @@ extension L {
         case .unpairingDaemon: return "正在解除配对…"
         case .terminalOpened: return "命令已在终端中打开。"
         case .terminalOpenFailed: return "无法打开终端。请复制命令后自行运行。"
+        case .backendNotConnected: return "后端未连接。"
+        case .coreStateUnknown: return "内核状态尚未加载。"
+        case .waitForCoreTransition: return "内核正在启动或停止。"
+        case .stopTheCoreFirst: return "请先停止 VPN。"
+        case .coreErrorResolveFirst: return "内核处于错误状态，请使用「重试」重新启动。"
+        case .restartNeedsRunningCore: return "仅在 VPN 运行时可以重启。"
+        case .stopVPNBeforeReplacingCore: return "替换内核前请先停止 VPN。"
+        case .reviewDetails: return "查看详情"
+        case .engineUnknown: return "尚未获取当前使用的引擎。"
 
         case .core: return "内核"
         case .restartCore: return "重启内核"

@@ -188,10 +188,21 @@ struct HomeView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(model.pending != nil)
-            .help(installedVersion == nil
-                  ? L.loadCoreHelp.tr(language)
-                  : L.replaceCoreHelp.tr(language))
+            // The BACKEND's precondition, not merely "nothing is pending".
+            //
+            // `ImportCore` refuses unless the core is settled stopped, so this
+            // row let the user open a file chooser, pick a binary, wait for the
+            // panel, and only then be told to stop the VPN first. The policy is
+            // shared with every other core control so the reason and the
+            // disabled state cannot disagree.
+            .disabled(!corePolicy.canImportCore)
+            .help(corePolicy.canImportCore
+                  ? (installedVersion == nil
+                        ? L.loadCoreHelp.tr(language)
+                        : L.replaceCoreHelp.tr(language))
+                  : (model.core?.state == .running
+                        ? L.stopVPNBeforeReplacingCore.tr(language)
+                        : (corePolicy.reason ?? "")))
         } else if let version = installedVersion {
             Text(version)
                 .font(Typography.rowSubtitle)
@@ -219,7 +230,14 @@ struct HomeView: View {
 
     private var primaryButton: some View {
         Button {
-            Task { await model.toggleCore() }
+            // A non-recoverable failure is not retried: the label says "Review
+            // details", and pressing it must do that rather than firing the
+            // start that the backend just said cannot work.
+            if model.core?.state == .error, model.core?.recoverable == false {
+                model.path.append(.coreDetails)
+            } else {
+                Task { await model.toggleCore() }
+            }
         } label: {
             if primaryIsBusy {
                 HStack(spacing: 6) {
@@ -253,7 +271,22 @@ struct HomeView: View {
         case .running: return L.stop.tr(language)
         case .starting: return L.starting.tr(language)
         case .stopping: return L.stopping.tr(language)
-        case .error: return L.retry.tr(language)
+        case .error:
+            // A DETERMINISTIC failure must not offer a generic retry.
+            //
+            // `CoreStatus.recoverable` exists precisely to say "retrying this
+            // will not help", and the protocol documents it as such — but the
+            // button ignored it and always read "Retry", which is what makes a
+            // user click Start in a loop against a failure that cannot succeed
+            // (an occupied port, a missing copy). When the backend says the
+            // failure is not retryable, the primary action says what to do
+            // instead, and `recoverable == nil` (an older backend that cannot
+            // say) is treated as retryable because guessing "unrecoverable"
+            // would remove the only way forward.
+            if model.core?.recoverable == false {
+                return L.reviewDetails.tr(language)
+            }
+            return L.retry.tr(language)
         case .stopped: return L.start.tr(language)
         }
     }
@@ -267,15 +300,21 @@ struct HomeView: View {
 
     /// Disabled only during a transition or when there is nothing to start, with
     /// the reason in the help text rather than an unexplained dead control.
+    /// The shared core policy, for every control on this screen.
+    private var corePolicy: AppModel.CoreActionPolicy {
+        model.coreActionPolicy(language: language)
+    }
+
+    /// Whether the primary button may act.
+    ///
+    /// Delegates to the policy rather than re-deriving: the button's enabled
+    /// state, its label and its tooltip are three renderings of one decision.
     private var canAct: Bool {
-        guard case .ready = model.connection else { return false }
-        guard let core = model.core else { return false }
-        // Shared policy: a command in flight anywhere (a proxy switch, a config
-        // reload, a mode change) blocks starting and stopping too, so two core
-        // commands can never overlap.
-        if model.coreOperationBusy { return false }
-        if core.state != .running && !core.binary_exists { return false }
-        return true
+        guard let state = model.core?.state else { return false }
+        let policy = corePolicy
+        // The control is a toggle: which half applies depends on the state the
+        // label is describing.
+        return state == .running ? policy.canStop : policy.canStart
     }
 
     private var primaryHelp: String {
@@ -333,6 +372,11 @@ struct HomeView: View {
         if case .failed(let message) = model.connection {
             Banner(kind: .error, message: message) {
                 Button(L.restart.tr(language)) { Task { await model.restart() } }
+                    // The banner's Restart had NO condition at all, so it stayed
+                    // clickable through the teardown it had just started — the
+                    // double-click window the model's single-flight now closes,
+                    // but the control should not invite it either.
+                    .disabled(model.backendRestartInFlight || model.connection == .connecting)
                     .controlSize(.small)
             }
         } else if model.coreMissing {

@@ -24,6 +24,20 @@ struct CoreModeView: View {
                     daemonRow
                 }
 
+                // An UNKNOWN engine is stated, not left to look like "neither".
+                //
+                // With no snapshot read yet — or with the backend unreachable —
+                // neither row shows an Active badge, which by itself reads as
+                // "no engine is running". The truth is that we have not been
+                // told, and those are different things.
+                if model.activeEngine == nil {
+                    Text(L.engineUnknown.tr(language))
+                        .font(Typography.rowSubtitle)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, Metrics.rowPaddingH)
+                }
+
                 if let reason = model.coreModeBlockedReason(language) {
                     Text(reason)
                         .font(Typography.rowSubtitle)

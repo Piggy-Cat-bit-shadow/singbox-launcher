@@ -900,7 +900,23 @@ final class AppModel {
     /// same state, config and core. When that happens `start()` must not run, and the
     /// caller must be able to tell: silently returning would look like a restart that
     /// did nothing, which is exactly what it is.
+    /// Restart the helper: stop, then start.
+    ///
+    /// SINGLE-FLIGHT. `stop()` leaves `connection` at `.failed` until the helper
+    /// is actually gone, so the Restart control stayed enabled for the whole
+    /// teardown — and a second click started a SECOND restart task. The two then
+    /// interleaved their stop/start halves, which is the two-helpers case the
+    /// stop's own comment refuses to create.
+    ///
+    /// The flag is set BEFORE the first await, so the window between the click
+    /// and any state change is closed: it is not derived from `connection`,
+    /// which by definition cannot know about a restart until it is under way.
+    private(set) var backendRestartInFlight = false
+
     func restart() async {
+        guard !backendRestartInFlight else { return }
+        backendRestartInFlight = true
+        defer { backendRestartInFlight = false }
         await stop()
         // A failed stop leaves the connection `.failed` and the helper alive. Starting
         // now would be the two-helpers case the stop refused to create, so the restart
@@ -1366,6 +1382,90 @@ final class AppModel {
     ///
     /// Stated on the model rather than inline in the view so the rule can be
     /// tested without a running UI.
+    /// Every core control's availability, derived from one place.
+    ///
+    /// Each control previously re-derived its own precondition, and the copies
+    /// had already drifted apart from each other and from the backend: Restart
+    /// had NO condition at all (it was enabled with the core stopped, starting,
+    /// stopping, or while something else ran), the import row ignored the
+    /// backend's "the core must be settled stopped" rule, and the core-mode
+    /// disabled state disagreed with its own explanation tooltip.
+    ///
+    /// The backend remains the authority — every one of these is checked again
+    /// there — but the UI must not OFFER what the backend will refuse, because a
+    /// button whose only outcome is an error is worse than a disabled one.
+    struct CoreActionPolicy {
+        let canStart: Bool
+        let canStop: Bool
+        let canRestart: Bool
+        let canImportCore: Bool
+        let canSwitchEngine: Bool
+        /// Why an unavailable action is unavailable, for the tooltip.
+        let reason: String?
+    }
+
+    /// The current core policy, from live state.
+    func coreActionPolicy(language: Localization) -> CoreActionPolicy {
+        guard case .ready = connection else {
+            let why = L.backendNotConnected.tr(language)
+            return CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
+                                    canImportCore: false, canSwitchEngine: false, reason: why)
+        }
+        // One operation at a time, across every control. This is what makes a
+        // concurrent Restart impossible rather than merely unlikely.
+        if coreOperationBusy {
+            let why = L.waitForOperation.tr(language)
+            return CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
+                                    canImportCore: false, canSwitchEngine: false, reason: why)
+        }
+        guard let core else {
+            let why = L.coreStateUnknown.tr(language)
+            return CoreActionPolicy(canStart: false, canStop: false, canRestart: false,
+                                    canImportCore: false, canSwitchEngine: false, reason: why)
+        }
+
+        let hasBinary = core.binary_exists
+        let state = core.state
+        let transitioning = state.isTransitioning
+
+        // Restart means "take a RUNNING core and bring it back running". It is
+        // not a synonym for Start: on a stopped core the honest action is Start,
+        // and on an errored one it is Retry. Offering Restart in those states
+        // presented a control whose semantics did not match any of them.
+        let canRestart = state == .running && hasBinary
+
+        // The backend refuses an import unless the core is SETTLED STOPPED
+        // (`coreIsStoppedForReplacement`), and it says so with a distinct error.
+        // The row used to check only "no operation pending", so the user could
+        // open a file chooser, pick a binary, and only then be told the VPN had
+        // to be stopped.
+        let canImport = !transitioning && state == .stopped && hasBinary
+
+        // Engine switching is refused while the core is not stopped: the engine
+        // is what runs the core, so changing it underneath a live one is not a
+        // supported transition.
+        let canSwitch = !transitioning && state == .stopped
+
+        var reason: String?
+        if transitioning {
+            reason = L.waitForCoreTransition.tr(language)
+        } else if state == .running {
+            reason = L.stopTheCoreFirst.tr(language)
+        } else if !hasBinary {
+            reason = L.coreNotFound.tr(language)
+        } else if state == .error {
+            reason = L.coreErrorResolveFirst.tr(language)
+        }
+
+        return CoreActionPolicy(
+            canStart: !transitioning && (state == .stopped || state == .error) && hasBinary,
+            canStop: !transitioning && state == .running,
+            canRestart: canRestart,
+            canImportCore: canImport,
+            canSwitchEngine: canSwitch,
+            reason: reason)
+    }
+
     /// True when a config reload can be started right now.
     ///
     /// Both halves matter: the backend must consider the config REBUILDABLE (a
@@ -2260,9 +2360,20 @@ final class AppModel {
     /// what happens when a switch succeeded but persisting it did not. Surfaced
     /// rather than hidden: the next launch uses the saved value, so the user
     /// should know the preference did not stick.
+    /// True when the RUNNING engine differs from the SAVED preference.
+    ///
+    /// Compared as PROTOCOL IDENTIFIERS, never as rendered labels. The previous
+    /// version compared `coreModeLabel(language) != savedCoreModeLabel(language)`
+    /// — two localized strings — which is exactly the "identifiers are not
+    /// labels" rule the neighbouring comments repeat. It happened to work in
+    /// English and would have compared translated prose in any other language,
+    /// where a wording change could make two equal states look divergent.
     var coreModePreferenceDiverged: Bool {
-        guard settings != nil, core != nil else { return false }
-        return coreModeLabel(resolvedLanguage) != savedCoreModeLabel(resolvedLanguage)
+        guard let core, let saved = settings?.core_backend_mode else { return false }
+        let running = core.backend.trimmingCharacters(in: .whitespaces).lowercased()
+        let preferred = saved.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !running.isEmpty, !preferred.isEmpty else { return false }
+        return running != preferred
     }
 
     /// True once the handshake succeeded and the backend is answering.
@@ -2335,10 +2446,7 @@ final class AppModel {
     /// take over a live classic process, and vice versa, so anything other than
     /// a settled `stopped` state must refuse.
     var canSwitchCoreMode: Bool {
-        guard isReady else { return false }
-        guard let state = core?.state else { return false }
-        if coreOperationBusy { return false }
-        return state == .stopped
+        coreActionPolicy(language: resolvedLanguage).canSwitchEngine
     }
 
     /// The engine actually in use, as the protocol identifier ("classic" or
@@ -2346,14 +2454,50 @@ final class AppModel {
     ///
     /// Exposed so views can compare against a STABLE value. Comparing rendered
     /// labels would work in English and silently break in every other language.
-    var activeEngine: String { core?.backend ?? "classic" }
+    /// Nil when the active engine is genuinely UNKNOWN.
+    ///
+    /// This defaulted to "classic", so before the first snapshot — and whenever
+    /// the backend was unreachable — the Core Mode screen showed "Classic:
+    /// Active" as a statement of fact about a runtime nobody had read yet. A UI
+    /// that invents an answer is worse than one that admits it does not have
+    /// one, especially here: the user may act on which engine they believe is
+    /// carrying their traffic. Callers render an explicit unknown instead.
+    var activeEngine: String? {
+        guard let engine = core?.backend, !engine.isEmpty else { return nil }
+        return engine
+    }
 
     /// Why the engine cannot be switched, for an inline explanation.
+    ///
+    /// DERIVED FROM THE SAME POLICY THAT DISABLES THE ROW.
+    ///
+    /// This used to consult only `core.state`, while the row's disabled state
+    /// consulted `canSwitchCoreMode` — which also requires a ready connection,
+    /// no operation in flight, and a stopped core. Every condition the state
+    /// check did not know about produced a DISABLED ROW WITH NO EXPLANATION:
+    /// the user saw a grey control and an empty reason, and could not tell
+    /// whether the app was broken, busy, or forbidding them.
+    ///
+    /// The two answers now come from one place, so "can I?" and "why not?" can
+    /// never describe different products.
     func coreModeBlockedReason(_ language: Localization) -> String? {
-        guard let state = core?.state else { return nil }
+        if case .ready = connection {} else {
+            return L.backendNotConnected.tr(language)
+        }
+        guard let state = core?.state else {
+            return L.coreStateUnknown.tr(language)
+        }
+        if coreOperationBusy {
+            // An operation in flight outranks the state message: the user's next
+            // step is to wait, whatever the core happens to be doing.
+            return L.waitForOperation.tr(language)
+        }
         switch state {
         case .stopped:
-            return nil
+            // Settled and idle: switching IS possible, so there is no reason.
+            return coreActionPolicy(language: language).canSwitchEngine
+                ? nil
+                : L.waitForOperation.tr(language)
         case .running:
             return L.stopVPNFromHome.tr(language)
         case .starting:
