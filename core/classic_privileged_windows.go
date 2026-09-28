@@ -48,7 +48,7 @@ func (ac *AppController) elevatedClassicStart() (string, *os.File, error) {
 	logFile, err := platform.OpenPrivilegedCoreLog()
 	if errors.Is(err, platform.ErrPrivilegedLogDirMissing) {
 		version := ac.launcherCoreVersion()
-		command, viaService, cmdErr := privilegedCopyCommandFor(systemDaemonServiceLayout(), ac.FileService.SingboxPath, version)
+		command, viaService, cmdErr := privilegedCopyCommandFor(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath(), version)
 		coreHint := ""
 		if cmdErr != nil {
 			coreHint = DaemonServiceCoreHint(version)

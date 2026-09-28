@@ -254,7 +254,7 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 	disabler := &savedStateDisabler{s: s, path: statePath}
 	loop := &coreRejectLoop{
 		check:      coreRejectCheck,
-		singbox:    ac.FileService.SingboxPath,
+		singbox:    ac.FileService.CoreBinaryPath(),
 		configPath: ac.FileService.ConfigPath,
 		disabler:   disabler,
 		decide:     ac.coreRejectDecider(),

@@ -6,7 +6,7 @@ package core
 // иначе "". survivesPurge — команда идёт через root-owned копию службы
 // (SPEC 136), которая лежит вне DataDir и переживает удаление данных.
 func (ac *AppController) daemonUninstallHint() (command string, survivesPurge bool) {
-	return daemonUninstallHintFor(ac.FileService.SingboxPath)
+	return daemonUninstallHintFor(ac.FileService.CoreBinaryPath())
 }
 
 // daemonUninstallHintFor — то же без контроллера (флаг -purge-data): путь

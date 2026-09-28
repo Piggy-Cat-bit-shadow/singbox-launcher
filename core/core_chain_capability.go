@@ -48,7 +48,7 @@ func (ac *AppController) CoreSupportsChain() (bool, string) {
 	if ac == nil || ac.FileService == nil {
 		return true, ""
 	}
-	singboxPath := ac.FileService.SingboxPath
+	singboxPath := ac.FileService.CoreBinaryPath()
 	if resolved, err := exec.LookPath(singboxPath); err == nil {
 		singboxPath = resolved
 	}

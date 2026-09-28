@@ -201,12 +201,20 @@ func (b *Backend) ImportCoreFile(path string) (CoreImportResult, error) {
 	b.ac.InvalidateCoreBinaryCaches()
 	b.ac.FileService.ResolveCore()
 
+	// ONE SNAPSHOT FOR THE WHOLE RESULT.
+	//
+	// These fields are the pieces of a single core resolution, and reading them separately
+	// lets a concurrent `ResolveCore` (a download finishing, or the environment override
+	// being applied) put the new path beside the old source — a description of a core that
+	// never existed, reported to the user as fact.
+	activePath, activeSource := b.ac.FileService.CoreResolution()
+
 	result := CoreImportResult{
 		OldVersion:       oldVersion,
 		NewVersion:       newVersion,
 		InstalledPath:    target,
-		ActivePath:       b.ac.FileService.SingboxPath,
-		CoreSource:       b.ac.FileService.CoreSource,
+		ActivePath:       activePath,
+		CoreSource:       activeSource,
 		ConfigChecked:    configChecked,
 		ConfigCompatible: configCompatible,
 	}
@@ -214,10 +222,10 @@ func (b *Backend) ImportCoreFile(path string) (CoreImportResult, error) {
 	// §39: confirm the installed binary is the one that is actually active. A
 	// discrepancy means something outranks the Data core, and reporting
 	// "installed" without saying so would be a lie about the running core.
-	if same, _ := samePath(b.ac.FileService.SingboxPath, target); !same {
+	if same, _ := samePath(activePath, target); !same {
 		result.Warning = fmt.Sprintf(
 			"the core was installed, but %s is still the active core (%s)",
-			b.ac.FileService.SingboxPath, b.ac.FileService.CoreSource)
+			activePath, activeSource)
 		debuglog.WarnLog("import_core_file: %s", result.Warning)
 	}
 
@@ -235,7 +243,7 @@ func (b *Backend) ImportCoreFile(path string) (CoreImportResult, error) {
 	result.DaemonUpdateRequired = b.daemonCopyIsStale()
 
 	debuglog.InfoLog("import_core_file: installed %s (was %q, source %s)",
-		result.NewVersion, result.OldVersion, result.CoreSource)
+		result.NewVersion, result.OldVersion, activeSource)
 
 	// §41/§93: publish the new truth before returning it, so the event and the
 	// response cannot disagree.

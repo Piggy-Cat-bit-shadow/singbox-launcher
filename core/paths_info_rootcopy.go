@@ -20,7 +20,7 @@ func (ac *AppController) fillRootCopyStatus(info *paths.PathsInfo) {
 		return
 	}
 	info.RootCopyPath = l.CorePath
-	c := checkPrivilegedCoreCopy(l, ac.FileService.SingboxPath, &daemonServiceHashes)
+	c := checkPrivilegedCoreCopy(l, ac.FileService.CoreBinaryPath(), &daemonServiceHashes)
 	info.RootCopyState = string(c.State)
 	info.RootCopyDetail = c.Detail
 }

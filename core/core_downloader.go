@@ -139,7 +139,8 @@ func (ac *AppController) DownloadCore(ctx context.Context, version string, progr
 	// 6.6. Скачанное ядро лежит в Data/bin и по цепочке SPEC 135 §3.3
 	// побеждает поставляемое и системное: пересчитать путь ядра и спутников.
 	ac.FileService.ResolveCore()
-	debuglog.InfoLog("core: %s (source=%s)", ac.FileService.SingboxPath, ac.FileService.CoreSource)
+	corePath, coreSource := ac.FileService.CoreResolution()
+	debuglog.InfoLog("core: %s (source=%s)", corePath, coreSource)
 
 	// 6.7. Служба демона (macOS, Windows — SPEC 141 §10): launchd / SCM
 	// запускает свою защищённую копию ядра (SPEC 136), новое ядро до неё

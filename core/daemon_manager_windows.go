@@ -299,7 +299,7 @@ func (ac *AppController) DaemonInstallOrUpdate() DaemonRunResult {
 	r := DaemonRunResult{Op: DaemonOpInstall}
 	// Гейта версии нет: команда install доступна для любого ядра лаунчера.
 	_ = ac.launcherCoreVersion()
-	core := ac.FileService.SingboxPath
+	core := ac.FileService.CoreBinaryPath()
 	r.Command = DaemonCommand{Binary: core, Args: daemonInstallArgs()}
 	invite, err := ac.daemonInvitePath()
 	if err != nil {
@@ -348,7 +348,7 @@ func (ac *AppController) checkInstallWithoutInvite(r *DaemonRunResult, core, inv
 // freshInviteCommand — `lxd client add --name <клиент>` для показа и Copy
 // (без --invite-out: в консоли администратора приглашение печатается).
 func (ac *AppController) freshInviteCommand() DaemonCommand {
-	binary := daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.SingboxPath)
+	binary := daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath())
 	return DaemonCommand{Binary: binary, Args: []string{"lxd", "client", "add", "--name", daemonClientName()}}
 }
 
@@ -387,7 +387,7 @@ func waitDaemonServiceRunning(timeout time.Duration) {
 func (ac *AppController) DaemonFreshInvite() DaemonRunResult {
 	r := DaemonRunResult{Op: DaemonOpFreshInvite, Command: ac.freshInviteCommand()}
 	// Гейта версии нет: приглашение можно запросить любым ядром лаунчера.
-	_ = ac.FileService.SingboxPath
+	_ = ac.FileService.CoreBinaryPath()
 	invite, err := ac.daemonInvitePath()
 	if err != nil {
 		r.Err = err
@@ -409,7 +409,7 @@ func (ac *AppController) DaemonFreshInvite() DaemonRunResult {
 // keepCopy=false, purge=true — «Remove all data…». Успех — снять свой
 // системный прокси.
 func (ac *AppController) DaemonUninstallService(keepCopy, purge bool) DaemonRunResult {
-	binary := daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.SingboxPath)
+	binary := daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath())
 	args := []string{"lxd", "--service=uninstall"}
 	if keepCopy {
 		args = append(args, "--keep-copy")
@@ -432,7 +432,7 @@ func (ac *AppController) DaemonCopyOnly() DaemonRunResult {
 	r := DaemonRunResult{Op: DaemonOpCopy}
 	// Гейта версии нет: copy доступен для любого ядра лаунчера.
 	_ = ac.launcherCoreVersion()
-	r.Command = DaemonCommand{Binary: ac.FileService.SingboxPath, Args: []string{"lxd", "--service=copy"}}
+	r.Command = DaemonCommand{Binary: ac.FileService.CoreBinaryPath(), Args: []string{"lxd", "--service=copy"}}
 	code, err := runDaemonCommandElevated(r.Command)
 	if applyElevatedOutcome(&r, code, err) {
 		addSidecarWarnings(&r)
