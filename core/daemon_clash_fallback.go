@@ -95,6 +95,20 @@ type daemonClashFallback struct {
 	probe *fallbackProber
 }
 
+// fallbackVerificationTTL is how long a successful verification stays trustworthy.
+//
+// Deliberately SHORT. A verification is a statement about a moment: it says "the process
+// answering on this loopback port, right now, is this daemon's core, and it agrees with the
+// config we sent". The daemon is a separate process that can restart, be replaced, or have
+// its core restarted by someone else, and after any of those the same port may belong to a
+// DIFFERENT Clash-compatible core — at which point the launcher would be switching nodes on
+// something that is not the user's VPN, which is exactly what verifying is for.
+//
+// The cost of a short window is one extra identity check, and that check is a handful of
+// local HTTP requests. The cost of a long one is driving a stranger's API. Re-verification
+// happens on the next use, so there is no background polling.
+const fallbackVerificationTTL = 2 * time.Minute
+
 // fallbackProber performs the verification request. Injectable for tests: the
 // whole point of the verification is that it talks HTTP, and a test that talks
 // HTTP is a test that fails on a machine without the daemon.
@@ -177,11 +191,32 @@ func (f *daemonClashFallback) config() (DaemonClashFallbackConfig, fallbackReadi
 // unsupported rather than controlling a process it cannot identify.
 func (f *daemonClashFallback) transportIfReady() (services.ClashTransport, bool) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	cfg, readiness := f.cfg, f.readiness
-	f.mu.Unlock()
 	if readiness != fallbackReady || !cfg.Enabled {
 		return services.ClashTransport{}, false
 	}
+
+	// "VERIFICATION EXPIRED" IS A REASON LISTED ABOVE, SO IT IS CHECKED HERE.
+	//
+	// The list enumerated "not configured, remote daemon, never verified, verification
+	// expired" while `verifiedAt` was written on every success and read nowhere — so a
+	// verification never expired, and once this fallback was trusted it stayed trusted for
+	// the life of the process. A daemon restart, a daemon replacement, or a core restart by
+	// anyone else can hand the same loopback port to a different Clash-compatible core, and
+	// the launcher would keep driving it.
+	//
+	// Readiness is DEMOTED rather than just refused, so the next use re-verifies instead of
+	// the fallback going dark: the endpoint may be perfectly fine, it is the PROOF that has
+	// gone stale.
+	if f.verifiedAt.IsZero() || time.Since(f.verifiedAt) > fallbackVerificationTTL {
+		if f.readiness == fallbackReady {
+			f.readiness = fallbackUnverified
+		}
+		return services.ClashTransport{}, false
+	}
+
 	return services.NewClashTransport(cfg.BaseURL, cfg.Token), true
 }
 

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	coreservices "singbox-launcher/core/services"
 	"strings"
 	"sync"
 	"time"
@@ -112,7 +113,39 @@ func (t *TrafficSampler) loop(ctx context.Context) {
 // means one missing tick, not a user-visible failure, and surfacing an error
 // banner every second while the core is starting would be noise.
 func (t *TrafficSampler) sample(ctx context.Context) {
-	baseURL, token, ok := t.backend.clashEndpoint()
+	// STOPPED MEANS STOPPED, INCLUDING FOR A SAMPLE ALREADY IN FLIGHT.
+	//
+	// Stop cancels the loop's context, but a `sample` that had already begun kept running,
+	// because nothing re-checked liveness before publishing. It then emitted a traffic rate
+	// for a core that had just been stopped — and since the sampler runs exactly while the
+	// core is up, the UI reads that as live traffic.
+	//
+	// Checked on entry so a cancelled run does no work, and again before the emit below,
+	// which is the point the event actually escapes.
+	if ctx.Err() != nil {
+		return
+	}
+	t.mu.Lock()
+	running := t.running
+	t.mu.Unlock()
+	if !running {
+		return
+	}
+
+	// The endpoint is resolved the SAME way every other proxy operation resolves it.
+	//
+	// `clashEndpoint()` reads the configured address out of APIService directly, which is
+	// correct for a classic core and WRONG for a daemon: the daemon's Clash API is reached
+	// through a VERIFIED transport override, and that verification is the only thing
+	// establishing that the endpoint belongs to this daemon rather than to some other
+	// Clash-compatible core on the same loopback port. Going straight to the configured
+	// address made the sampler the one path that reads from an endpoint the launcher has
+	// deliberately not confirmed.
+	//
+	// `transport()` honours the override, so the sampler now sees exactly what every other
+	// proxy operation sees. It returns the same base URL and token the raw request needed,
+	// so this is a resolution change rather than a capability loss.
+	baseURL, token, ok := t.backend.trafficEndpoint()
 	if !ok {
 		return
 	}
@@ -145,6 +178,15 @@ func (t *TrafficSampler) sample(ctx context.Context) {
 	// its totals, so report zero for this tick instead of a negative rate.
 	upRate := ratePerSecond(up-prevUp, elapsed)
 	downRate := ratePerSecond(down-prevDown, elapsed)
+
+	// Re-checked before the emit: the reading above can take up to the request timeout,
+	// and the core may have stopped in the meantime.
+	t.mu.Lock()
+	stillRunning := t.running
+	t.mu.Unlock()
+	if !stillRunning || ctx.Err() != nil {
+		return
+	}
 
 	t.backend.emit(protocol.EventTrafficRate, protocol.TrafficRate{
 		Up:        upRate,
@@ -221,6 +263,37 @@ func fetchConnectionTotals(ctx context.Context, baseURL, token string) (up, down
 }
 
 // clashEndpoint resolves the configured Clash API address.
+// trafficEndpoint resolves the endpoint the sampler must read from.
+//
+// It defers to `transport()` rather than to `clashEndpoint()`, because `transport()` is the
+// function that knows about the daemon's verified fallback. The resolved transport carries
+// the base URL and token, so the sampler reads the same endpoint the rest of the app has
+// already agreed to trust — instead of independently deciding, from the configured address
+// alone, that whatever answers there is the user's VPN.
+func (b *Backend) trafficEndpoint() (baseURL, token string, ok bool) {
+	transport, tok := b.transport()
+	if !tok {
+		return "", "", false
+	}
+	clash, isClash := transport.(coreservices.ClashTransport)
+	if !isClash {
+		// A non-Clash transport (a remote pool or chain) has no /connections endpoint to
+		// poll. Reporting "nothing to sample" is the honest answer; the previous code
+		// would have polled the configured address regardless of which transport the app
+		// was actually using.
+		return "", "", false
+	}
+	if clash.BaseURL == "" {
+		return "", "", false
+	}
+	return clash.BaseURL, clash.Token, true
+}
+
+// clashEndpoint reports the configured Clash API address, without any verification.
+//
+// Retained for callers that only need to know whether one is CONFIGURED. Anything that
+// talks to the endpoint should resolve it through `transport()` or `trafficEndpoint()`, so
+// the daemon's verified fallback is honoured.
 func (b *Backend) clashEndpoint() (baseURL, token string, ok bool) {
 	if b.ac == nil || b.ac.APIService == nil {
 		return "", "", false
