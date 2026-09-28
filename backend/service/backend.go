@@ -1161,13 +1161,34 @@ func (b *Backend) signalFlush(token uint64) {
 // delivery point, so no subscriber can observe it.
 const eventFlushSentinel = "__flush_for_test"
 
-// eventQueueSize bounds the undelivered-event backlog.
+// eventQueueSize bounds the undelivered-event backlog ON THE CHANNEL.
 //
 // A DRAINING subscriber must never hit this: the queue caps a WEDGED one and is not a
 // rate limit for a healthy client. When it is reached, `emit` blocks rather than dropping —
 // blocking the EMITTER is recoverable (the caller is a state change that will be re-emitted
 // or re-read from a snapshot), whereas silently discarding an event makes the UI quietly
 // wrong, which is the failure mode this whole area exists to remove.
+//
+// IT DOES NOT BOUND `pendingDeliveries`, AND THAT IS NOT AN OVERSIGHT.
+//
+// An event emitted BY a subscriber runs on the dispatcher goroutine, so it cannot go on this
+// channel — that would be the permanent self-deadlock the pending list exists to avoid. The
+// two paths have genuinely different back-pressure, and the difference is worth stating:
+//
+//   - A WEDGED CLIENT is bounded here. An ordinary emitter blocks once the buffer fills, so a
+//     subscriber that has stopped reading cannot accumulate unbounded work.
+//
+//   - A SELF-TRIGGERING SUBSCRIBER is not bounded, in either design. A subscriber that emits
+//     on every event it receives produces work faster than anything can consume it; the only
+//     question is where the memory goes. On the channel it deadlocks (the consumer is the
+//     producer); in the list it grows. Growing is the better failure — it is visible, it is
+//     interruptible, and it does not hold a lock — but it is not a bound.
+//
+// Measured: one event whose subscriber emits 300 000 children leaves `pendingDeliveries` at
+// 300 000 with the channel empty. Only test subscribers are re-entrant today (`server.go`'s
+// sole production subscriber writes to a pipe and never emits), so this is a documented
+// property rather than a live exposure. Capping the list would reintroduce the choice between
+// dropping events and blocking the dispatcher, which is worse than the memory.
 const eventQueueSize = 65536
 
 // EmitCoreState publishes the current core state as an event.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +14,7 @@ import (
 	"singbox-launcher/api"
 	"singbox-launcher/core/services"
 	"singbox-launcher/internal/debuglog"
+	"singbox-launcher/internal/limitread"
 	"sort"
 )
 
@@ -62,6 +62,12 @@ const (
 	// (a remote daemon), regardless of config. A stable fact.
 	fallbackBlocked
 )
+
+// maxClashResponseBytes caps a Clash API response read.
+//
+// Large enough for a group listing of a few thousand nodes; the point is not the exact number
+// but that EXCEEDING it is an error rather than a truncated parse.
+const maxClashResponseBytes = 8 << 20
 
 func (r fallbackReadiness) String() string {
 	switch r {
@@ -442,7 +448,14 @@ func (p *fallbackProber) fetchProxies(ctx context.Context, cfg DaemonClashFallba
 		// its credentials" — i.e. very likely not our daemon.
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	// BOUNDED WITH OVERFLOW DETECTED, not merely capped.
+	//
+	// `io.LimitReader(resp.Body, 8<<20)` reads at most 8 MB and says nothing when it stops
+	// there, so a response one byte larger is silently TRUNCATED and then fails to parse as
+	// JSON — reported to the user as "not a Clash API response" for a perfectly valid API. The
+	// error points at the endpoint rather than at the size, and a group listing large enough to
+	// exceed 8 MB is exactly the case where the diagnostics matter most.
+	body, err := limitread.All(resp.Body, maxClashResponseBytes)
 	if err != nil {
 		return nil, err
 	}

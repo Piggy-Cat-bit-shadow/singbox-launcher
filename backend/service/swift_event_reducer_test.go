@@ -267,20 +267,72 @@ func TestDeferredReloadsAreBoundToTheirSession(t *testing.T) {
 		if !strings.HasPrefix(trimmed, "await ") {
 			continue
 		}
-		// The re-check may not be literally the next line: the awaited call can be the last
-		// statement of a branch, so closing braces and comments intervene. Look ahead past
-		// them, and stop at the next STATEMENT — anything is acceptable in between, but the
-		// check has to arrive before the following statement runs.
-		found := false
+		// THE RE-CHECK MUST BE A GUARD, NOT A MENTION OF THE TOKEN.
+		//
+		// The first version of this only required the next statement to CONTAIN
+		// `Task.isCancelled`. Verified: replacing all five real guards with
+		// `_ = Task.isCancelled` — a no-op that compiles, `swift build` exit 0 — left the test
+		// PASSING with every request in the batch still firing against a stopped backend. A
+		// substring check tests spelling, not behaviour, and it is the same mistake this test
+		// was rewritten to remove, one level down.
+		//
+		// A guard has to TEST the token and LEAVE on it. Both parts are required: `if
+		// Task.isCancelled { }` with an empty body reads the flag and continues, which is the
+		// same defect with more ceremony.
+		//
+		// The re-check may not be literally the next line — the awaited call can be the last
+		// statement of a branch, so closing braces and comments intervene. Look past those and
+		// examine the next statement, then its block.
+		stmt := -1
 		for j := i + 1; j < len(lines); j++ {
 			next := strings.TrimSpace(lines[j])
 			if next == "" || next == "}" || strings.HasPrefix(next, "//") {
 				continue
 			}
-			if strings.Contains(next, "Task.isCancelled") {
-				found = true
-			}
+			stmt = j
 			break
+		}
+
+		found := false
+		if stmt >= 0 {
+			head := strings.TrimSpace(lines[stmt])
+			// A guard TESTS the flag. `if Task.isCancelled {` and
+			// `guard !Task.isCancelled else` are the two forms the codebase uses.
+			testsIt := strings.HasPrefix(head, "if Task.isCancelled") ||
+				strings.HasPrefix(head, "guard !Task.isCancelled")
+			// And it must LEAVE. The body is the lines up to the matching closing brace; a
+			// body with no `return` reads the flag and carries on.
+			if testsIt {
+				depth := 0
+				started := false
+				for j := stmt; j < len(lines); j++ {
+					line := lines[j]
+					if !started {
+						if idx := strings.Index(line, "{"); idx >= 0 {
+							started = true
+							depth = 1
+							if strings.Contains(line[idx:], "return") {
+								found = true
+								break
+							}
+						}
+						// `guard ... else { return }` on one line.
+						if strings.Contains(line, "else") && strings.Contains(line, "return") {
+							found = true
+							break
+						}
+						continue
+					}
+					if strings.Contains(line, "return") {
+						found = true
+						break
+					}
+					depth += strings.Count(line, "{") - strings.Count(line, "}")
+					if depth <= 0 {
+						break
+					}
+				}
+			}
 		}
 		if !found {
 			t.Errorf("runPendingReloads() awaits %q without re-checking cancellation "+

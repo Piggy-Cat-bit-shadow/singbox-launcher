@@ -8,11 +8,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	mrand "math/rand"
 	"net/http"
 	"strings"
 	"time"
+
+	"singbox-launcher/internal/limitread"
 )
 
 // API endpoint version and client header. Cloudflare periodically bumps these;
@@ -41,6 +42,10 @@ type Client struct {
 // NewClient builds a Client with the given HTTP doer. A nil doer falls back to
 // http.DefaultClient with a 15s timeout so callers that do not need proxy
 // awareness still work.
+
+// maxWarpResponseBytes caps a WARP API response read.
+const maxWarpResponseBytes = 1 << 20
+
 func NewClient(doer httpDoer) *Client {
 	if doer == nil {
 		doer = &http.Client{Timeout: 15 * time.Second}
@@ -264,8 +269,11 @@ func (c *Client) do(ctx context.Context, method, url, bearer string, body []byte
 		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// Cap the read: registration responses are a few KB.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Registration responses are a few KB, and the bound is ENFORCED rather than approximated:
+	// `io.LimitReader` alone stops at 1 MB silently, so a larger response is truncated and then
+	// fails to decode as a registration reply — an error that describes the parse rather than
+	// the size, and sends the reader looking in the wrong place.
+	data, err := limitread.All(resp.Body, maxWarpResponseBytes)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
