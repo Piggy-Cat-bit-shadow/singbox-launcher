@@ -702,6 +702,32 @@ func (r *RunningState) set(value bool, reason events.TeardownReason, startedHere
 		return
 	}
 	r.running = value
+	// TRANSITION LOGGING, AT THE ONE PLACE A TRANSITION HAPPENS.
+	//
+	// The dedup above means this runs exactly once per real change, so it cannot
+	// flood: a repeated `Set(true)` on an already-running runtime records
+	// nothing, which is the same property the comment above describes. That is
+	// why the log belongs here and not at each caller — a caller cannot know
+	// whether its write changed anything.
+	//
+	// The previous state is printed WITH the reason, because `running=false`
+	// alone cannot distinguish a user stop from a crash from a failed-stop
+	// re-assertion, and those need opposite responses.
+	//
+	// Captured under the lock, emitted after it: writing a log line while holding
+	// this mutex would serialise every reader behind file I/O.
+	previousRunning := !value
+	transitionReason := "a core came up"
+	if !value {
+		// The empty reason is meaningful — it is a crash or a routine refresh,
+		// which ends no operation — so it is named rather than printed blank.
+		transitionReason = "no deliberate teardown (crash or refresh)"
+		if reason != events.TeardownNone {
+			transitionReason = string(reason)
+		}
+	} else if !startedHere {
+		transitionReason = "running re-asserted"
+	}
 	// On false→true: arm auto-ping timer. On true→false: cancel any pending one.
 	// Capturing ac here avoids touching r.controller in the timer goroutine after
 	// unlock, and makes the intent explicit.
@@ -738,6 +764,11 @@ func (r *RunningState) set(value bool, reason events.TeardownReason, startedHere
 		r.autoPingTimer = nil
 	}
 	r.Unlock()
+
+	// Emitted OUTSIDE the lock, after the state is visible to readers, so the log
+	// order matches the order other observers see.
+	debuglog.InfoLog("CoreState: running %v -> %v | reason=%s | startedHere=%v",
+		previousRunning, value, transitionReason, startedHere)
 
 	r.controller.UpdateUI()
 
