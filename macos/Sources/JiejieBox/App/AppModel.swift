@@ -381,38 +381,6 @@ final class AppModel {
     /// behaviour "run this in Terminal, then come back" requires.
     private(set) var preparedCommand: PreparedDaemonCommand?
 
-    /// A command plus the daemon state it was prepared for.
-    struct PreparedDaemonCommand {
-        let result: DaemonCommandResult
-        /// The state the command was generated in, as the backend reported it.
-        /// The command is stale only when the daemon's state has moved on from
-        /// this.
-        let preparedFor: DaemonStateFingerprint
-        /// Monotonic id, so a late response cannot replace a newer command.
-        let id: UInt64
-    }
-
-    /// The parts of the daemon status that decide whether a command still
-    /// applies.
-    ///
-    /// Deliberately a small, named set rather than the whole DTO: comparing
-    /// everything would make an unrelated field (a version string, a timestamp)
-    /// invalidate a command the user is about to run, which is the same defect
-    /// wearing a different hat.
-    struct DaemonStateFingerprint: Equatable {
-        let installed: Bool
-        let ready: Bool
-        let activeMode: Bool
-        let paired: Bool
-
-        init(_ status: DaemonStatus) {
-            installed = status.installed
-            ready = status.ready
-            activeMode = status.active_mode
-            paired = status.paired
-        }
-    }
-
     /// Monotonic counter for prepared commands.
     private var preparedCommandCounter: UInt64 = 0
 
@@ -1644,15 +1612,12 @@ final class AppModel {
     /// each had to guess.
     private func applyDaemonStatus(_ status: DaemonStatus) {
         daemon = status
-        guard let prepared = preparedCommand else { return }
-        // Still the situation the command was generated for: it remains valid,
-        // which is what lets the user go to Terminal and come back.
-        if prepared.preparedFor == DaemonStateFingerprint(status) { return }
-        // The state moved. Some commands are still meaningful afterward (a
-        // fresh invite stays usable until it is redeemed or expires), so the
-        // decision is per-operation rather than "any change clears it".
-        if prepared.result.operation == DaemonOperation.freshInvite,
-           status.installed, !status.paired {
+        // The decision lives in DaemonCommandLifetime, which has no SwiftUI
+        // dependency and is therefore EXECUTED by the Go suite rather than
+        // described to it. Deciding it here would put a rule that silently makes
+        // buttons look broken beyond the reach of any test this toolchain can
+        // build.
+        if daemonCommandSurvives(preparedCommand, newStatus: DaemonStateFingerprint(status)) {
             return
         }
         clearDaemonCommand()
@@ -1683,7 +1648,7 @@ final class AppModel {
             // fingerprint describe the situation on screen.
             self.daemon = result.status
             self.preparedCommand = PreparedDaemonCommand(
-                result: result,
+                operation: result.operation,
                 preparedFor: DaemonStateFingerprint(result.status),
                 id: self.nextPreparedCommandID())
             self.daemonCommand = result

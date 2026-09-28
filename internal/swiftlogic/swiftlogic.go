@@ -42,6 +42,7 @@ import (
 var Sources = []string{
 	"macos/Sources/JiejieBox/Models/Protocol.swift",
 	"macos/Sources/JiejieBox/Models/SubscriptionURLInput.swift",
+	"macos/Sources/JiejieBox/Models/DaemonCommandLifetime.swift",
 	"macos/Sources/JiejieBox/App/DraftStore.swift",
 }
 

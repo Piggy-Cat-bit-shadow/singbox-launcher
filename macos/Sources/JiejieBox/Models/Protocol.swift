@@ -843,19 +843,6 @@ enum DaemonNextStep {
 }
 
 /// Result of a daemon setup step.
-/// The operation a prepared daemon command performs, as the backend names it.
-///
-/// Named constants rather than inline literals: the command's LIFETIME depends on
-/// which operation it is (an invite stays usable after the state moves; an
-/// install command does not), so a typo in a string comparison would silently
-/// change when a command disappears.
-enum DaemonOperation {
-    static let install = "install"
-    static let start = "start"
-    static let freshInvite = "fresh_invite"
-    static let uninstall = "uninstall"
-}
-
 struct DaemonCommandResult: Decodable {
     let operation: String
     let command: String
@@ -864,6 +851,28 @@ struct DaemonCommandResult: Decodable {
     let needs_admin: Bool
     let follow_up: String
     let status: DaemonStatus
+
+    /// Explicit memberwise init.
+    ///
+    /// Declaring any initializer would suppress the synthesized one, and this
+    /// type is constructed in the logic harness (which cannot reach `status`,
+    /// a decoded nested DTO). An explicit init keeps both paths available and
+    /// documents that the harness builds these deliberately.
+    init(operation: String,
+         command: String = "",
+         available: Bool = false,
+         message: String = "",
+         needs_admin: Bool = false,
+         follow_up: String = "",
+         status: DaemonStatus) {
+        self.operation = operation
+        self.command = command
+        self.available = available
+        self.message = message
+        self.needs_admin = needs_admin
+        self.follow_up = follow_up
+        self.status = status
+    }
 }
 
 // MARK: - Settings
