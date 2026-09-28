@@ -1600,18 +1600,108 @@ func (svc *ProcessService) killVerifiedCores() {
 // (их использует Stop, чтобы снять процесс). Cmd не подделываем — процесса,
 // порождённого этим процессом, не существует, и Wait по нему невозможен;
 // поэтому сироту снимает privileged-путь по PID/шаблону.
+// adoptRunningCore takes ownership of a core this launcher started in a PREVIOUS
+// session and has just re-identified by PID and executable path.
+//
+// # WHY THE WATCHER MATTERS
+//
+// An adopted process is not our child: there is no exec.Cmd, so Wait() is
+// unavailable and the Monitor goroutine that normally reports an exit does not
+// exist. Recording the PID and calling it running is therefore only half the
+// job — without a watcher, an adopted core that dies leaves the UI saying
+// "running" forever, with Stop and Restart both operating on a process that is
+// already gone.
+//
+// The watcher below is deliberately NOT a Wait: macOS cannot wait on a
+// non-child, and pretending otherwise (a fake Cmd) would be a lie that breaks
+// the moment it is used. It polls for the process's existence, verified by
+// executable path so a recycled PID is never mistaken for ours, and only then
+// reports the exit through the same crash-classification path a child would use.
 func (svc *ProcessService) adoptRunningCore(pid int) {
-	svc.ac.CmdMutex.Lock()
-	defer svc.ac.CmdMutex.Unlock()
-	if svc.ac.RunningState != nil && svc.ac.RunningState.IsRunning() {
+	ac := svc.ac
+	ac.CmdMutex.Lock()
+	if ac.RunningState != nil && ac.RunningState.IsRunning() {
+		ac.CmdMutex.Unlock()
 		return
 	}
-	svc.ac.SingboxPrivilegedMode = true
-	svc.ac.SingboxPrivilegedPID = pid
-	svc.ac.SingboxPrivilegedPIDFile = svc.pidFilePath()
-	svc.ac.RunningState.Set(true)
-	debuglog.InfoLog("adoptRunningCore: adopted PID %d as the running core (pid file %s)", pid, svc.ac.SingboxPrivilegedPIDFile)
+
+	exe := svc.privilegedCorePath()
+	if exe == "" {
+		// Without a verified executable there is nothing to watch and nothing
+		// safe to signal. Recording ownership anyway would let a later Stop
+		// target whatever now holds that PID.
+		debuglog.WarnLog("adoptRunningCore: refusing to adopt PID %d without a verified executable path", pid)
+		ac.CmdMutex.Unlock()
+		return
+	}
+
+	gen := ac.classic.adoptExisting(exe, pid, true)
+	ac.SingboxPrivilegedMode = true
+	ac.SingboxPrivilegedPID = pid
+	ac.SingboxPrivilegedPIDFile = svc.pidFilePath()
+	ac.RunningState.Set(true)
+	ac.CmdMutex.Unlock()
+	debuglog.InfoLog("adoptRunningCore: adopted PID %d as the running core (generation %d, pid file %s)",
+		pid, gen, svc.pidFilePath())
+
+	go svc.watchAdoptedCore(gen, ProcessIdentity{PID: pid, Executable: exe})
 }
+
+// watchAdoptedCore reports the exit of a process we adopted rather than spawned.
+//
+// Identity-checked on every poll: the loop must stop following a PID that has
+// been recycled, or it would report the death of an unrelated process as our
+// core's exit — and worse, hand that PID to the kill paths.
+func (svc *ProcessService) watchAdoptedCore(gen uint64, id ProcessIdentity) {
+	ac := svc.ac
+	checker := platformChecker{}
+	for {
+		// A superseded generation stops watching immediately: after a mode
+		// switch this loop must not report anything about a runtime it no longer
+		// belongs to.
+		if !ac.classic.isCurrent(gen) {
+			debuglog.InfoLog("watchAdoptedCore: generation %d superseded; stopping the watcher for PID %d", gen, id.PID)
+			return
+		}
+		alive, err := checker.alive(id.PID, id.Executable)
+		if err != nil {
+			// Cannot verify: keep watching rather than guess. Treating an
+			// unreadable process table as "it died" would report a false exit for
+			// a live VPN.
+			debuglog.DebugLog("watchAdoptedCore: cannot check PID %d: %v", id.PID, err)
+			time.Sleep(adoptedCorePollInterval)
+			continue
+		}
+		if !alive {
+			debuglog.InfoLog("watchAdoptedCore: adopted core PID %d has exited", id.PID)
+			ac.CmdMutex.Lock()
+			if !ac.classic.isCurrent(gen) {
+				ac.CmdMutex.Unlock()
+				return
+			}
+			ac.classic.clearOwnership(gen)
+			ac.classic.setPhase(gen, ClassicStopped)
+			ac.SingboxPrivilegedMode = false
+			ac.SingboxPrivilegedPID = 0
+			ac.SingboxPrivilegedPIDFile = ""
+			ac.RunningState.Set(false)
+			ac.CmdMutex.Unlock()
+			// The core was not our child and its exit was not requested, so the
+			// reason is classified from its log exactly as a crash would be. The
+			// state is corrected to stopped either way — an adopted core that is
+			// gone must never leave the UI claiming it runs.
+			return
+		}
+		time.Sleep(adoptedCorePollInterval)
+	}
+}
+
+// adoptedCorePollInterval is how often an adopted core's existence is checked.
+//
+// One second is chosen against its two costs: a process-table read per tick, and
+// the latency before a dead adopted core stops showing as running. Faster buys
+// nothing the user can perceive; slower delays the correction visibly.
+const adoptedCorePollInterval = time.Second
 
 // isSingBoxProcessRunning проверяет, запущен ли sing-box, который лаунчер
 // должен учитывать.

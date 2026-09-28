@@ -687,3 +687,79 @@ func newTestController() *AppController {
 	ac.ctx = context.Background()
 	return ac
 }
+
+// --- adopted core ----------------------------------------------------------
+
+// TestAdoptedCoreWatcherReportsExternalDeath is the gap that made an adopted
+// core dangerous: with no child to Wait on, nothing reported its exit, so the UI
+// kept saying "running" for a process that no longer existed and both Stop and
+// Restart operated on a ghost.
+func TestAdoptedCoreWatcherReportsExternalDeath(t *testing.T) {
+	ac := newTestController()
+	// The process is already gone by the time the watcher first looks.
+	ac.classic.adoptExisting(testExe, 31337, true)
+	ac.RunningState.Set(true)
+	gen := ac.classic.currentGeneration()
+
+	svc := &ProcessService{ac: ac}
+	done := make(chan struct{})
+	go func() {
+		svc.watchAdoptedCore(gen, ProcessIdentity{PID: 31337, Executable: testExe})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the adopted-core watcher never noticed the process was gone")
+	}
+
+	if ac.RunningState.IsRunning() {
+		t.Fatal("a dead adopted core must not keep reporting as running")
+	}
+	if _, ok, _ := ac.classic.ownedProcess(); ok {
+		t.Fatal("ownership must be dropped once the adopted process is confirmed gone")
+	}
+	if got := ac.classic.currentPhase(); got != ClassicStopped {
+		t.Fatalf("expected the runtime to settle to stopped, got %q", got)
+	}
+}
+
+// TestAdoptedCoreWatcherStopsOnSupersede — after a mode switch the watcher must
+// not keep reporting on a runtime it no longer belongs to.
+func TestAdoptedCoreWatcherStopsOnSupersede(t *testing.T) {
+	ac := newTestController()
+	gen := ac.classic.adoptExisting(testExe, 31337, true)
+	svc := &ProcessService{ac: ac}
+
+	// Supersede before the watcher starts.
+	ac.classic.renewGeneration()
+
+	done := make(chan struct{})
+	go func() {
+		svc.watchAdoptedCore(gen, ProcessIdentity{PID: 31337, Executable: testExe})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stale watcher must return immediately, not keep polling")
+	}
+}
+
+// TestAdoptedCoreIsOwnedWithIdentity — adoption must record the identity, or
+// Stop has nothing safe to act on.
+func TestAdoptedCoreIsOwnedWithIdentity(t *testing.T) {
+	var rt classicRuntime
+	rt.adoptExisting(testExe, 4242, true)
+	id, ok, privileged := rt.ownedProcess()
+	if !ok {
+		t.Fatal("an adopted core must be owned")
+	}
+	if id.PID != 4242 || id.Executable != testExe {
+		t.Fatalf("identity was not recorded correctly: %+v", id)
+	}
+	if !privileged {
+		t.Fatal("the adopted core is privileged and Stop must know that")
+	}
+}
