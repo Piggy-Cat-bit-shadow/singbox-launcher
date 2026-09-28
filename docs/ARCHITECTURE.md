@@ -598,6 +598,31 @@ straight from `ParsedNode` via a parallel pair of files
 
 ---
 
+### 6.3y A test that cannot fail is a defect, and the ways it happens repeat
+
+Four tests in one wave were verified to pass with their defect restored. None of them looked
+wrong, and the reasons are worth naming because they are the same few shapes:
+
+- **The precondition had not happened yet.** A saturated-queue test waited for the subscriber
+  to be *entered* and then read, with ~100 of 65536 events queued. Wait for the condition, and
+  fail loudly on a timeout rather than reading early.
+- **The test supplied the correct input.** A re-assertion test hand-built
+  `{Running: true, StartedHere: false}`, so it could not observe a bug in the code that
+  PRODUCES that payload. Drive the real publisher.
+- **The test supplied the state the fix creates.** A `Close` test installed the provider
+  removal itself, so it passed with the removal deleted from `Close`. Call the real `Close`.
+- **A helper silently widened its own result.** A brace-scanning helper returned the rest of
+  the file when the braces did not balance, turning every `Contains` into "appears anywhere
+  below here". Return empty and let the caller's "not found" guard fire.
+
+There is also a variant worth checking separately: a test whose expected value encodes an
+IMPOSSIBLE outcome. One asserted that a group run numbered 8 supersedes a hand test numbered
+`1<<62+1`; the comparison cannot do that, so the assertion could never have described the code,
+and the real defect it was meant to catch was in the opposite direction.
+
+When a fix is reverted, the test must FAIL. That check is cheap and it is the only evidence
+that a test is evidence.
+
 ### 6.3z Guarantees that must be MECHANISMS, not sentences
 
 A recurring defect class in this codebase, and the reason several of the entries
