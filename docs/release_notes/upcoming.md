@@ -4,6 +4,9 @@
 
 ## EN
 ### Highlights
+- **The Proxies screen no longer breaks in daemon mode.** A daemon that does not implement the proxy-group RPC produced a red banner reading `unknown method GetGroups for service daemon.StartedService` on both the Proxies screen and Home. That is an engine limitation, not a fault, and it is now explained calmly with a pointer to Core Mode instead of reported as an error.
+- **Home shows errors that matter.** A failed proxy read used to take over the main screen and push the core and config status aside. Feature-level failures now stay on the screen that owns them, each with its own Retry; Home keeps only blocking conditions.
+- **Tighter, more even spacing throughout.** Row height, section gaps and page padding were reduced by roughly 10–15% and unified into one scale, so sections are spaced identically on every screen instead of 8pt here and 14pt there.
 - **The interface now speaks Chinese.** More → Application → **Language** switches between 跟随系统 / 简体中文 / English, applied immediately without a relaunch and remembered across launches. "Follow System" is a real choice, not an alias: the app keeps following macOS if you change the system language later.
 - **The More page is organised by kind** rather than by accident: Automation (the toggles), Application (appearance and language, presented as one consistent pair), Files (the actions), About. Section headers now align to the content column instead of sitting off to one side, and every row shares one height, icon column and spacing scale.
 - **Bring your own sing-box core.** Click the version on the Home screen and pick a sing-box binary: the launcher verifies it (runnable, right architecture, actually sing-box, and able to parse your current config), installs it atomically, and reports the version it actually installed. A rejected file leaves your working core untouched — byte for byte.
@@ -36,6 +39,9 @@
 
 ## RU
 ### Основное
+- **Экран прокси больше не ломается в daemon-режиме.** Демон без RPC списка групп выдавал красный баннер `unknown method GetGroups for service daemon.StartedService` и на экране прокси, и на главной. Это ограничение内核, а не сбой: теперь оно объясняется спокойно, со ссылкой на «内核模式», вместо ошибки.
+- **Главная показывает только важные ошибки.** Неудачное чтение прокси перехватывало главный экран и вытесняло состояние ядра и конфига. Теперь ошибки уровня функции остаются на своём экране и имеют собственный «Повторить»; на главной — только блокирующие условия.
+- **Плотнее и ровнее по всему интерфейсу.** Высота строк, отступы между секциями и поля страницы уменьшены примерно на 10–15% и сведены в одну шкалу, поэтому секции расположены одинаково на всех экранах, а не 8pt здесь и 14pt там.
 - **Интерфейс теперь говорит по-китайски.** More → Application → **Language** переключает 跟随系统 / 简体中文 / English: применяется сразу, без перезапуска, и запоминается. «跟随系统» — это настоящий выбор, а не синоним одного из языков: приложение продолжит следовать системе, если язык системы изменится позже.
 - **Страница More организована по смыслу**, а не «как получилось»: Automation (переключатели), Application (внешний вид и язык — одной согласованной парой), Files (действия), About. Заголовки секций выровнены по колонке содержимого, а все строки используют одну высоту, колонку иконок и шкалу отступов.
 - **Своё ядро sing-box.** Клик по версии на главном экране — и выбираешь бинарь sing-box: лаунчер проверяет его (запускается, верная архитектура, действительно sing-box, умеет прочитать текущий конфиг), ставит атомарно и показывает ту версию, которая реально установилась. Отклонённый файл не трогает рабочее ядро — побайтово.

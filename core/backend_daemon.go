@@ -934,6 +934,19 @@ func (t *daemonProxyTransport) SetEndpointEnabled(tag string, enabled bool) (str
 }
 
 // GroupProxies implements services.ProxyTransport через GetGroups.
+//
+// GetGroups is declared in the launcher's proto but is NOT implemented by every
+// daemon build: the method arrives with the fork's lx command surface, so a
+// daemon built without it answers codes.Unimplemented. That is a capability
+// fact, not a transient failure — retrying cannot help, and reporting it as an
+// error produced a red banner reading
+//
+//	cannot read the proxies of group "…": daemon GetGroups: rpc error:
+//	code = Unimplemented desc = unknown method GetGroups
+//
+// which tells the user nothing they can act on. Translating it to
+// services.ErrProxyListUnsupported lets the backend answer "this engine cannot
+// list proxies" and the UI explain it calmly instead.
 func (t *daemonProxyTransport) GroupProxies(group string) ([]api.ProxyInfo, string, error) {
 	client, ctx, cancel, err := t.rpc()
 	if err != nil {
@@ -942,6 +955,9 @@ func (t *daemonProxyTransport) GroupProxies(group string) ([]api.ProxyInfo, stri
 	defer cancel()
 	groups, err := client.GetGroups(ctx, &emptypb.Empty{})
 	if err != nil {
+		if isUnimplemented(err) {
+			return nil, "", services.ErrProxyListUnsupported
+		}
 		return nil, "", fmt.Errorf("daemon GetGroups: %w", err)
 	}
 	proxies, selected, ok := services.ProxyInfosFromGroups(groups, group)
@@ -959,6 +975,12 @@ func (t *daemonProxyTransport) SwitchProxy(group, name string) error {
 	}
 	defer cancel()
 	if _, err := client.SelectOutbound(ctx, &daemonpb.SelectOutboundRequest{GroupTag: group, OutboundTag: name}); err != nil {
+		// Same reasoning as GroupProxies: a daemon without the lx command
+		// surface answers Unimplemented, which is a capability fact rather
+		// than a failure the user can retry away.
+		if isUnimplemented(err) {
+			return services.ErrProxyListUnsupported
+		}
 		return fmt.Errorf("daemon SelectOutbound: %w", err)
 	}
 	return nil
@@ -990,6 +1012,9 @@ func (t *daemonProxyTransport) Delay(proxyName string) (int64, error) {
 		Timeout: uint32(api.GetPingTestTimeoutMs()),
 	})
 	if err != nil {
+		if isUnimplemented(err) {
+			return 0, services.ErrProxyListUnsupported
+		}
 		return 0, fmt.Errorf("daemon URLTestOutbound: %w", err)
 	}
 	if resp.GetError() != "" {

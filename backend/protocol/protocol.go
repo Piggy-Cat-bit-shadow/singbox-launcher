@@ -373,6 +373,27 @@ type ProxyList struct {
 	// the normal state while the core is stopped. The frontend uses it to
 	// show "start the core first" instead of an empty list.
 	Available bool `json:"available"`
+	// Supported is false when the ACTIVE ENGINE cannot list proxies at all, as
+	// opposed to having none to list or not being reachable yet.
+	//
+	// The three cases need three different screens, and collapsing them is what
+	// produced a red error banner for a daemon that merely lacks the RPC:
+	//
+	//	Supported=false                  the engine has no such capability; no
+	//	                                 action will change it, so the UI explains
+	//	                                 instead of offering a retry
+	//	Supported=true, Available=false  the engine can do it but is not up yet;
+	//	                                 "start the core" is the next step
+	//	Supported=true, Available=true   an empty list genuinely means no nodes
+	//
+	// A pointer so the wire can distinguish "absent" from "false": an older
+	// backend omits the key, and the Swift DTO reads an absent value as true so
+	// its absence never disables a feature that actually works.
+	Supported *bool `json:"supported,omitempty"`
+	// UnsupportedReason is a short machine-readable cause, present only when
+	// Supported is false. It names the ENGINE rather than a user action, since
+	// the user cannot change it.
+	UnsupportedReason string `json:"unsupported_reason,omitempty"`
 }
 
 // TrafficRate is one periodic speed sample.
@@ -512,3 +533,10 @@ const (
 	CoreStateStopping = "stopping"
 	CoreStateError    = "error"
 )
+
+// BoolPtr returns a pointer to v.
+//
+// Used for the optional ProxyList.Supported field, which must distinguish
+// "absent" (an older backend) from "false" (this engine cannot list proxies).
+// A plain bool cannot express that difference on the wire.
+func BoolPtr(v bool) *bool { return &v }

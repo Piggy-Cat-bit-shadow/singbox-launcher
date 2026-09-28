@@ -45,7 +45,7 @@ struct DaemonView: View {
 
     @ViewBuilder
     private func content(_ status: DaemonStatus) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
             if !status.supported {
                 unavailable
             } else {

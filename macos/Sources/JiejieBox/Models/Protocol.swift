@@ -275,6 +275,19 @@ struct ProxyList: Decodable {
     let proxies: [ProxyNode]
     let group: String?
     let available: Bool
+    /// False when the ACTIVE ENGINE cannot list proxies at all, as opposed to
+    /// having none to list or not being reachable yet.
+    ///
+    /// Optional because an older backend omits the key, and an absent value
+    /// must read as "supported": defaulting it to false would disable the
+    /// Proxies screen against a backend that works perfectly.
+    let supported: Bool?
+    /// Machine-readable cause, present only when `supported` is false. The
+    /// frontend owns the wording; the backend only names the engine limitation.
+    let unsupported_reason: String?
+
+    /// Whether the engine can list proxies at all.
+    var isSupported: Bool { supported ?? true }
 }
 
 /// Result of a config rebuild or a subscription refresh.

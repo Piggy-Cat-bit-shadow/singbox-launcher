@@ -199,9 +199,14 @@ struct MenuRowButtonStyle: ButtonStyle {
 
 /// Shared layout constants, so every row and section lines up.
 enum Metrics {
-    /// Comfortable minimum hit height. Below this the row is hard to hit even
-    /// when the visual padding is tight.
-    static let rowHeight: CGFloat = 38
+    /// Comfortable minimum hit height.
+    ///
+    /// 34, down from 38: the panel was airy rather than dense, and the
+    /// per-section rhythm is fixed by the tokens in Typography.swift, so the row
+    /// height is what actually sets the page's density. 34pt is still a
+    /// comfortable target — above the 28pt macOS minimum — and the row spans the
+    /// full panel width, so the hit AREA stays large even as the height drops.
+    static let rowHeight: CGFloat = 34
     static let rowPaddingH: CGFloat = 12
     static let rowCorner: CGFloat = 6
     /// Padding around a section's rows.

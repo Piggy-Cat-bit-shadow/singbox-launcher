@@ -113,6 +113,16 @@ final class AppModel {
     private(set) var proxiesAvailable: Bool = false
     /// True while a proxy/test request is in flight.
     private(set) var proxiesLoading: Bool = false
+    /// False when the ACTIVE ENGINE has no proxy-listing capability at all.
+    ///
+    /// Distinct from `proxiesAvailable`, which is about the engine being up:
+    /// this one is about the engine being ABLE. Retrying never changes it, so
+    /// the screen explains instead of offering an action, and it must never
+    /// raise the global error banner — that was the reported defect.
+    private(set) var proxiesSupported: Bool = true
+    /// Why the engine cannot list proxies, as a backend token. Drives which
+    /// explanation is shown; the wording lives in the frontend.
+    private(set) var proxiesUnsupportedReason: String?
 
     /// Why the node list is not usable, if it is not.
     ///
@@ -135,6 +145,10 @@ final class AppModel {
         case noGroups
         /// The built config is behind the state; a reload is needed.
         case configStale
+        /// The active engine cannot list proxies at all. Not an error: no
+        /// user action changes an engine capability, so the screen explains
+        /// the situation and names the way forward instead of offering Retry.
+        case unsupportedByEngine
         /// The selected group genuinely has no nodes.
         case empty
         /// A group was never selected, so no nodes were requested.
@@ -154,6 +168,9 @@ final class AppModel {
     /// stale config, because nothing else can be determined until it answers.
     var proxyListState: ProxyListState {
         if shouldShowBackendDown { return .backendUnavailable }
+        // Checked before `failed`: capability outranks a past failure, because
+        // a retry cannot resolve it and the screen must not offer one.
+        if !proxiesSupported { return .unsupportedByEngine }
         if let _ = proxyError, proxies.isEmpty, !proxiesLoading { return .failed }
         if proxiesLoading && proxies.isEmpty { return .loading }
         if core?.state != .running { return .coreStopped }
@@ -577,11 +594,15 @@ final class AppModel {
             let list = try await client.proxies(group: target)
             apply(list)
         } catch {
-            // Recorded separately from `lastError` so the Proxies screen can
-            // explain its own failure inline instead of only raising a banner
-            // on Home. Both are set: the banner is the cross-screen signal.
+            // Feature-level by policy: recorded for THIS screen to explain
+            // inline, and deliberately NOT copied into `lastError`.
+            //
+            // A proxy read failing is not a whole-product failure. Promoting it
+            // to the global banner is what put "cannot read the proxies of
+            // group …" on Home, where it displaced the core and config status a
+            // user actually needs and offered no action. Home shows only
+            // blocking conditions; this stays here.
             proxyError = error.localizedDescription
-            lastError = error.localizedDescription
         }
     }
 
@@ -595,6 +616,11 @@ final class AppModel {
             let list = try await client.proxyGroups()
             groups = list.groups
             proxiesAvailable = list.available
+            // A capability answer, not a failure: recorded so the screen can
+            // explain it, and it outranks a stale error from an earlier attempt.
+            proxiesSupported = list.isSupported
+            proxiesUnsupportedReason = list.unsupported_reason
+            if list.isSupported { proxyError = nil }
 
             // Prefer the config's default group, then the first one, then
             // wherever we already were — but only keep a remembered group if
@@ -605,8 +631,9 @@ final class AppModel {
                 selectedGroup = list.group ?? list.groups.first?.name ?? ""
             }
         } catch {
+            // Same policy as loadProxies: this screen's own failure, not a
+            // product-level one. See the note there.
             proxyError = error.localizedDescription
-            lastError = error.localizedDescription
             return
         }
 
@@ -623,7 +650,6 @@ final class AppModel {
             apply(nodes)
         } catch {
             proxyError = error.localizedDescription
-            lastError = error.localizedDescription
         }
     }
 
@@ -675,6 +701,10 @@ final class AppModel {
         }
         if let g = list.group, !g.isEmpty { selectedGroup = g }
         proxiesAvailable = list.available
+        // The node read carries the same capability answer as the group read,
+        // so a `get_proxies` reply must not leave a stale "supported" behind.
+        proxiesSupported = list.isSupported
+        proxiesUnsupportedReason = list.unsupported_reason
     }
 
     // MARK: - Subscriptions
@@ -1297,7 +1327,12 @@ final class AppModel {
                 // The proxy list only exists while the core is up. Without this
                 // the Proxies screen would keep saying "start the core" after
                 // the user did exactly that, because nothing else reloads it.
-                if status.state == .running && !wasRunning {
+                //
+                // Gated on capability: on an engine that cannot list proxies
+                // this request is guaranteed to fail, and firing it anyway
+                // produced a failure on every core start — noise that looked
+                // like a defect in the app rather than a limit of the engine.
+                if status.state == .running && !wasRunning && proxiesSupported {
                     await loadGroups()
                 }
             }

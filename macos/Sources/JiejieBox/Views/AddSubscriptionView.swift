@@ -18,7 +18,7 @@ struct AddSubscriptionView: View {
     var body: some View {
         PanelScaffold(model: model, title: L.addSubscriptionTitle.tr(language),
                       onBack: { model.goBack() }) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
                 MenuSection("Address") {
                     LabeledField(label: "URL",
                                  placeholder: "https://example.com/subscribe",
@@ -54,7 +54,8 @@ struct AddSubscriptionView: View {
                 }
                 .padding(.horizontal, Metrics.rowPaddingH)
             }
-            .padding(.vertical, 10)
+            .padding(.top, Metrics.contentTopPadding)
+            .padding(.bottom, Metrics.contentBottomPadding)
         }
     }
 

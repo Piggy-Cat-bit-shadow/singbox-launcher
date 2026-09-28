@@ -246,13 +246,26 @@ struct ProxiesView: View {
                 detail: L.coreNotRunningDetail.tr(language),
                 tone: .neutral)
 
+        case .unsupportedByEngine:
+            // An explanation, NOT an error: no user action changes an engine
+            // capability, so there is deliberately no Retry. Offering one would
+            // promise a fix that cannot happen.
+            ProxyNotice(
+                symbol: "info.circle",
+                title: L.proxiesUnsupportedTitle.tr(language),
+                detail: model.proxiesUnsupportedReason == "daemon_no_group_rpc"
+                    ? L.proxiesUnsupportedDaemon.tr(language)
+                    : L.proxiesUnsupportedGeneric.tr(language),
+                tone: .neutral,
+                action: (L.coreMode.tr(language), { model.path.append(.coreMode) }))
+
         case .failed:
             ProxyNotice(
                 symbol: "exclamationmark.triangle",
-                title: "Could not load proxies",
-                detail: model.proxyError ?? "The backend did not answer.",
+                title: L.couldNotLoadProxies.tr(language),
+                detail: model.proxyError ?? L.backendDidNotAnswer.tr(language),
                 tone: .error,
-                action: ("Try Again", { Task { await model.loadGroups() } }))
+                action: (L.tryAgain.tr(language), { Task { await model.loadGroups() } }))
 
         case .configStale:
             // The offered action depends on who owns the config. Pointing an
@@ -288,13 +301,13 @@ struct ProxiesView: View {
                     ? (L.openSubscriptions.tr(language), { model.path.append(.subscriptions) })
                     : (model.configRebuildable
                         ? (L.reloadConfigAction.tr(language), { reloadConfig() })
-                        : ("Open Config", { model.revealConfig() })))
+                        : (L.openConfigPlain.tr(language), { model.revealConfig() })))
 
         case .noGroupSelected:
             ProxyNotice(
                 symbol: "square.stack.3d.up",
-                title: "No group selected",
-                detail: "Choose a selector group above.",
+                title: L.noGroupSelected.tr(language),
+                detail: L.chooseGroupAbove.tr(language),
                 tone: .neutral)
 
         case .empty:

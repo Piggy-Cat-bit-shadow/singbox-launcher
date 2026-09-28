@@ -69,34 +69,63 @@ func (b *Backend) ProxyGroups() (protocol.ProxyList, error) {
 
 	transport, available := b.transport()
 	groups := make([]protocol.ProxyGroup, 0, len(names))
+	// Set once the engine reports it has no group capability at all. Checked
+	// after the first group so a single capability probe is enough, and kept
+	// for the whole loop so the remaining groups are not asked again.
+	unsupported := false
 	for _, name := range names {
 		g := protocol.ProxyGroup{
 			Name:        name,
 			DisplayName: name,
 		}
-		if transport != nil {
+		if transport != nil && !unsupported {
 			// A failure here is not fatal: the group is still switchable, we
-			// just cannot report its current node yet.
-			if proxies, now, gerr := transport.GroupProxies(name); gerr == nil {
+			// just cannot report its current node yet — EXCEPT when the engine
+			// cannot list proxies at all, which is a capability answer that
+			// belongs in the response rather than in a log line.
+			proxies, now, gerr := transport.GroupProxies(name)
+			switch {
+			case gerr == nil:
 				g.Count = len(proxies)
 				g.Selected = now
 				g.SelectedDisplay = now
 				if g.Type == "" {
 					g.Type = groupTypeOf(proxies, now)
 				}
-			} else {
+			case errors.Is(gerr, coreservices.ErrProxyListUnsupported):
+				unsupported = true
+				debuglog.InfoLog("proxy groups: the active engine cannot list proxies")
+			default:
 				debuglog.DebugLog("proxy groups: cannot read group %q: %v", name, gerr)
 			}
 		}
 		groups = append(groups, g)
 	}
 
+	// An engine that cannot list proxies reports no live counts. The group
+	// NAMES still come from the config, so the picker is populated and the user
+	// can see what the config defines — they simply cannot be probed here.
+	available = available && !unsupported
+
 	return protocol.ProxyList{
-		Groups:    groups,
-		Proxies:   []protocol.Proxy{},
-		Group:     defaultGroup,
-		Available: available,
+		Groups:            groups,
+		Proxies:           []protocol.Proxy{},
+		Group:             defaultGroup,
+		Available:         available,
+		Supported:         protocol.BoolPtr(!unsupported),
+		UnsupportedReason: unsupportedReason(unsupported),
 	}, nil
+}
+
+// unsupportedReason names why the engine cannot list proxies, or "" when it can.
+//
+// A machine-readable token rather than prose: the frontend owns the wording, so
+// the backend does not have to ship translated strings for a UI concern.
+func unsupportedReason(unsupported bool) string {
+	if !unsupported {
+		return ""
+	}
+	return "daemon_no_group_rpc"
 }
 
 // groupTypeOf reports the Clash type of the selected node, falling back to the
@@ -143,6 +172,7 @@ func (b *Backend) Proxies(group string) (protocol.ProxyList, error) {
 				Groups:    []protocol.ProxyGroup{},
 				Proxies:   []protocol.Proxy{},
 				Available: false,
+				Supported: protocol.BoolPtr(true),
 			}, nil
 		}
 	}
@@ -152,16 +182,32 @@ func (b *Backend) Proxies(group string) (protocol.ProxyList, error) {
 		// The group is known but there is no way to read it yet. This is the
 		// normal "core is stopped" case, so it is reported as unavailable
 		// rather than as an error the user cannot act on.
+		// Supported but not up yet: "start the core" is the next step, which is
+		// a different screen from "this engine cannot do it".
 		return protocol.ProxyList{
 			Groups:    []protocol.ProxyGroup{},
 			Proxies:   []protocol.Proxy{},
 			Group:     group,
 			Available: false,
+			Supported: protocol.BoolPtr(true),
 		}, nil
 	}
 
 	infos, selected, err := transport.GroupProxies(group)
 	if err != nil {
+		// The engine has no group capability. Reported as a capability, not as
+		// a failure: an error here produced a red banner naming an internal RPC
+		// the user has no way to act on.
+		if errors.Is(err, coreservices.ErrProxyListUnsupported) {
+			return protocol.ProxyList{
+				Groups:            []protocol.ProxyGroup{},
+				Proxies:           []protocol.Proxy{},
+				Group:             group,
+				Available:         false,
+				Supported:         protocol.BoolPtr(false),
+				UnsupportedReason: unsupportedReason(true),
+			}, nil
+		}
 		if errors.Is(err, api.ErrPlatformInterrupt) {
 			return protocol.ProxyList{}, &protocol.Error{
 				Code:        "interrupted",
@@ -193,11 +239,16 @@ func (b *Backend) Proxies(group string) (protocol.ProxyList, error) {
 		})
 	}
 
+	// Reaching here means the engine answered with nodes, so it demonstrably
+	// supports this. Stated explicitly rather than left absent: the frontend
+	// reads an absent value as "assume supported", which is the right default
+	// for an older backend but should not be how the CURRENT backend answers.
 	return protocol.ProxyList{
 		Groups:    []protocol.ProxyGroup{},
 		Proxies:   proxies,
 		Group:     group,
 		Available: true,
+		Supported: protocol.BoolPtr(true),
 	}, nil
 }
 

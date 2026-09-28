@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -281,6 +282,116 @@ func TestSwiftLocalizationTableIsTotal(t *testing.T) {
 	}
 	check("en", src[enAt:zhAt])
 	check("zhHans", src[zhAt:])
+}
+
+// TestSwiftSpacingRhythmIsMonotonic — the three grouping gaps must stay
+// distinct and correctly ordered.
+//
+// The whole page rhythm rests on three steps:
+//
+//	rowGap (within a group) < headerToRowGap (header to its own rows)
+//	                        < groupSpacing (between groups)
+//
+// If two of them become equal the grouping stops being legible, and if the
+// order inverts the header visually detaches from the rows it labels and joins
+// the section above it. Neither failure throws or logs — the page just looks
+// slightly wrong — which is exactly why it needs a guard.
+func TestSwiftSpacingRhythmIsMonotonic(t *testing.T) {
+	src := swiftSource(t, "Views", "Typography.swift")
+
+	// The gaps live in Typography.swift; rowHeight still lives in MenuRow.swift.
+	values := map[string]float64{}
+	for _, name := range []string{"headerToRowGap", "groupSpacing", "contentTopPadding", "contentBottomPadding"} {
+		re := regexp.MustCompile(name + `(?:: CGFloat)? = (\d+)`)
+		m := re.FindStringSubmatch(src)
+		if m == nil {
+			t.Errorf("cannot find Metrics.%s in Typography.swift", name)
+			continue
+		}
+		var v float64
+		if _, err := fmt.Sscanf(m[1], "%f", &v); err == nil {
+			values[name] = v
+		}
+	}
+	rowSrc := swiftSource(t, "Views", "MenuRow.swift")
+	if m := regexp.MustCompile(`rowGap(?:: CGFloat)? = (\d+)`).FindStringSubmatch(src); m != nil {
+		var v float64
+		_, _ = fmt.Sscanf(m[1], "%f", &v)
+		values["rowGap"] = v
+	}
+	if m := regexp.MustCompile(`rowHeight: CGFloat = (\d+)`).FindStringSubmatch(rowSrc); m != nil {
+		var v float64
+		_, _ = fmt.Sscanf(m[1], "%f", &v)
+		values["rowHeight"] = v
+	}
+
+	need := []string{"rowGap", "headerToRowGap", "groupSpacing", "rowHeight"}
+	for _, n := range need {
+		if _, ok := values[n]; !ok {
+			t.Fatalf("cannot determine Metrics.%s; the spacing tokens have been renamed", n)
+		}
+	}
+
+	if !(values["rowGap"] < values["headerToRowGap"]) {
+		t.Errorf("rowGap (%.0f) must be smaller than headerToRowGap (%.0f)",
+			values["rowGap"], values["headerToRowGap"])
+	}
+	if !(values["headerToRowGap"] < values["groupSpacing"]) {
+		t.Errorf("headerToRowGap (%.0f) must be smaller than groupSpacing (%.0f), "+
+			"or a header sits as far from its own rows as from the previous section",
+			values["headerToRowGap"], values["groupSpacing"])
+	}
+	// A row must stay a comfortable target even after compaction.
+	if values["rowHeight"] < 30 {
+		t.Errorf("rowHeight = %.0f, below the 30pt floor: compaction must not "+
+			"shrink the click target", values["rowHeight"])
+	}
+}
+
+// TestSwiftPagesUseTheSpacingTokens — a PAGE must not invent its own rhythm.
+//
+// The pages are the views that sit directly under PanelScaffold and stack
+// MenuSections. Each one has exactly one such stack, and it must use
+// Metrics.groupSpacing: that single value is what makes section-to-section
+// distance identical on every screen. When pages chose their own (8 here, 14
+// there, 10 elsewhere) the panel read as a set of unrelated screens.
+//
+// Deliberately NOT a blanket check on every VStack: a title-over-subtitle pair
+// is legitimately spacing 1, and flagging those would bury the real signal in
+// noise — the failure mode that gets a guard disabled.
+func TestSwiftPagesUseTheSpacingTokens(t *testing.T) {
+	pages := []string{
+		"MoreView.swift", "HomeView.swift", "SubscriptionsView.swift",
+		"ProxiesView.swift", "CoreDetailsView.swift", "CoreModeView.swift",
+		"DaemonView.swift", "DaemonPairView.swift", "AddSubscriptionView.swift",
+		"EditSubscriptionView.swift", "AboutView.swift",
+	}
+	sources := swiftViewSources(t)
+	// A page stack is the one that directly contains MenuSection calls.
+	reStack := regexp.MustCompile(`VStack\(alignment: \.leading, spacing: (\d+)\)`)
+
+	for _, name := range pages {
+		src, ok := sources[name]
+		if !ok {
+			t.Errorf("page %s not found", name)
+			continue
+		}
+		for i, line := range strings.Split(src, "\n") {
+			if !reStack.MatchString(line) {
+				continue
+			}
+			// Only a stack whose own body opens a MenuSection is a page stack.
+			rest := strings.Join(strings.Split(src, "\n")[i:min(i+6, len(strings.Split(src, "\n")))], "\n")
+			if !strings.Contains(rest, "MenuSection(") {
+				continue
+			}
+			if !strings.Contains(line, "Metrics.groupSpacing") {
+				t.Errorf("%s:%d page section stack uses a hardcoded spacing (%s); "+
+					"use Metrics.groupSpacing so every page shares one rhythm",
+					name, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
 }
 
 // TestSwiftLanguageIsNotInferredFromText — the language must come from the

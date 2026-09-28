@@ -558,6 +558,14 @@ enum L: CaseIterable {
     case enabledHelp
     case disabledHelp
 
+    // Proxy capability (engine cannot list proxies)
+    case proxiesUnsupportedTitle
+    case proxiesUnsupportedDaemon
+    case proxiesUnsupportedGeneric
+    case noGroupSelected
+    case chooseGroupAbove
+    case openConfigPlain
+
     // Frontend status messages (AppModel)
     case launchAtLoginEnabled
     case launchAtLoginDisabled
@@ -915,6 +923,13 @@ extension L {
         case .enabledHelp: return "Enabled. Click to exclude it from the built config."
         case .disabledHelp: return "Disabled. Click to include it again."
 
+        case .proxiesUnsupportedTitle: return "Proxy list unavailable"
+        case .proxiesUnsupportedDaemon: return "The daemon engine that is running does not provide the proxy group list, so nodes cannot be listed or switched here. JiejieBox is not reporting an error — this engine simply has no such capability. Switch to Classic mode on the Core Mode screen to manage proxies."
+        case .proxiesUnsupportedGeneric: return "The active engine does not provide a proxy group list, so nodes cannot be listed or switched here. This is an engine capability, not a failure."
+        case .noGroupSelected: return "No group selected"
+        case .chooseGroupAbove: return "Choose a selector group above."
+        case .openConfigPlain: return "Open Config"
+
         case .launchAtLoginEnabled: return "Launch at Login enabled."
         case .launchAtLoginDisabled: return "Launch at Login disabled."
         case .daemonPaired: return "Service paired."
@@ -1251,7 +1266,6 @@ extension L {
         case .clearSearch: return "清除搜索。"
         case .coreNotRunning: return "内核未运行"
         case .coreNotRunningDetail: return "启动内核后即可载入、测试和切换节点。"
-        case .couldNotLoadProxies: return "无法载入代理"
         case .backendDidNotAnswer: return "后端没有响应。"
         case .subscriptionsChangedReload: return "订阅已变化，节点列表已过期。"
         case .noSelectorGroups: return "没有代理分组"
@@ -1261,6 +1275,14 @@ extension L {
         case .groupCountHelp: return "个分组可用。"
         case .enabledHelp: return "已启用。点击可将其排除在生成的配置之外。"
         case .disabledHelp: return "已停用。点击可重新启用。"
+
+        case .proxiesUnsupportedTitle: return "无法读取代理列表"
+        case .proxiesUnsupportedDaemon: return "正在运行的守护进程内核不提供代理分组列表，因此这里无法列出或切换节点。这不是出错，而是该内核本身没有这项能力。如需管理代理，请在「内核模式」中切换到经典模式。"
+        case .proxiesUnsupportedGeneric: return "当前使用的内核不提供代理分组列表，因此这里无法列出或切换节点。这是内核能力所限，并非故障。"
+        case .couldNotLoadProxies: return "无法载入代理"
+        case .noGroupSelected: return "未选择分组"
+        case .chooseGroupAbove: return "请在上方选择一个分组。"
+        case .openConfigPlain: return "打开配置"
 
         case .launchAtLoginEnabled: return "已开启开机启动。"
         case .launchAtLoginDisabled: return "已关闭开机启动。"

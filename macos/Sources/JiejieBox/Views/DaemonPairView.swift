@@ -21,7 +21,7 @@ struct DaemonPairView: View {
     var body: some View {
         PanelScaffold(model: model, title: L.pairService.tr(language),
                       onBack: { model.goBack() }) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
                 MenuSection(L.pairing.tr(language)) {
                     LabeledField(label: L.inviteFormat.tr(language),
                                  placeholder: "address#fingerprint#code",
@@ -89,7 +89,8 @@ struct DaemonPairView: View {
                 }
                 .padding(.horizontal, Metrics.rowPaddingH)
             }
-            .padding(.vertical, 10)
+            .padding(.top, Metrics.contentTopPadding)
+            .padding(.bottom, Metrics.contentBottomPadding)
         }
         // A successful pair returns to the Daemon screen, which now shows the
         // updated status — the point of pairing is to change that page.

@@ -88,19 +88,32 @@ extension Metrics {
     /// diverge.
     static var sectionHeaderInset: CGFloat { rowPaddingH }
     /// Gap between a section header and its first row.
-    static let headerToRowGap: CGFloat = 4
+    ///
+    /// Tight (3pt) and deliberately smaller than `groupSpacing`: the header
+    /// belongs to the rows UNDER it, so it must sit closer to them than the
+    /// previous section's content sits to it. When the two values were equal the
+    /// page had no readable grouping — every gap looked the same size, so the
+    /// eye had nothing to group by.
+    static let headerToRowGap: CGFloat = 3
     /// Gap between rows inside one section.
     ///
     /// 2, not 0: rows draw a hover/selection background, and at 0 the rounded
     /// corners of adjacent rows touch, which reads as one tall block.
     static let rowGap: CGFloat = 2
-    /// Gap between sections. Larger than `rowGap` so grouping is visible without
-    /// a divider per row.
-    static let groupSpacing: CGFloat = 14
+    /// Gap between sections.
+    ///
+    /// The rhythm, from smallest to largest: `rowGap` (2, within a group) <
+    /// `headerToRowGap` (3, header to its own rows) < `groupSpacing` (11,
+    /// between groups). Three distinct steps are what makes the grouping
+    /// legible without a divider or a card behind every section.
+    static let groupSpacing: CGFloat = 11
     /// Top padding of page content, below the header divider.
-    static let contentTopPadding: CGFloat = 10
+    static let contentTopPadding: CGFloat = 8
     /// Bottom padding, so the last row is not flush against the panel edge.
-    static let contentBottomPadding: CGFloat = 12
+    /// Smaller than the old 12 for the same reason as the top: the panel is a
+    /// fixed-height menu bar surface, so every point of end padding is a point
+    /// of content the user has to scroll for.
+    static let contentBottomPadding: CGFloat = 10
     /// Leading icon column width. Fixed so titles line up across rows whether or
     /// not a row has an icon.
     static let iconColumn: CGFloat = 18

@@ -1,10 +1,28 @@
 package services
 
 import (
+	"errors"
 	"fmt"
 
 	"singbox-launcher/api"
 )
+
+// ErrProxyListUnsupported reports that the ACTIVE ENGINE cannot list proxies at
+// all — not that a particular read failed.
+//
+// The distinction matters because the two need opposite UI treatment. A failed
+// read is an error the user can retry; an unsupported capability is a fact about
+// the engine that retrying will never change, so showing it as a red error
+// banner blames the user for something they cannot act on and hides the step
+// that would actually help.
+//
+// The concrete case: a daemon built without the group RPC answers
+// codes.Unimplemented. The launcher's proto declares GetGroups, so the call
+// compiles and the transport looks healthy right up to the moment the daemon
+// says it has never heard of the method. Detecting it here — at the only layer
+// that talks to the daemon — is what lets every caller above treat it as a
+// capability rather than a failure.
+var ErrProxyListUnsupported = errors.New("the active engine does not support listing proxies")
 
 // ProxyTransport abstracts the wire used for proxy-group operations. The
 // classic engine talks to the Clash HTTP API embedded in the running core;

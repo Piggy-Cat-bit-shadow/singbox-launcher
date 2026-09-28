@@ -24,14 +24,15 @@ struct HomeView: View {
 
     var body: some View {
         PanelScaffold(model: model, title: "JiejieBox") {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
                 statusCard
                 banners
                 runtimeSection
                 networkSection
                 navigationSection
             }
-            .padding(.vertical, 10)
+            .padding(.top, Metrics.contentTopPadding)
+            .padding(.bottom, Metrics.contentBottomPadding)
         }
     }
 

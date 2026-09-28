@@ -260,7 +260,7 @@ first" instead of showing a broken empty list.
 | `mode_locked` | yes | Core is running; stop it before switching engines |
 | `core_not_running` | yes | Start the core before switching/testing proxies |
 | `config_unreadable` | yes | config.json missing or unparsable |
-| `proxy_list_failed` | yes | The Clash API could not be read |
+| `proxy_list_failed` | yes | The Clash API could not be read. NOT used for an engine that cannot list proxies — that is reported as `supported: false` in a successful `ProxyList` |
 | `switch_failed` | yes | The core refused the switch |
 | `rebuild_failed` | yes | Config rebuild failed |
 | `update_failed` | yes | Subscription refresh failed |

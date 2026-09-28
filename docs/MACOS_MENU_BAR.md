@@ -171,6 +171,25 @@ migrated or rewritten on first launch. The bundle identifier stays
   screen walks those steps one at a time and only offers "Use Daemon Mode" once
   status says ready. Privileged steps open Terminal, so a `sudo` prompt never
   looks like a frozen app.
+- **Proxy listing depends on the engine, and says so.** The Proxies screen reads
+  groups and nodes through whichever transport the active engine provides:
+  `ClashTransport` (HTTP to the core) in classic mode, `daemonProxyTransport`
+  (gRPC) in daemon mode. A daemon built without the group RPC answers
+  `Unimplemented`; that is a CAPABILITY, not a failure, and it is reported as
+  `supported: false` with a reason rather than as an error. The screen then
+  explains the limit and points at Core Mode instead of offering a Retry that
+  could never succeed. See [PROXY_DAEMON_AUDIT.md](PROXY_DAEMON_AUDIT.md).
+
+  Three states are kept apart, because they need three different screens:
+  `supported=false` (engine cannot), `supported=true, available=false` (engine is
+  not up), and `supported=true, available=true` with an empty list (no nodes).
+- **Errors are graded by what the user can do about them.** Home shows only
+  blocking conditions — core start/stop failure, unreadable config, backend
+  unavailable, missing or incompatible core binary. Feature-level failures
+  (a proxy read, a latency test, a subscription refresh) stay on the screen they
+  belong to and carry their own Retry. The mechanism is that `lastError` is the
+  Home banner and the background/derived loaders do not write to it; nothing is
+  suppressed, since the owning screen still shows the message.
 - **Requests are time-bounded.** Every backend call has a per-method timeout, so
   a lost response surfaces as "Operation timed out" rather than a button stuck
   on "Updating…" forever.

@@ -48,7 +48,7 @@ struct EditSubscriptionView: View {
 
     @ViewBuilder
     private func content(_ sub: Subscription) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
             MenuSection(L.status.tr(language)) {
                 DetailLine(label: L.status.tr(language), value: sub.statusSummary(language),
                            tone: sub.hasError ? .error : .normal)

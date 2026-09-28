@@ -17,7 +17,7 @@ struct SubscriptionsView: View {
     var body: some View {
         PanelScaffold(model: model, title: L.subscriptions.tr(language),
                       onBack: { model.goBack() }) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
                 if model.shouldShowBackendDown {
                     // The list is unknown, not empty: do not report "No
                     // Subscriptions" for a backend that never answered.
@@ -59,7 +59,8 @@ struct SubscriptionsView: View {
                         .padding(.horizontal, Metrics.rowPaddingH)
                 }
             }
-            .padding(.vertical, 8)
+            .padding(.top, Metrics.contentTopPadding)
+            .padding(.bottom, Metrics.contentBottomPadding)
         }
         .task { await model.loadSubscriptions() }
     }
