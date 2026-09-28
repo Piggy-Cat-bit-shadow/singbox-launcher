@@ -90,7 +90,23 @@ func (s *Server) failConnection(reason string) {
 // Called only AFTER the shutdown ACK has been written, so the client is never
 // left waiting for a reply that a stopping loop will not send.
 func (s *Server) requestStop() {
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.stopOnce.Do(func() {
+		// CANCEL IN-FLIGHT WORK, THEN ASK THE LOOP TO FINISH.
+		//
+		// Cancelling here, not only in `failConnection`, is what makes `drain`'s wait an
+		// orderly one. On a normal shutdown the connection is still healthy, so nothing
+		// had cancelled the handlers: a request blocked in a network sweep would run to
+		// completion while `drain` waited out its timeout and then gave up, logging that
+		// "a handler is still running and its reply will be lost" and leaving the goroutine
+		// alive against a connection the caller had already closed. The client's own
+		// shutdown timer then fired while the helper was still running, and the next launch
+		// found two processes.
+		//
+		// The context is per-connection and this is the last thing the connection will do,
+		// so cancelling it here cannot affect a later request.
+		s.connCancel()
+		close(s.stopCh)
+	})
 }
 
 // Stopped reports whether the read loop has been asked to finish.
@@ -232,7 +248,19 @@ func (s *Server) Serve(in io.Reader) {
 		s.inflight.Add(1)
 		go func(req protocol.Request) {
 			defer s.inflight.Done()
-			resp := s.handle(req)
+			// THE REQUEST RUNS UNDER THE CONNECTION'S CONTEXT.
+			//
+			// `connCtx` was stored, documented as the thing that abandons in-flight work,
+			// and read by nobody — so a request that outlived its client could not be told
+			// about it. `drain()` could only wait out its timeout, log "a handler is still
+			// running and its reply will be lost", and leave the goroutine computing a
+			// reply for a pipe that is gone; the client's shutdown timer then fires while
+			// the helper is still alive, and the next launch finds two processes.
+			//
+			// Passing it in makes cancellation a mechanism instead of a comment.
+			ctx, cancel := context.WithCancel(s.connCtx)
+			defer cancel()
+			resp := s.handleCtx(ctx, req)
 			// A zero ID means the handler already wrote its own response (the
 			// shutdown ACK). Every other path sets the ID from the request.
 			if resp.ID != "" {
@@ -290,7 +318,21 @@ func (s *Server) drain() {
 // that one must be flushed before a teardown which may exit the process, so the
 // handler writes it itself and returns a zero-ID response as the signal that
 // there is nothing left to send.
+// handle executes one request under the connection's context.
+//
+// The entry point the tests and the dispatcher share: a request always runs under the
+// connection it arrived on, so there is no way to invoke a handler outside that lifetime.
 func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
+	ctx, cancel := context.WithCancel(s.connCtx)
+	defer cancel()
+	return s.handleCtx(ctx, req)
+}
+
+// handleCtx executes one request under an explicit context.
+//
+// The context is the connection's, so a client that has gone away — or a shutdown that has
+// begun — cancels the work instead of leaving it to produce a reply nobody will read.
+func (s *Server) handleCtx(ctx context.Context, req protocol.Request) (resp protocol.Response) {
 	defer func() {
 		if r := recover(); r != nil {
 			debuglog.ErrorLog("backend ipc: panic in %s: %v\n%s", req.Method, r, debug.Stack())
@@ -400,7 +442,7 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		// gap it left: a frontend that went away left the group test running to its
 		// full network budget with nobody to receive the progress or the result, and
 		// the backend holding a worker pool against a client that no longer exists.
-		result, err := s.backend.RunGroupTest(s.connCtx, group)
+		result, err := s.backend.RunGroupTest(ctx, group)
 		if err != nil {
 			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
 		}
