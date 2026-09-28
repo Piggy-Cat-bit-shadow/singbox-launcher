@@ -156,10 +156,10 @@ func (ac *AppController) logCoreResolution() {
 		shadowed = "?"
 	}
 	kind := platform.CoreSourceApp
-	if filepath.Clean(fs.ShadowedCorePath) == filepath.Clean(filepath.Join(fs.Layout.Data.Bin(), platform.GetExecutableNames())) {
+	if filepath.Clean(shadowedPath) == filepath.Clean(filepath.Join(fs.Layout.Data.Bin(), platform.GetExecutableNames())) {
 		kind = platform.CoreSourceData
 	}
-	debuglog.WarnLog("core: %s %s shadows %s %s (%s)", src, cur, kind, shadowed, fs.ShadowedCorePath)
+	debuglog.WarnLog("core: %s %s shadows %s %s (%s)", src, cur, kind, shadowed, shadowedPath)
 }
 
 // sameCoreFile — один и тот же файл: по очищенному пути или, если оба

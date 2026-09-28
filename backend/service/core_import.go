@@ -128,7 +128,9 @@ func (b *Backend) ImportCoreFile(path string) (CoreImportResult, error) {
 	// §34: if an environment override is active, installing into the Data core
 	// would not change the core that actually runs. Refuse rather than install a
 	// binary the user believes is in use.
-	if b.ac.FileService.CoreSource == string(platform.CoreSourceEnv) {
+	// Through the accessor: a concurrent ResolveCore (a core download) writes this field,
+	// and reading it directly is a data race.
+	if b.ac.FileService.CoreSourceName() == string(platform.CoreSourceEnv) {
 		return CoreImportResult{}, &protocol.Error{
 			Code: "core_override_active",
 			Message: "SINGBOX_LAUNCHER_CORE currently overrides the Data core. " +
@@ -418,11 +420,40 @@ func stageCoreBinary(src, target string) (string, func(), error) {
 	}
 	defer func() { _ = in.Close() }()
 
-	if _, err := io.Copy(tmp, in); err != nil {
+	// THE BOUND IS ENFORCED ON THE COPY, WHERE THE BYTES ACTUALLY FLOW.
+	//
+	// `validateCoreCandidate` already compared `Stat().Size()` against the limit, but that
+	// check and this copy are two separate steps over a file the user controls, so anything
+	// the check was for can be defeated in the window between them: the file can grow after
+	// `Stat` (a build still writing, a download in progress), or the path can be replaced
+	// with a larger file between `Stat` and `Open`.
+	//
+	// The consequence is not corruption but exhaustion — the staging file lives in the data
+	// directory, so an unbounded copy fills the user's disk during an operation whose own
+	// error message promises a 256 MB limit.
+	//
+	// ONE BYTE MORE than the limit, deliberately. A limiter set to exactly the maximum
+	// cannot tell "exactly at the limit" from "truncated at the limit", so an oversized file
+	// would be copied and installed SILENTLY TRUNCATED — a corrupt binary that fails in ways
+	// pointing nowhere near the import. Reading the extra byte makes the overflow detectable
+	// and turns it into the error the user can act on.
+	written, err := io.Copy(tmp, io.LimitReader(in, maxCoreFileBytes+1))
+	if err != nil {
 		_ = tmp.Close()
 		cleanup()
 		return "", func() {}, &protocol.Error{
 			Code: "install_failed", Message: "cannot copy the core: " + err.Error(), Recoverable: true,
+		}
+	}
+	if written > maxCoreFileBytes {
+		_ = tmp.Close()
+		cleanup()
+		return "", func() {}, &protocol.Error{
+			Code: "file_too_large",
+			Message: fmt.Sprintf("the selected file grew past the %d MB limit while it was "+
+				"being copied (at least %d MB read). Choose a file that is not still being "+
+				"written.", maxCoreFileBytes>>20, written>>20),
+			Recoverable: false,
 		}
 	}
 	// Flush before the rename so a crash cannot leave a renamed-but-empty file.

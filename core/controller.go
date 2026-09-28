@@ -638,11 +638,11 @@ func CheckLinuxCapabilities() {
 	if ac == nil {
 		return
 	}
-	if suggestion := platform.CheckAndSuggestCapabilities(ac.FileService.SingboxPath); suggestion != "" {
+	if suggestion := platform.CheckAndSuggestCapabilities(ac.FileService.CoreBinaryPath()); suggestion != "" {
 		debuglog.InfoLog("CheckLinuxCapabilities: %s", suggestion)
 		// Show dialog with selectable command and Copy button (issue #34)
 		if ac.hasUI() {
-			cmd := platform.GetSetCapCommand(ac.FileService.SingboxPath)
+			cmd := platform.GetSetCapCommand(ac.FileService.CoreBinaryPath())
 			ac.uiPort.ShowCommandNeedsTerminal("Linux Capabilities", suggestion, cmd)
 		}
 	}

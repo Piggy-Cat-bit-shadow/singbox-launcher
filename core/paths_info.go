@@ -18,11 +18,16 @@ func (ac *AppController) PathsInfo() paths.PathsInfo {
 		return paths.PathsInfo{}
 	}
 	fs := ac.FileService
+	// ONE snapshot for all four values. They are the pieces of a single resolution, and a
+	// concurrent ResolveCore between two of these reads would describe a core that never
+	// existed — the new path attributed to the old source, or a wintun path belonging to a
+	// different core than the one reported.
+	path, source, shadowed, wintun := fs.CoreResolutionFull()
 	info := pathsInfo(fs.Layout, platform.CoreResolution{
-		Path:     fs.SingboxPath,
-		Source:   fs.CoreSource,
-		Shadowed: fs.ShadowedCorePath,
-	}, fs.WintunPath, ac.knownCoreVersion())
+		Path:     path,
+		Source:   source,
+		Shadowed: shadowed,
+	}, wintun, ac.knownCoreVersion())
 	ac.fillRootCopyStatus(&info)
 	return info
 }

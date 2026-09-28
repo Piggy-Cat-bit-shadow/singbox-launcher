@@ -176,7 +176,7 @@ func rootCopyInstallCommand(src, dst string) string {
 // start sing-box». Нет ядра лаунчера — обычная ошибка старта.
 func (ac *AppController) privilegedCoreCopyGate() (string, error) {
 	l := systemDaemonServiceLayout()
-	c := checkPrivilegedCoreCopy(l, ac.FileService.SingboxPath, &daemonServiceHashes)
+	c := checkPrivilegedCoreCopy(l, ac.FileService.CoreBinaryPath(), &daemonServiceHashes)
 	switch c.State {
 	case privilegedCopyOK:
 		debuglog.DebugLog("startSingBox: privileged start from the root-owned copy %s (sha256 %s)", c.CorePath, shortSHA(c.CopySHA256))
@@ -185,7 +185,7 @@ func (ac *AppController) privilegedCoreCopyGate() (string, error) {
 		return "", errors.New(c.Detail)
 	}
 	version := ac.launcherCoreVersion()
-	command, viaService, cmdErr := privilegedCopyCommandFor(l, ac.FileService.SingboxPath, version)
+	command, viaService, cmdErr := privilegedCopyCommandFor(l, ac.FileService.CoreBinaryPath(), version)
 	var coreHint string
 	if cmdErr != nil {
 		coreHint = DaemonServiceCoreHint(version)
@@ -218,11 +218,11 @@ func (ac *AppController) notifyPrivilegedCopyAfterCoreUpdate() {
 	if daemonServiceDefined(l) {
 		return
 	}
-	c := checkPrivilegedCoreCopy(l, ac.FileService.SingboxPath, &daemonServiceHashes)
+	c := checkPrivilegedCoreCopy(l, ac.FileService.CoreBinaryPath(), &daemonServiceHashes)
 	if c.State != privilegedCopyOutdated {
 		return
 	}
-	command, _, err := privilegedCopyCommandFor(l, ac.FileService.SingboxPath, ac.launcherCoreVersion())
+	command, _, err := privilegedCopyCommandFor(l, ac.FileService.CoreBinaryPath(), ac.launcherCoreVersion())
 	if err != nil {
 		debuglog.WarnLog("core updated: the root-owned copy for the privileged (TUN) start is outdated (copy sha256 %s, launcher core sha256 %s); no command: %v",
 			c.CopySHA256, c.LauncherSHA256, err)

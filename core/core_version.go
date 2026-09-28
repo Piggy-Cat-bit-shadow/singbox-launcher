@@ -23,7 +23,7 @@ func (ac *AppController) GetInstalledCoreVersion() (string, error) {
 		return ac.installedCoreVersionCache, nil
 	}
 
-	v, err := coreVersionAt(ac.FileService.SingboxPath)
+	v, err := coreVersionAt(ac.FileService.CoreBinaryPath())
 	if err != nil {
 		return "", err
 	}
@@ -75,7 +75,7 @@ func ParseCoreVersionOutput(output string) string {
 
 // GetCoreBinaryPath возвращает путь к бинарнику sing-box для отображения.
 func (ac *AppController) GetCoreBinaryPath() string {
-	p := ac.FileService.SingboxPath
+	p := ac.FileService.CoreBinaryPath()
 	rel, err := filepath.Rel(string(ac.FileService.Layout.Data), p)
 	if err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
 		return rel

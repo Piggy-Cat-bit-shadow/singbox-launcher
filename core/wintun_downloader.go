@@ -42,7 +42,7 @@ func (ac *AppController) CheckWintunDLL() (bool, error) {
 		return true, nil // wintun is not needed on non-Windows systems
 	}
 
-	if _, err := os.Stat(ac.FileService.WintunPath); os.IsNotExist(err) {
+	if _, err := os.Stat(ac.FileService.WintunCompanionPath()); os.IsNotExist(err) {
 		return false, nil
 	}
 	return true, nil
@@ -64,7 +64,7 @@ func (ac *AppController) DownloadWintunDLL(ctx context.Context, progressChan cha
 
 	// 0. wintun.dll ложится рядом с выбранным ядром (SPEC 135 §3.3). Каталог
 	// не пишется — сказать причину сразу, до скачивания.
-	if coreDir := filepath.Dir(ac.FileService.WintunPath); dirExists(coreDir) && !paths.ProbeWritable(coreDir) {
+	if coreDir := filepath.Dir(ac.FileService.WintunCompanionPath()); dirExists(coreDir) && !paths.ProbeWritable(coreDir) {
 		msg := locale.T("The core folder is read-only; download the core into the data folder first")
 		debuglog.WarnLog("DownloadWintunDLL: %s is not writable", coreDir)
 		progressChan <- DownloadProgress{
@@ -198,7 +198,7 @@ func (ac *AppController) DownloadWintunDLL(ctx context.Context, progressChan cha
 	progressChan <- DownloadProgress{Progress: 90, Message: "Installing wintun.dll...", Status: "extracting"}
 
 	// Create bin directory if it doesn't exist
-	binDir := filepath.Dir(ac.FileService.WintunPath)
+	binDir := filepath.Dir(ac.FileService.WintunCompanionPath())
 	if err := os.MkdirAll(binDir, platform.DefaultDirMode); err != nil {
 		progressChan <- DownloadProgress{
 			Progress: 0,
@@ -222,7 +222,7 @@ func (ac *AppController) DownloadWintunDLL(ctx context.Context, progressChan cha
 	}
 	defer debuglog.RunAndLog(fmt.Sprintf("DownloadWintunDLL: close source file %s", dllPath), sourceFile.Close)
 
-	destFile, err := os.Create(ac.FileService.WintunPath)
+	destFile, err := os.Create(ac.FileService.WintunCompanionPath())
 	if err != nil {
 		progressChan <- DownloadProgress{
 			Progress: 0,
@@ -232,7 +232,7 @@ func (ac *AppController) DownloadWintunDLL(ctx context.Context, progressChan cha
 		}
 		return
 	}
-	defer debuglog.RunAndLog(fmt.Sprintf("DownloadWintunDLL: close destination file %s", ac.FileService.WintunPath), destFile.Close)
+	defer debuglog.RunAndLog(fmt.Sprintf("DownloadWintunDLL: close destination file %s", ac.FileService.WintunCompanionPath()), destFile.Close)
 
 	_, err = io.Copy(destFile, sourceFile)
 	if err != nil {

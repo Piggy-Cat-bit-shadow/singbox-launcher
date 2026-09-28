@@ -218,7 +218,7 @@ func (ac *AppController) DaemonFreshInvite() DaemonRunResult {
 // DaemonUninstallService — удаление службы в Terminal; keepCopy=false —
 // полное удаление («Remove all data…»).
 func (ac *AppController) DaemonUninstallService(keepCopy, purge bool) DaemonRunResult {
-	binary := daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.SingboxPath)
+	binary := daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath())
 	return ac.runDaemonOpInTerminal(DaemonOpUninstall, daemonUninstallCommandFor(binary, purge, keepCopy), nil)
 }
 
@@ -228,7 +228,7 @@ func (ac *AppController) DaemonUninstallService(keepCopy, purge bool) DaemonRunR
 // Гейта версии ядра нет: любое ядро лаунчера — включая кастомные сборки и
 // неразбираемые версии — получает команду.
 func (ac *AppController) DaemonCopyOnly() DaemonRunResult {
-	return ac.runDaemonOpInTerminal(DaemonOpCopy, daemonServiceCommand(ac.FileService.SingboxPath, "lxd", "--service=copy"), nil)
+	return ac.runDaemonOpInTerminal(DaemonOpCopy, daemonServiceCommand(ac.FileService.CoreBinaryPath(), "lxd", "--service=copy"), nil)
 }
 
 // runDaemonOpInTerminal — общий путь операций macOS: Terminal с командой.

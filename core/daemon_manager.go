@@ -597,7 +597,7 @@ func addDaemonProcessVerdict(check *DaemonServiceCheck, passport lxdclient.InfoD
 // launcherCoreVersion — версия ядра лаунчера для гейта команд службы
 // (кэш по идентичности файла); "" — ядра нет или версия не прочиталась.
 func (ac *AppController) launcherCoreVersion() string {
-	version, err := daemonCoreVersions.version(ac.FileService.SingboxPath)
+	version, err := daemonCoreVersions.version(ac.FileService.CoreBinaryPath())
 	if err != nil {
 		debuglog.DebugLog("daemon service: launcher core version: %v", err)
 		return ""
@@ -631,7 +631,7 @@ func (ac *AppController) DaemonUnsafeServiceNotice() (servicePath, command, core
 		return "", "", "", false
 	}
 	version := ac.launcherCoreVersion()
-	command, err := daemonInstallCommandFor(ac.FileService.SingboxPath, version)
+	command, err := daemonInstallCommandFor(ac.FileService.CoreBinaryPath(), version)
 	if err != nil {
 		coreHint = DaemonServiceCoreHint(version)
 		debuglog.WarnLog("daemon service is unsafe: %s — %v", check.Detail, err)
@@ -652,7 +652,7 @@ func (ac *AppController) DaemonUnsafeServiceNotice() (servicePath, command, core
 // (тег with_lx_command; присутствует в релизах форка как минимум с 1.14.0-lx.19 —
 // проверено на darwin-arm64 для lx.19..lx.25-rc.1; релиза lx.23 не существует).
 func (ac *AppController) CoreSupportsLxd() bool {
-	singbox := ac.FileService.SingboxPath
+	singbox := ac.FileService.CoreBinaryPath()
 	if _, err := os.Stat(singbox); err != nil {
 		return false
 	}
@@ -947,7 +947,7 @@ func (ac *AppController) reloadDaemonBackendIfActive() {
 // Привилегированных вызовов нет — диалог с готовой sudo-командой.
 func (ac *AppController) notifyDaemonServiceAfterCoreUpdate() {
 	check := ac.daemonServiceFileCheck()
-	command := daemonCoreUpdatedCommand(check, ac.FileService.SingboxPath)
+	command := daemonCoreUpdatedCommand(check, ac.FileService.CoreBinaryPath())
 	switch {
 	case check.State == DaemonServiceNotInstalled:
 		return
@@ -993,7 +993,7 @@ func (ac *AppController) DaemonBootstrapCommand() (string, error) {
 // daemonServiceFileCheck — вердикт по файлам без сети (SPEC 136 §4) для
 // системной раскладки и ядра лаунчера.
 func (ac *AppController) daemonServiceFileCheck() DaemonServiceCheck {
-	return classifyDaemonServiceFiles(systemDaemonServiceLayout(), ac.FileService.SingboxPath,
+	return classifyDaemonServiceFiles(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath(),
 		ac.launcherCoreVersion(), &daemonServiceHashes)
 }
 
@@ -1013,7 +1013,7 @@ func daemonServiceBinaryFor(l daemonServiceLayout, launcherCore string) string {
 // daemon.json и печатает свежее одноразовое приглашение — его пользователь
 // вставляет в поле сопряжения. Бинарь — копия службы, если она безопасна.
 func (ac *AppController) DaemonRepairCommand() string {
-	return daemonServiceCommand(daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.SingboxPath),
+	return daemonServiceCommand(daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath()),
 		"lxd", "client", "add", "--name", daemonClientName())
 }
 
@@ -1032,7 +1032,7 @@ func (ac *AppController) DaemonRepairCommand() string {
 // пронумерованные релизы форка. Команда исполняется под sudo и по-прежнему
 // кладёт root-owned копию.
 func (ac *AppController) DaemonInstallCommand() (string, error) {
-	return daemonInstallCommandFor(ac.FileService.SingboxPath, ac.launcherCoreVersion())
+	return daemonInstallCommandFor(ac.FileService.CoreBinaryPath(), ac.launcherCoreVersion())
 }
 
 // daemonInstallCommandFor — команда install для ядра лаунчера launcherCore
@@ -1051,7 +1051,7 @@ func daemonInstallCommandFor(launcherCore, launcherVersion string) (string, erro
 // снимаются plist и launchd, root-owned копия и сайдкар остаются — её
 // запускает classic-старт с TUN (SPEC 137).
 func (ac *AppController) DaemonUninstallCommand(purge bool) string {
-	return daemonUninstallCommandFor(daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.SingboxPath), purge, true)
+	return daemonUninstallCommandFor(daemonServiceBinaryFor(systemDaemonServiceLayout(), ac.FileService.CoreBinaryPath()), purge, true)
 }
 
 // daemonUninstallCommandFor — команда удаления службы. keepCopy=false —

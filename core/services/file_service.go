@@ -219,6 +219,16 @@ func (fs *FileService) CoreSourceName() string {
 	return fs.CoreSource
 }
 
+// WintunCompanionPath returns the wintun.dll path belonging to the SELECTED core.
+//
+// It is derived from the selected core's directory, so it is part of the same resolution
+// as the path and is published under the same lock.
+func (fs *FileService) WintunCompanionPath() string {
+	fs.coreMu.RLock()
+	defer fs.coreMu.RUnlock()
+	return fs.WintunPath
+}
+
 // CoreResolutionFull returns every resolved field as one snapshot: the path, its source,
 // the shadowed alternative and the wintun companion. The wintun path is derived from the
 // selected core's directory, so it belongs to the same resolution as the path.

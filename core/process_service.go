@@ -577,7 +577,7 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	// SPEC 141 §8: повышенный лаунчер на Windows исполняет только
 	// защищённую копию ядра (гейт по токену при любом конфиге), вывод — в
 	// classic.log с явным DACL.
-	corePath := ac.FileService.SingboxPath
+	corePath := ac.FileService.CoreBinaryPath()
 	var privilegedLog *os.File
 	if classicElevatedUsesCopy() {
 		path, logFile, err := ac.elevatedClassicStart()
@@ -1639,7 +1639,7 @@ func (ac *AppController) coreBinaryPath() string {
 	if ac == nil || ac.FileService == nil {
 		return ""
 	}
-	return ac.FileService.SingboxPath
+	return ac.FileService.CoreBinaryPath()
 }
 
 // currentCorePath returns the core binary path this launcher would run.
@@ -1647,7 +1647,7 @@ func (svc *ProcessService) currentCorePath() string {
 	if svc == nil || svc.ac == nil || svc.ac.FileService == nil {
 		return ""
 	}
-	return svc.ac.FileService.SingboxPath
+	return svc.ac.FileService.CoreBinaryPath()
 }
 
 // privilegedCorePath returns the path of the root-owned core copy, which is the
@@ -2073,7 +2073,7 @@ func (svc *ProcessService) coreIdentity() coreIdentity {
 	if svc.ac == nil || svc.ac.FileService == nil {
 		return id
 	}
-	id.LauncherCorePath = svc.ac.FileService.SingboxPath
+	id.LauncherCorePath = svc.ac.FileService.CoreBinaryPath()
 	id.CopyPath = systemDaemonServiceLayout().CorePath
 	return id
 }
