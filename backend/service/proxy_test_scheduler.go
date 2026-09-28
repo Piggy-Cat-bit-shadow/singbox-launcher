@@ -101,15 +101,30 @@ func groupTestBudget(nodes, concurrency int) time.Duration {
 	}
 	batches := (nodes + concurrency - 1) / concurrency
 	perNode := time.Duration(api.GetPingTestTimeoutMs()) * time.Millisecond
-	budget := time.Duration(batches)*perNode + 10*time.Second
+	required := time.Duration(batches) * perNode
+	budget := required + 10*time.Second
 	if budget < 15*time.Second {
 		budget = 15 * time.Second
 	}
-	// Past this the user has moved on, and holding the request open serves
-	// nobody. The frontend's own timeout is set ABOVE this so the backend always
-	// gets to answer first.
-	if budget > 60*time.Second {
-		budget = 60 * time.Second
+
+	// THE CAP MUST NOT CUT INTO THE WORK.
+	//
+	// There is a real reason to bound this: past some point the user has moved on and
+	// holding the request open serves nobody. But a bound that is SMALLER than the work it
+	// describes does not bound the run, it truncates it — the scheduler cancels probes
+	// that were still legitimately running and reports timeouts the user never configured.
+	//
+	// That is reachable through the UI, because the per-node timeout is user-settable up
+	// to 60s: 20 nodes at concurrency 4 already needs 5 minutes, five times the old cap.
+	//
+	// So the cap is now a HARD CEILING placed far above any honest group rather than just
+	// above the typical one. Ten minutes covers the entire realistic configuration space
+	// with room to spare — the per-node timeout maxes out at 60s, so this accommodates
+	// ten full sequential batches at the slowest setting the UI permits — while still
+	// guaranteeing that a pathological node count cannot hold a request open for hours.
+	const hardCap = 10 * time.Minute
+	if budget > hardCap {
+		budget = hardCap
 	}
 	return budget
 }

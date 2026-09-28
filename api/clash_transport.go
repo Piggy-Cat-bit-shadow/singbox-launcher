@@ -14,7 +14,16 @@ import (
 
 const (
 	httpDialTimeoutSeconds    = 5
-	httpRequestTimeoutSeconds = 20 // Increased to 20 seconds for better reliability
+	httpRequestTimeoutSeconds = 20
+
+	// httpResponseHeaderTimeoutSeconds bounds "connected but never answers".
+	//
+	// It replaces part of what the global client timeout used to cover, and it is the
+	// bound that actually protects against a wedged core: the dial timeout covers an
+	// unreachable address, this covers a server that accepts the connection and then says
+	// nothing. It applies to the HEADERS only, so a slow but progressing body is not cut
+	// off by it.
+	httpResponseHeaderTimeoutSeconds = 20
 )
 
 // httpIdleConnTimeout limits connection reuse; avoids stale connections after sleep/hibernation.
@@ -23,13 +32,32 @@ const httpIdleConnTimeoutSec = 30
 // clashHTTPClient creates a new HTTP client for Clash API with timeouts and idle connection limit.
 // Used at init and when resetting transport after system resume (Windows sleep/hibernation).
 func clashHTTPClient() *http.Client {
+	// NO `Timeout` FIELD, deliberately.
+	//
+	// A client-level Timeout is a deadline over the whole exchange and it SILENTLY CAPS
+	// any per-request context that asks for longer. A caller that derives a 60-second
+	// deadline for a slow provider fetch would get 20 seconds instead, with no indication
+	// that its own deadline had been overridden — so the failure presents as a network
+	// error rather than as the timeout that actually applied, and the caller's carefully
+	// chosen budget is dead code that still compiles.
+	//
+	// The bounds that were standing in for it live on the TRANSPORT instead, where they
+	// do one job each and compose with the request's own deadline rather than replacing
+	// it:
+	//
+	//   DialContext.Timeout           — an address that cannot be reached at all
+	//   ResponseHeaderTimeout         — a server that accepts and then never answers
+	//   IdleConnTimeout               — stale connections after sleep/hibernation
+	//
+	// Callers keep their own deadline via `context.WithTimeout`, which is what actually
+	// bounds a request end to end.
 	return &http.Client{
-		Timeout: time.Duration(httpRequestTimeoutSeconds) * time.Second,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
 				Timeout: time.Duration(httpDialTimeoutSeconds) * time.Second,
 			}).DialContext,
-			IdleConnTimeout: httpIdleConnTimeoutSec * time.Second,
+			ResponseHeaderTimeout: time.Duration(httpResponseHeaderTimeoutSeconds) * time.Second,
+			IdleConnTimeout:       httpIdleConnTimeoutSec * time.Second,
 		},
 	}
 }

@@ -696,9 +696,22 @@ actor BackendClient {
         case BackendMethod.testProxy, BackendMethod.testProxyGroup,
              BackendMethod.refreshSubscription, BackendMethod.updateSubscriptions,
              BackendMethod.reloadConfig:
-            // Network work: fetching providers and measuring latency. Generous,
-            // because aborting a legitimate slow fetch is worse than waiting.
-            seconds = 120
+            // Network work: fetching providers and measuring latency.
+            //
+            // ABOVE THE BACKEND'S OWN BUDGET, which is the actual requirement —
+            // "generous" is not a number, and this value was two minutes while the
+            // backend's group-test budget was ten, so a legitimate slow run was
+            // abandoned and reported as a failure.
+            //
+            // The backend's budget scales with the node count and with the user's
+            // per-node timeout (up to 60 s each), and it is capped at ten minutes. The
+            // client must therefore sit ABOVE ten minutes, or the cap is the client's
+            // number rather than the backend's. Eleven leaves a minute for the reply to
+            // travel after the backend gives up.
+            //
+            // Kept in step by TestClientTimeoutExceedsEveryBackendBudget, which reads
+            // this file and fails if the relationship ever inverts.
+            seconds = 660
         case BackendMethod.getDaemonStatus:
             // Talks to the control plane and probes the core binary; the
             // earlier freeze was exactly this call never returning.
@@ -821,7 +834,7 @@ actor BackendClient {
     ///
     /// Returns the FINAL summary, not the node list: the backend owns
     /// scheduling, and progress arrives meanwhile on the event stream. The
-    /// request timeout (120s, see `timeoutSeconds`) is set ABOVE the backend's
+    /// request timeout (11 minutes, see `timeout()`) is set ABOVE the backend's
     /// own run budget so the backend always gets to answer first — a client
     /// timeout would abandon a run that is still doing useful work.
     func testProxyGroup(_ group: String) async throws -> ProxyGroupTestResult {
