@@ -17,7 +17,6 @@ package service
 
 import (
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +29,7 @@ import (
 	"singbox-launcher/core/config/subscription"
 	"singbox-launcher/core/state"
 	"singbox-launcher/internal/debuglog"
+	"singbox-launcher/internal/limitread"
 )
 
 // SubscriptionImportResult is the structured outcome of a local import.
@@ -280,21 +280,21 @@ func readLocalSubscriptionFile(path string) ([]byte, string, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Read through a limit reader rather than trusting the earlier stat: the
-	// file could grow between the two calls.
-	limited := io.LimitReader(f, subscription.MaxSubscriptionResponseSize+1)
-	raw, err := io.ReadAll(limited)
+	// Read through the shared bounded reader rather than trusting the earlier stat: the
+	// file could grow between the two calls, and a `LimitReader` alone would hand back a
+	// prefix that looks exactly like a file that happens to end there.
+	raw, err := limitread.All(f, subscription.MaxSubscriptionResponseSize)
 	if err != nil {
+		if errors.Is(err, limitread.ErrTooLarge) {
+			return nil, "", &protocol.Error{
+				Code: "file_too_large",
+				Message: "the selected file is larger than the " +
+					humanBytes(subscription.MaxSubscriptionResponseSize) + " subscription limit",
+				Recoverable: false,
+			}
+		}
 		return nil, "", &protocol.Error{
 			Code: "bad_path", Message: "cannot read the selected file: " + err.Error(), Recoverable: true,
-		}
-	}
-	if int64(len(raw)) > subscription.MaxSubscriptionResponseSize {
-		return nil, "", &protocol.Error{
-			Code: "file_too_large",
-			Message: "the selected file is larger than the " +
-				humanBytes(subscription.MaxSubscriptionResponseSize) + " subscription limit",
-			Recoverable: false,
 		}
 	}
 

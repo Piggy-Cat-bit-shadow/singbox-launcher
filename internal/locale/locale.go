@@ -10,7 +10,6 @@ package locale
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
+	"singbox-launcher/internal/limitread"
 )
 
 const displayNameKey = "_display_name"
@@ -42,6 +42,9 @@ var (
 	lang     = "en"
 	catalogs map[string]map[string]Entry
 )
+
+// maxLocaleCatalogBytes caps a downloaded language catalog.
+const maxLocaleCatalogBytes = 8 << 20
 
 // CreateHTTPClientFunc allows injecting a shared HTTP client factory from core.
 // If not set, locale downloads use a local default client with timeout.
@@ -313,7 +316,10 @@ func DownloadLocale(langCode, localeDir string) error {
 		return fmt.Errorf("download %s: HTTP %d", langCode, resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	// BOUNDED. A catalog is a few tens of KB; an unbounded read of a file that is being
+	// installed over a working one is a way to lose the working one to a full disk rather
+	// than to a bad download.
+	data, err := limitread.All(resp.Body, maxLocaleCatalogBytes)
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}

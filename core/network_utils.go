@@ -3,11 +3,11 @@ package core
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"time"
 
+	"singbox-launcher/internal/limitread"
 	"singbox-launcher/internal/urlredact"
 )
 
@@ -19,6 +19,9 @@ const (
 	// NetworkLongTimeout - таймаут для длительных операций (скачивание файлов)
 	NetworkLongTimeout = 30 * time.Second
 )
+
+// maxHTTPBodyBytes caps a generic HTTP GET through the shared helper.
+const maxHTTPBodyBytes = 32 << 20
 
 // defaultSharedTransport is one process-wide transport for all launcher outbound HTTP(S).
 // Sharing it across CreateHTTPClient timeouts enables connection pooling, TLS session reuse,
@@ -65,7 +68,10 @@ func GetURLBytes(ctx context.Context, urlStr string, timeout time.Duration) ([]b
 		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
+	// BOUNDED. This helper reads whatever URL a caller hands it, and an unbounded read of a
+	// remote response is how a hostile or merely broken endpoint exhausts memory in a
+	// process that is supposed to be a quiet menu-bar app.
+	data, err := limitread.All(resp.Body, maxHTTPBodyBytes)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"singbox-launcher/internal/limitread"
 )
 
 // Config описывает подключение к демону.
@@ -494,18 +495,21 @@ func (c *Client) ResourceContent(name string) ([]byte, error) {
 	// Reading ONE BYTE PAST the limit is what makes the overflow detectable. A limiter set
 	// to exactly the maximum cannot tell "the whole file" from "the file cut to the
 	// maximum", so the truncation would still be silent.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResourceContentBytes+1))
+	// Through the shared bounded reader, which is the same one-byte-past-the-limit rule this
+	// code derived independently. It lives in one place now so the rule is not re-derived —
+	// and eventually mis-derived — at each call site.
+	data, err := limitread.All(resp.Body, maxResourceContentBytes)
 	if err != nil {
+		if errors.Is(err, limitread.ErrTooLarge) {
+			return nil, &ResourceError{
+				Name: name,
+				Message: fmt.Sprintf("the resource is larger than the %d MB limit, so it cannot "+
+					"be fetched in one piece. Download it on the machine itself.",
+					maxResourceContentBytes>>20),
+			}
+		}
 		return nil, &ResourceError{
 			Name: name, Message: "cannot read the resource content: " + err.Error(),
-		}
-	}
-	if int64(len(data)) > maxResourceContentBytes {
-		return nil, &ResourceError{
-			Name: name,
-			Message: fmt.Sprintf("the resource is larger than the %d MB limit, so it cannot "+
-				"be fetched in one piece. Download it on the machine itself.",
-				maxResourceContentBytes>>20),
 		}
 	}
 	return data, nil

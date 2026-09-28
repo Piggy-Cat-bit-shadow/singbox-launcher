@@ -20,8 +20,15 @@ import (
 
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
+	"singbox-launcher/internal/limitread"
 	"singbox-launcher/internal/platform"
 )
+
+// maxReleaseJSONBytes caps the GitHub release listing.
+//
+// Generous for a JSON document describing a handful of assets; the point is that the read
+// ENDS somewhere and says so.
+const maxReleaseJSONBytes = 4 << 20
 
 // coreReleaseRepo returns the GitHub "owner/repo" the core is downloaded from.
 // Since SPEC 072 (Variant A, live from fork v1.13.13-lx.5) the sing-box-lx fork
@@ -287,7 +294,10 @@ func (ac *AppController) fetchReleaseInfo(ctx context.Context, url string) (*Rel
 		return nil, fmt.Errorf("getReleaseInfoFromGitHub: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// BOUNDED, AND THE OVERFLOW IS AN ERROR. A truncated GitHub response previously
+	// decoded into a zero-valued ReleaseInfo, so the launcher reported "no releases found"
+	// — an answer, not a failure — and the core screen showed nothing to download.
+	body, err := limitread.All(resp.Body, maxReleaseJSONBytes)
 	if err != nil {
 		return nil, fmt.Errorf("getReleaseInfoFromGitHub: failed to read response: %w", err)
 	}

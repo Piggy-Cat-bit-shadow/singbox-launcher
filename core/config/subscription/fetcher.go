@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"singbox-launcher/core/config/configtypes"
 	"singbox-launcher/core/state"
 	"singbox-launcher/internal/debuglog"
+	"singbox-launcher/internal/limitread"
 	"singbox-launcher/internal/platform"
 )
 
@@ -299,8 +299,10 @@ func FetchSubscriptionWithMetaFor(url string, id SourceIdentity) (*FetchResult, 
 		return result, httpErr
 	}
 
-	limited := io.LimitReader(resp.Body, MaxSubscriptionResponseSize+1)
-	rawBody, err := io.ReadAll(limited)
+	// Through the shared helper: this one already read one byte past the limit, and the
+	// point of moving it is that the CORRECT form lives in one place rather than being
+	// re-derived (and eventually mis-derived) at each call site.
+	rawBody, err := limitread.All(resp.Body, MaxSubscriptionResponseSize)
 	if err != nil {
 		return result, fmt.Errorf("read body: %w", err)
 	}
