@@ -62,7 +62,12 @@ struct SubscriptionsView: View {
                             Task { await model.updateAllSubscriptions() }
                         }
                         .disabled(!model.canUpdateAllSubscriptions)
-                        .help(model.canUpdateAllSubscriptions ? "" : L.noRefreshableSubscriptions.tr(language))
+                        // The explanation comes from the SAME policy that decides
+                        // the disabled state, so the control and its reason cannot
+                        // describe different products. A locally-chosen string
+                        // would keep saying "nothing to refresh" even if the rule
+                        // started refusing for a different reason.
+                        .help(updateAllHelp)
                         if model.pending == .updatingSubscriptions {
                             PendingRow(L.updatingSubscriptions.tr(language))
                         }
@@ -215,6 +220,19 @@ struct SubscriptionsView: View {
     /// The action depends on ownership: for an externally managed config a
     /// rebuild is impossible, so pointing at Reload would offer a step that can
     /// only fail. That user gets the file instead.
+    /// Why "Update All" is unavailable, phrased from the policy's own reason.
+    ///
+    /// A nil reason means there is nothing to explain — the list is empty, or the
+    /// action is available — so no tooltip is shown rather than a misleading one.
+    private var updateAllHelp: String {
+        guard let reason = model.subscriptionActions.updateAllReason else { return "" }
+        switch reason {
+        case .busy: return L.waitForOperation.tr(language)
+        case .nothingRefreshable: return L.noRefreshableSubscriptions.tr(language)
+        case .configNotRebuildable: return L.configManagedExternally.tr(language)
+        }
+    }
+
     private var reloadPrompt: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(model.configRebuildable

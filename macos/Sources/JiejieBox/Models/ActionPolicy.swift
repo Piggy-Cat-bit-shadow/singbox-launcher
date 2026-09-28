@@ -350,3 +350,83 @@ enum TerminalHandoffOutcome: Equatable {
 func terminalHandoffOutcome(exitStatus: Int32) -> TerminalHandoffOutcome {
     exitStatus == 0 ? .opened : .failed
 }
+
+// MARK: - Subscription screen action policy
+
+/// What the subscription screen may offer.
+struct SubscriptionActionPolicy: Equatable {
+    /// Whether a config reload can be started.
+    let canReloadConfig: Bool
+    /// Whether "Update All" is worth offering.
+    let canUpdateAllSubscriptions: Bool
+    /// Whether the Add form's submit is available.
+    let canAddSubscription: Bool
+
+    /// The key explaining why "Update All" is unavailable, when it is.
+    ///
+    /// Nil means there is nothing to explain — either the action is available, or
+    /// the list is empty and the screen's own empty state already says so.
+    let updateAllReason: SubscriptionActionRefusal?
+}
+
+/// The reasons subscription actions are refused.
+enum SubscriptionActionRefusal: Equatable {
+    /// Another operation is in flight.
+    case busy
+    /// No enabled source can actually be refreshed — a local snapshot has no URL
+    /// to fetch from, so offering "Update All" would promise a network read that
+    /// cannot happen.
+    case nothingRefreshable
+    /// The backend would refuse to overwrite a hand-written config.
+    case configNotRebuildable
+}
+
+/// Decide what the subscription screen offers.
+///
+/// THE TWO HALVES THAT BOTH MATTER for a reload: the backend must consider the
+/// config REBUILDABLE — a hand-written config would be overwritten, so the backend
+/// refuses — and no other operation may be in flight. Stated once so every control
+/// that offers a reload (the notice, the proxy screen, the subscription list)
+/// agrees, instead of each rediscovering that the guard will refuse.
+///
+/// - Parameters:
+///   - busy: another operation is outstanding.
+///   - configRebuildable: the backend's answer about the config on disk.
+///   - refreshableEnabledCount: how many ENABLED sources can actually be fetched.
+///   - totalCount: how many sources exist, so "nothing refreshable" can be
+///     distinguished from "nothing at all".
+func decideSubscriptionActions(busy: Bool,
+                               configRebuildable: Bool,
+                               refreshableEnabledCount: Int,
+                               totalCount: Int) -> SubscriptionActionPolicy {
+    // Adding is refused only by a concurrent operation: it does not touch the
+    // built config.
+    let canAdd = !busy
+
+    let canReload = !busy && configRebuildable
+
+    // "Update All" needs something to update. A source that is disabled, or whose
+    // input is a local snapshot, cannot be fetched — so the control would promise
+    // a network read that cannot happen.
+    let canUpdateAll = !busy && refreshableEnabledCount > 0
+
+    var updateAllReason: SubscriptionActionRefusal?
+    if busy {
+        updateAllReason = .busy
+    } else if refreshableEnabledCount == 0 && totalCount > 0 {
+        // Only worth explaining when there ARE subscriptions: with none, the empty
+        // state already accounts for the screen.
+        updateAllReason = .nothingRefreshable
+    }
+
+    return SubscriptionActionPolicy(canReloadConfig: canReload,
+                                    canUpdateAllSubscriptions: canUpdateAll,
+                                    canAddSubscription: canAdd,
+                                    updateAllReason: updateAllReason)
+}
+
+/// The reason a reload is refused, or nil when it is available.
+func reloadConfigRefusal(busy: Bool, configRebuildable: Bool) -> SubscriptionActionRefusal? {
+    if busy { return .busy }
+    return configRebuildable ? nil : .configNotRebuildable
+}

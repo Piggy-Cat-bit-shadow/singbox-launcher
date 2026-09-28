@@ -1329,14 +1329,17 @@ final class AppModel {
     /// that offers a reload — the notice, the proxy screen, the subscription
     /// list — agrees, instead of each rediscovering that `withPending` will
     /// refuse.
-    var canReloadConfig: Bool {
-        guard pending == nil else { return false }
-        return core?.config_rebuildable ?? false
-    }
+    var canReloadConfig: Bool { subscriptionActions.canReloadConfig }
 
-    var canUpdateAllSubscriptions: Bool {
-        guard pending == nil else { return false }
-        return subscriptions.contains { $0.enabled && $0.isRefreshable }
+    var canUpdateAllSubscriptions: Bool { subscriptionActions.canUpdateAllSubscriptions }
+
+    /// The screen's action policy, from live state.
+    var subscriptionActions: SubscriptionActionPolicy {
+        decideSubscriptionActions(
+            busy: pending != nil,
+            configRebuildable: core?.config_rebuildable ?? false,
+            refreshableEnabledCount: subscriptions.filter { $0.enabled && $0.isRefreshable }.count,
+            totalCount: subscriptions.count)
     }
 
     func setSubscriptionEnabled(_ id: String, enabled: Bool) async {
