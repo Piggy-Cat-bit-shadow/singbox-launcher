@@ -242,7 +242,10 @@ struct ProxiesView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                // The tooltip names it for a mouse; the LABEL is what a screen
+                // reader announces, and without one this is an unnamed glyph.
                 .help(L.clearSearch.tr(language))
+                .accessibilityLabel(L.clearSearch.tr(language))
             }
             if !model.proxies.isEmpty {
                 Text(countLabel)

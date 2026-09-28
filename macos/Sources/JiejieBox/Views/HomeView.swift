@@ -478,6 +478,11 @@ struct HomeView: View {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)
+                // An icon-only control has NO accessible name of its own: read
+                // aloud it is an unnamed button, so a VoiceOver user cannot tell
+                // what dismissing it does — or that it is dismissible at all.
+                .help(L.dismiss.tr(language))
+                .accessibilityLabel(L.dismiss.tr(language))
             }
         }
     }
@@ -491,6 +496,8 @@ struct HomeView: View {
                 Image(systemName: "xmark.circle.fill")
             }
             .buttonStyle(.plain)
+            .help(L.dismiss.tr(language))
+            .accessibilityLabel(L.dismiss.tr(language))
         }
     }
 
