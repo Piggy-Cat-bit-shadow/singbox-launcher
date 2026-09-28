@@ -642,25 +642,61 @@ func (b *Backend) SetCoreMode(mode string) error {
 		}
 	}
 
+	binDir := b.ac.FileService.Layout.Data.Bin()
+	previous := b.ac.BackendMode()
+	st := locale.LoadSettings(binDir)
+	// The EXACT prior text, not the resolved engine name: "" means "unset" and is
+	// a different state from "classic", even though both resolve to classic. A
+	// rollback that writes the resolved name would mutate a setting the user
+	// never changed.
+	previousStored := st.CoreBackendMode
+
+	// PERSIST FIRST, THEN SWITCH. The order IS the transaction.
+	//
+	// This used to switch the engine and save afterwards, so a failed save left
+	// the launcher running the NEW engine in memory and the OLD one on disk: the
+	// frontend received an error while the app was demonstrably on the daemon,
+	// and reopening it silently reverted to classic. Runtime and settings
+	// disagreed and nothing could say which was authoritative.
+	//
+	// Saving first inverts the failure mode into the safe one — if the choice
+	// cannot be stored, the switch never happens, so what the user sees and what
+	// is on disk are the same engine.
+	if st.CoreBackendMode != mode {
+		st.CoreBackendMode = mode
+		if err := locale.SaveSettings(binDir, st); err != nil {
+			debuglog.WarnLog("backend: cannot persist the core mode: %v", err)
+			return &protocol.Error{
+				Code: "persist_failed",
+				Message: "the engine was NOT switched, because saving the choice failed: " +
+					err.Error(),
+				Recoverable: true,
+			}
+		}
+	}
+
 	if err := b.ac.SwitchBackendMode(core.BackendMode(mode)); err != nil {
+		// The switch was refused (busy engine, unreachable daemon, …). Roll the
+		// persisted choice back: the mirror image of the old divergence would be a
+		// settings file naming an engine the launcher is not running.
+		if st.CoreBackendMode != previousStored {
+			st.CoreBackendMode = previousStored
+			if saveErr := locale.SaveSettings(binDir, st); saveErr != nil {
+				debuglog.ErrorLog("backend: mode switch refused AND the rollback failed: %v", saveErr)
+				b.emit(protocol.EventSettingsChanged, b.settingsState())
+				return &protocol.Error{
+					Code: "persist_failed",
+					Message: "the engine did not switch and the choice could not be restored: " +
+						saveErr.Error() + " (the engine is still " + string(previous) + ")",
+					Recoverable: true,
+				}
+			}
+		}
 		// The running-state refusal is an ordinary, expected outcome — the
 		// frontend shows "stop the core first", not a crash report.
 		return &protocol.Error{
 			Code:        "mode_locked",
 			Message:     err.Error(),
-			Recoverable: true,
-		}
-	}
-
-	binDir := b.ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.CoreBackendMode = mode
-	if err := locale.SaveSettings(binDir, st); err != nil {
-		debuglog.WarnLog("backend: core mode switched but persisting failed: %v", err)
-		b.emit(protocol.EventSettingsChanged, b.settingsState())
-		return &protocol.Error{
-			Code:        "persist_failed",
-			Message:     "the engine switched, but saving the choice failed: " + err.Error(),
 			Recoverable: true,
 		}
 	}

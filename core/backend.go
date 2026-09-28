@@ -202,6 +202,22 @@ func (ac *AppController) BackendMode() BackendMode {
 // would let the old engine's callbacks run against a runtime that has already
 // been handed over — the "old backend comes back and starts a core" failure.
 func (ac *AppController) SwitchBackendMode(mode BackendMode) error {
+	// THE HANDOVER IS SERIALIZED AS A WHOLE.
+	//
+	// `setBackend` mutates the published backend in two steps with the lock
+	// released in between (it must be: closing the previous backend can block).
+	// Two concurrent switches therefore interleaved freely — both could read the
+	// same predecessor, both could close it, and the LAST one to publish won
+	// regardless of which started last. The UI happens to serialize its calls,
+	// but the IPC path is not a UI, and "the frontend usually behaves" is not a
+	// safety boundary.
+	//
+	// This lock covers validate → construct → quiesce → publish → persist, so a
+	// second switch either waits and then re-validates against the new world, or
+	// runs entirely after the first has settled.
+	ac.switchMu.Lock()
+	defer ac.switchMu.Unlock()
+
 	if ac.BackendMode() == mode {
 		return nil
 	}

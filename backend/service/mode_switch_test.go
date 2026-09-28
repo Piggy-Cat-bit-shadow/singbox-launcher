@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"singbox-launcher/core"
+	"singbox-launcher/internal/locale"
 )
 
 // Mode switching must consult the real lifecycle, and a retired daemon backend
@@ -430,3 +431,137 @@ func TestDaemonStopContextReachesTheFrontend(t *testing.T) {
 
 // indexOf is strings.Index, kept local so the assertions above read plainly.
 func indexOf(haystack, needle string) int { return strings.Index(haystack, needle) }
+
+// --- N: the mode switch is a transaction ------------------------------------
+
+// TestModeSwitchPersistFailureDoesNotDiverge is claim N.
+//
+// The switch used to happen FIRST and the choice was saved afterwards, so a
+// failed save left the launcher running the NEW engine while the settings file
+// still named the OLD one. The frontend got an error while the app was
+// demonstrably on the daemon, and reopening it silently reverted — runtime and
+// disk disagreeing, with nothing to say which was authoritative.
+//
+// The order is now persist-then-switch, so the failure mode is "the switch never
+// happened" rather than "two components disagree".
+func TestModeSwitchPersistFailureDoesNotDiverge(t *testing.T) {
+	src := stripGoComments(readSource(t, "backend/service/backend.go"))
+
+	idx := indexOf(src, "func (b *Backend) SetCoreMode(")
+	if idx < 0 {
+		t.Fatal("SetCoreMode not found")
+	}
+	end := indexOf(src[idx:], "\nfunc ")
+	if end < 0 {
+		end = len(src) - idx
+	}
+	body := src[idx : idx+end]
+
+	saveIdx := indexOf(body, "locale.SaveSettings")
+	switchIdx := indexOf(body, "SwitchBackendMode")
+	if saveIdx < 0 || switchIdx < 0 {
+		t.Fatal("SetCoreMode no longer both saves and switches")
+	}
+	if saveIdx > switchIdx {
+		t.Fatal("SetCoreMode switches the engine BEFORE persisting the choice; a " +
+			"failed save then leaves the runtime on one engine and the settings " +
+			"file on the other, and the next launch silently reverts")
+	}
+
+	// And the refusal path must roll the persisted choice back.
+	if !contains(body, "rollback") && !contains(body, "Roll the") &&
+		!contains(body, "previous") {
+		t.Error("SetCoreMode does not roll the persisted choice back when the switch " +
+			"is refused, so a busy engine still changes the stored setting")
+	}
+}
+
+// TestModeSwitchRollsBackTheStoredChoiceWhenRefused — the behavioural half: a
+// refused switch must leave the setting exactly as it was.
+func TestModeSwitchRollsBackTheStoredChoiceWhenRefused(t *testing.T) {
+	b := backendWithConfig(t)
+	binDir := b.ac.FileService.Layout.Data.Bin()
+
+	// An empty stored mode means "unset", which the controller resolves to
+	// classic. Record whatever it is, so the assertion is about the ROLLBACK
+	// rather than about the fixture's starting value.
+	before := readStoredMode(t, b)
+	if got := b.ac.BackendMode(); got != core.BackendClassic {
+		t.Fatalf("precondition: the fixture should start on classic, got %q", got)
+	}
+
+	// Make the switch refusable: a classic start is in flight.
+	b.ac.SetClassicPhaseForTest(core.ClassicStarting)
+	defer b.ac.SetClassicPhaseForTest(core.ClassicStopped)
+
+	err := b.SetCoreMode(string(core.BackendDaemon))
+	if err == nil {
+		t.Fatal("the switch should have been refused while the engine was busy")
+	}
+
+	if got := readStoredMode(t, b); got != before {
+		t.Fatalf("the stored mode is %q after a REFUSED switch, want %q: the setting "+
+			"now names an engine the launcher is not running, and the next launch "+
+			"will silently change engines", got, before)
+	}
+	if got := b.ac.BackendMode(); got != core.BackendClassic {
+		t.Fatalf("the runtime engine changed to %q despite the refusal", got)
+	}
+	_ = binDir
+}
+
+// readStoredMode returns the engine named by settings.json.
+func readStoredMode(t *testing.T, b *Backend) string {
+	t.Helper()
+	return locale.LoadSettings(b.ac.FileService.Layout.Data.Bin()).CoreBackendMode
+}
+
+// --- O: concurrent handovers are serialized ---------------------------------
+
+// TestConcurrentModeSwitchSerialized is claim O.
+//
+// `setBackend` publishes in two steps with the lock released between them,
+// because closing the previous backend can block. Two concurrent switches could
+// therefore both read the same predecessor, both close it, and publish in an
+// order unrelated to the order they started in — leaving whichever finished last
+// as the live engine. The UI happens to serialize its calls; the IPC path is not
+// the UI, and "the frontend usually behaves" is not a safety boundary.
+func TestConcurrentModeSwitchSerialized(t *testing.T) {
+	b := backendWithConfig(t)
+
+	const workers = 8
+	start := make(chan struct{})
+	done := make(chan struct{}, workers)
+
+	for i := 0; i < workers; i++ {
+		target := core.BackendDaemon
+		if i%2 == 0 {
+			target = core.BackendClassic
+		}
+		go func(mode core.BackendMode) {
+			<-start
+			// Refusals are fine; the point is that the handover machinery is not
+			// entered concurrently.
+			_ = b.ac.SwitchBackendMode(mode)
+			done <- struct{}{}
+		}(target)
+	}
+
+	close(start)
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+
+	// The published engine must be one of the two legal values, and the backend
+	// must be usable afterwards — a torn handover would leave it nil or closed.
+	mode := b.ac.BackendMode()
+	if mode != core.BackendClassic && mode != core.BackendDaemon {
+		t.Fatalf("after concurrent switches the engine is %q, which is not a legal mode", mode)
+	}
+	if b.ac.Backend() == nil {
+		t.Fatal("concurrent switches left no backend published; every IPC call would " +
+			"now fail")
+	}
+	// The wire state must still resolve rather than panicking on a torn backend.
+	_ = b.coreState()
+}

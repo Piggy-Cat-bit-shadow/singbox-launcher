@@ -73,6 +73,13 @@ type AppController struct {
 	// сюда. Меняется только через setBackend (Settings → режим ядра).
 	backend   CoreBackend
 	backendMu sync.RWMutex
+	// switchMu serializes WHOLE engine handovers (validate → construct →
+	// quiesce → publish → persist). backendMu alone is not enough: setBackend
+	// must release it while closing the previous backend, so two concurrent
+	// switches could interleave and publish in an order unrelated to the order
+	// they started in. The UI serializes its own calls, but the IPC path is not
+	// a UI. Guarded after backendMu in the lock order (see buildMu note).
+	switchMu sync.Mutex
 	// backendModeChangeHook — колбэк после смены backend (traffic-источник).
 	backendModeChangeHook func()
 
