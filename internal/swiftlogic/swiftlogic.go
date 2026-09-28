@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // Source is a Swift file that participates in the logic harness, in the order it
@@ -74,30 +75,18 @@ func Available() bool {
 // would carry a different test's checks. The sources are small and swiftc is
 // fast, and `Run` is called once per test file rather than once per assertion.
 func Program(body string) (string, error) {
-	root, err := repoRoot()
-	if err != nil {
-		return "", err
-	}
 	dir, err := os.MkdirTemp("", "swiftlogic")
 	if err != nil {
 		return "", err
 	}
-	// The Localization stub is generated from the real enum, so a new key cannot
-	// make the harness fail to compile.
-	stub, err := buildLocalizationStub(root)
-	if err != nil {
-		return "", err
-	}
-	stubPath, err := writeLocalizationStubFile(dir, stub.Source)
-	if err != nil {
-		return "", err
-	}
-
 	main := filepath.Join(dir, "main.swift")
 	var src strings.Builder
 	// A tiny assertion vocabulary, so the generated main stays readable and the
 	// Go side has one line format to parse.
-	src.WriteString("import Foundation\n\n")
+	src.WriteString("import Foundation\n")
+	// The shipping types come from the compiled module, so the assertions run
+	// against the real implementation rather than a copy of its text.
+	src.WriteString("@testable import JiejieBoxLogic\n\n")
 	src.WriteString("var swiftlogicFailures = 0\n")
 	src.WriteString("func check(_ name: String, _ condition: Bool) {\n")
 	src.WriteString("    if condition { print(\"PASS \\(name)\") } else { print(\"FAIL \\(name)\"); swiftlogicFailures += 1 }\n")
@@ -115,19 +104,108 @@ func Program(body string) (string, error) {
 		return "", err
 	}
 
-	args := []string{"-O"}
-	// The stub comes first: the real sources reference `L`.
-	args = append(args, stubPath)
-	for _, rel := range Sources {
-		args = append(args, filepath.Join(root, rel))
+	// TWO-STAGE BUILD.
+	//
+	// The shipping sources are identical for every test, and compiling them
+	// dominated the run: fifteen suites took 65 seconds, almost all of it
+	// recompiling the same five files. They are built ONCE into an object file, and
+	// each test then compiles only its own generated main and links against it.
+	// That is the difference between a suite that runs on every change and one
+	// people start skipping.
+	obj, err := compiledSources()
+	if err != nil {
+		return "", err
 	}
-	args = append(args, main, "-o", filepath.Join(dir, "harness"))
+
+	bin := filepath.Join(dir, "harness")
+	args := []string{"-O", "-I", obj, main}
+	// Every object the module emitted, so the linker has all the symbols.
+	objs, err := filepath.Glob(filepath.Join(obj, "*.o"))
+	if err != nil || len(objs) == 0 {
+		return "", fmt.Errorf("no compiled objects in %s", obj)
+	}
+	args = append(args, objs...)
+	args = append(args, "-o", bin)
 	cmd := exec.Command("swiftc", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("swiftc failed: %v\n%s", err, out)
 	}
-	return filepath.Join(dir, "harness"), nil
+	return bin, nil
+}
+
+var (
+	sourceOnce sync.Once
+	sourceObj  string
+	sourceErr  error
+)
+
+// compiledSources builds the harness sources into a reusable object file, once
+// per process.
+//
+// The generated Localization stub is part of the build, so a new key in the real
+// enum is picked up by the same one-time compile.
+func compiledSources() (string, error) {
+	sourceOnce.Do(func() {
+		root, err := repoRoot()
+		if err != nil {
+			sourceErr = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "swiftlogic-src")
+		if err != nil {
+			sourceErr = err
+			return
+		}
+		stub, err := buildLocalizationStub(root)
+		if err != nil {
+			sourceErr = err
+			return
+		}
+		stubPath, err := writeLocalizationStubFile(dir, stub.Source)
+		if err != nil {
+			sourceErr = err
+			return
+		}
+
+		// Emit a MODULE (`.swiftmodule` plus objects) rather than one object file:
+		// swiftc produces a separate object per source file and refuses a single
+		// `-o` for them, so the reusable artefact is the compiled module and the
+		// test program is linked against the objects the emit produces.
+		//
+		// `-emit-module` also makes the types visible under a module name, which is
+		// what lets the generated main reference them without redeclaration.
+		emitDir := filepath.Join(dir, "mod")
+		if err := os.MkdirAll(emitDir, 0o700); err != nil {
+			sourceErr = err
+			return
+		}
+		// The stub comes first: the real sources reference `L`.
+		// `-enable-testing` is what lets the generated main see the types at all:
+		// they are internal, and without it the module boundary hides every one of
+		// them. This does not weaken the test — it is the standard mechanism for
+		// reaching internal declarations from another compilation unit.
+		args := []string{"-O", "-enable-testing", "-module-name", "JiejieBoxLogic",
+			"-emit-module", "-emit-module-path", filepath.Join(emitDir, "JiejieBoxLogic.swiftmodule"),
+			"-emit-object", "-output-file-map"}
+		// A file map is how swiftc names the objects when compiling several files.
+		mapPath := filepath.Join(emitDir, "filemap.json")
+		if err := writeOutputFileMap(mapPath, emitDir, root, stubPath, Sources); err != nil {
+			sourceErr = err
+			return
+		}
+		args = append(args, mapPath, stubPath)
+		for _, rel := range Sources {
+			args = append(args, filepath.Join(root, rel))
+		}
+		cmd := exec.Command("swiftc", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			sourceErr = fmt.Errorf("swiftc sources failed: %v\n%s", err, out)
+			return
+		}
+		sourceObj = emitDir
+	})
+	return sourceObj, sourceErr
 }
 
 // Result is one harness run.
@@ -163,4 +241,37 @@ func Run(body string) (*Result, error) {
 		}
 	}
 	return res, nil
+}
+
+// writeOutputFileMap writes the JSON file map swiftc needs to compile several
+// Swift files into named objects in one invocation.
+//
+// Hand-rolled rather than marshalled from a struct: the format is a plain object
+// of source path -> { "object": path }, and spelling it out keeps this dependency
+// free.
+func writeOutputFileMap(mapPath, emitDir, root, stubPath string, sources []string) error {
+	var b strings.Builder
+	b.WriteString("{\n")
+	writeEntry := func(src, obj string, last bool) {
+		fmt.Fprintf(&b, "  %q: {\"object\": %q}", src, obj)
+		if !last {
+			b.WriteString(",")
+		}
+		b.WriteString("\n")
+	}
+	total := len(sources) + 1
+	idx := 0
+	objFor := func(src string) string {
+		base := strings.TrimSuffix(filepath.Base(src), ".swift")
+		return filepath.Join(emitDir, base+".o")
+	}
+	writeEntry(stubPath, objFor(stubPath), idx == total-1)
+	idx++
+	for i, rel := range sources {
+		src := filepath.Join(root, rel)
+		writeEntry(src, objFor(src), i == len(sources)-1 && idx == total-1)
+		idx++
+	}
+	b.WriteString("}\n")
+	return os.WriteFile(mapPath, []byte(b.String()), 0o600)
 }
