@@ -233,7 +233,18 @@ func (b *Backend) DaemonInstall() (DaemonCommandResult, error) {
 			"The service prints a pairing invite when it finishes."
 	}
 
-	b.emit(protocol.EventDaemonChanged, nil)
+	// NO `EventDaemonChanged`: this only builds a command for the user to run.
+	//
+	// It changes nothing about the service — not its installation, not its
+	// state, not the pairing — so announcing a daemon change was a lie. The
+	// frontend reacted by re-reading the status and discarding any prepared
+	// command whose condition no longer held; because the status had not
+	// actually changed, a daemon that was already ready still reported ready and
+	// the freshly generated command was thrown away the moment it was created.
+	// "Re-pair" flashed and did nothing.
+	//
+	// The event means what it says: the daemon's state changed. Generating a
+	// command is not a state change.
 	status, _ := b.DaemonStatus()
 	result.Status = status
 	return result, nil
@@ -263,7 +274,18 @@ func (b *Backend) DaemonStart() (DaemonCommandResult, error) {
 		result.Message = "Run the command in Terminal, then refresh the status."
 	}
 
-	b.emit(protocol.EventDaemonChanged, nil)
+	// NO `EventDaemonChanged`: this only builds a command for the user to run.
+	//
+	// It changes nothing about the service — not its installation, not its
+	// state, not the pairing — so announcing a daemon change was a lie. The
+	// frontend reacted by re-reading the status and discarding any prepared
+	// command whose condition no longer held; because the status had not
+	// actually changed, a daemon that was already ready still reported ready and
+	// the freshly generated command was thrown away the moment it was created.
+	// "Re-pair" flashed and did nothing.
+	//
+	// The event means what it says: the daemon's state changed. Generating a
+	// command is not a state change.
 	status, _ := b.DaemonStatus()
 	result.Status = status
 	return result, nil
@@ -295,7 +317,18 @@ func (b *Backend) DaemonRepair() (DaemonCommandResult, error) {
 			"Paste that invite here to pair."
 	}
 
-	b.emit(protocol.EventDaemonChanged, nil)
+	// NO `EventDaemonChanged`: this only builds a command for the user to run.
+	//
+	// It changes nothing about the service — not its installation, not its
+	// state, not the pairing — so announcing a daemon change was a lie. The
+	// frontend reacted by re-reading the status and discarding any prepared
+	// command whose condition no longer held; because the status had not
+	// actually changed, a daemon that was already ready still reported ready and
+	// the freshly generated command was thrown away the moment it was created.
+	// "Re-pair" flashed and did nothing.
+	//
+	// The event means what it says: the daemon's state changed. Generating a
+	// command is not a state change.
 	status, _ := b.DaemonStatus()
 	result.Status = status
 	return result, nil
@@ -323,7 +356,18 @@ func (b *Backend) DaemonUninstall(purge bool) (DaemonCommandResult, error) {
 		result.Message = "Run the command in Terminal to remove the service, keeping the core copy."
 	}
 
-	b.emit(protocol.EventDaemonChanged, nil)
+	// NO `EventDaemonChanged`: this only builds a command for the user to run.
+	//
+	// It changes nothing about the service — not its installation, not its
+	// state, not the pairing — so announcing a daemon change was a lie. The
+	// frontend reacted by re-reading the status and discarding any prepared
+	// command whose condition no longer held; because the status had not
+	// actually changed, a daemon that was already ready still reported ready and
+	// the freshly generated command was thrown away the moment it was created.
+	// "Re-pair" flashed and did nothing.
+	//
+	// The event means what it says: the daemon's state changed. Generating a
+	// command is not a state change.
 	status, _ := b.DaemonStatus()
 	result.Status = status
 	return result, nil

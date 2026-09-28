@@ -67,7 +67,19 @@ enum MenuRowRole {
 struct MenuRow<Trailing: View>: View {
     /// Stable hover key: the row's identity, not the struct instance.
     private var hover: HoverState { HoverStore.box(for: hoverKey) }
-    private var hoverKey: String { "menurow:\(title)|\(subtitle ?? "")|\(value ?? "")" }
+    /// The row's hover identity.
+    ///
+    /// The DISPLAYED TEXT is only a fallback. It is not an identity: two rows can
+    /// legitimately read the same — the Daemon screen shows "Refresh Status" in
+    /// both its status section and its command section — and keying on the text
+    /// made them share one hover box, so pointing at either tinted both. A row
+    /// that needs to be told apart passes an explicit `hoverID`.
+    private var hoverKey: String {
+        if let hoverID { return "menurow:\(hoverID)" }
+        return "menurow:\(title)|\(subtitle ?? "")|\(value ?? "")"
+    }
+    /// Explicit hover identity, for rows the title cannot distinguish.
+    var hoverID: String?
     let title: String
     var subtitle: String?
     var systemImage: String?
@@ -84,9 +96,11 @@ struct MenuRow<Trailing: View>: View {
         value: String? = nil,
         showsChevron: Bool = false,
         role: MenuRowRole = .normal,
+        hoverID: String? = nil,
         action: @escaping () -> Void,
         @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }
     ) {
+        self.hoverID = hoverID
         self.title = title
         self.subtitle = subtitle
         self.systemImage = systemImage

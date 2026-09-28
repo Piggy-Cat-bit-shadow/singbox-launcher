@@ -36,7 +36,7 @@ struct HomeView: View {
     }
 
     var body: some View {
-        PanelScaffold(model: model, title: "JiejieBox") {
+        PanelScaffold(model: model, title: "JiejieBox", showsFeedback: false) {
             VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
                 statusCard
                 banners

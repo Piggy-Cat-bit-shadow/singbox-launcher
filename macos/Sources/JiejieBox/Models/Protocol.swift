@@ -359,6 +359,20 @@ struct ProxyNode: Decodable, Identifiable, Hashable {
     /// Short form for compact contexts.
     var delayLabel: String { isMeasured ? "\(delay) ms" : "—" }
 
+    /// The latency control's spoken label.
+    ///
+    /// The control draws a bare number (or a dash), and its visual title is the
+    /// empty string — so the action needs a label that names the NODE and the
+    /// ACTION. A screen reader user otherwise reaches an unlabelled button that
+    /// announces nothing about which node it measures.
+    ///
+    /// The current reading is included, because the visible text is the reading:
+    /// a label that only said "Measure latency" would drop information a sighted
+    /// user has.
+    func delayAccessibilityLabel(_ language: Localization) -> String {
+        L.measureLatencyFor.tr(language, label, delayLabel(language))
+    }
+
     /// Coarse quality bucket, used only to colour the value.
     var isFast: Bool { isMeasured && delay < 200 }
     var isSlow: Bool { isMeasured && delay >= 600 }
@@ -829,6 +843,19 @@ enum DaemonNextStep {
 }
 
 /// Result of a daemon setup step.
+/// The operation a prepared daemon command performs, as the backend names it.
+///
+/// Named constants rather than inline literals: the command's LIFETIME depends on
+/// which operation it is (an invite stays usable after the state moves; an
+/// install command does not), so a typo in a string comparison would silently
+/// change when a command disappears.
+enum DaemonOperation {
+    static let install = "install"
+    static let start = "start"
+    static let freshInvite = "fresh_invite"
+    static let uninstall = "uninstall"
+}
+
 struct DaemonCommandResult: Decodable {
     let operation: String
     let command: String

@@ -453,6 +453,12 @@ enum L: CaseIterable {
     case aboutBlurb
 
     // Status and errors
+    /// Dismiss a banner.
+    case dismiss
+    /// Spoken label for a node's latency control: names the node and the action.
+    case measureLatencyFor
+    /// Explains a disabled Update All.
+    case noRefreshableSubscriptions
     case anotherOperationRunning
     /// The backend is still working on a lifecycle command after the local wait
     /// gave up, confirmed by an authoritative snapshot.
@@ -870,6 +876,9 @@ extension L {
         case .telegram: return "Telegram"
         case .aboutBlurb: return "A menu bar client for sing-box."
 
+        case .dismiss: return "Dismiss"
+        case .measureLatencyFor: return "Measure latency for %@, currently %@"
+        case .noRefreshableSubscriptions: return "No enabled remote subscriptions to update."
         case .anotherOperationRunning: return "Another operation is still running. Wait for it to finish."
         case .coreOperationStillRunning: return "The backend is still working on this. The controls stay unavailable until it settles."
         case .coreOperationUnconfirmed: return "The backend could not be reached to confirm whether this finished. Reconnecting…"
@@ -1254,6 +1263,9 @@ extension L {
         case .telegram: return "Telegram"
         case .aboutBlurb: return "一个 sing-box 菜单栏客户端。"
 
+        case .dismiss: return "忽略"
+        case .measureLatencyFor: return "测量 %@ 的延迟，当前为 %@"
+        case .noRefreshableSubscriptions: return "没有可更新的已启用远程订阅。"
         case .anotherOperationRunning: return "还有操作正在进行，请等待完成。"
         case .coreOperationStillRunning: return "后端仍在处理该操作，完成前相关按钮保持不可用。"
         case .coreOperationUnconfirmed: return "无法连接后端确认该操作是否完成，正在重连…"

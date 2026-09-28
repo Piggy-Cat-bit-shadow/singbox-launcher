@@ -22,41 +22,51 @@ struct SubscriptionsView: View {
                     // The list is unknown, not empty: do not report "No
                     // Subscriptions" for a backend that never answered.
                     BackendDownView(model: model)
-                } else if model.subscriptions.isEmpty && !model.subscriptionsLoading {
-                    emptyState
                 } else {
-                    MenuSection {
-                        addMenu
+                    if model.subscriptions.isEmpty && !model.subscriptionsLoading {
+                        emptyState
+                    } else {
+                        MenuSection {
+                            addMenu
+                        }
+
+                        MenuSection(L.sources.tr(language)) {
+                            ForEach(model.subscriptions) { sub in
+                                subscriptionRow(sub)
+                            }
+                            if model.subscriptionsLoading {
+                                PendingRow(L.loading.tr(language))
+                            }
+                        }
                     }
 
-                    MenuSection(L.sources.tr(language)) {
-                        ForEach(model.subscriptions) { sub in
-                            subscriptionRow(sub)
-                        }
-                        if model.subscriptionsLoading {
-                            PendingRow(L.loading.tr(language))
-                        }
+                    // THE RELOAD PROMPT LIVES OUTSIDE THE EMPTY-CHECK ON PURPOSE.
+                    //
+                    // It used to be inside the non-empty branch, so removing the
+                    // LAST subscription took it off screen at exactly the moment
+                    // it mattered most: the state now contains no subscriptions
+                    // while the config on disk — and the core's running config —
+                    // may still contain every node they contributed. The screen
+                    // said "No Subscriptions" and offered no way to rebuild, which
+                    // reads as "nothing to do" about a config that is now wrong.
+                    //
+                    // The prompt describes the CONFIG, not the list, so it is
+                    // shown whenever the config is stale regardless of how many
+                    // sources remain.
+                    if model.core?.config_stale == true {
+                        reloadPrompt
                     }
 
                     MenuSection {
                         MenuRow(L.updateAll.tr(language), systemImage: "arrow.down.circle") {
                             Task { await model.updateAllSubscriptions() }
                         }
-                        .disabled(model.subscriptions.isEmpty || model.pending != nil)
+                        .disabled(!model.canUpdateAllSubscriptions)
+                        .help(model.canUpdateAllSubscriptions ? "" : L.noRefreshableSubscriptions.tr(language))
                         if model.pending == .updatingSubscriptions {
                             PendingRow(L.updatingSubscriptions.tr(language))
                         }
-                        if model.core?.config_stale == true {
-                            reloadPrompt
-                        }
                     }
-                }
-
-                if let status = model.transientStatus, !status.isEmpty {
-                    Text(status)
-                        .font(Typography.rowSubtitle)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, Metrics.rowPaddingH)
                 }
             }
             .padding(.top, Metrics.contentTopPadding)

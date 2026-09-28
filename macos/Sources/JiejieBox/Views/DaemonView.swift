@@ -118,10 +118,11 @@ struct DaemonView: View {
             // status is not a privilege that activation should gate: a user
             // whose VPN is running through the daemon may still want to check
             // the service, the endpoint or the version.
-            MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise") {
+            MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise",
+                    hoverID: "daemon.status.refresh") {
                 Task { await model.loadDaemonStatus() }
             }
-            .disabled(model.pending != nil)
+            .disabled(model.pending != nil || model.daemonLoading)
         }
     }
 
@@ -148,10 +149,11 @@ struct DaemonView: View {
                 stepRow(for: status)
             }
 
-            MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise") {
+            MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise",
+                    hoverID: "daemon.status.refresh") {
                 Task { await model.loadDaemonStatus() }
             }
-            .disabled(model.pending != nil)
+            .disabled(model.pending != nil || model.daemonLoading)
 
             if model.pending == .configuringDaemon {
                 PendingRow(L.preparing.tr(language))
@@ -205,9 +207,11 @@ struct DaemonView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, Metrics.rowPaddingH)
-            MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise") {
+            MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise",
+                    hoverID: "daemon.command.refresh") {
                 Task { await model.loadDaemonStatus() }
             }
+            .disabled(model.pending != nil || model.daemonLoading)
         case nil:
             EmptyView()
         }
@@ -385,12 +389,22 @@ struct DaemonView: View {
                         model.path.append(.daemonPair)
                     }
                 }
-                MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise") {
+                MenuRow(L.refreshStatus.tr(language), systemImage: "arrow.clockwise",
+                        hoverID: "daemon.command.refresh") {
                     Task {
-                        model.clearDaemonCommand()
+                        // Refresh FIRST, and let the new state decide.
+                        //
+                        // This deleted the command before reading the status, so
+                        // the user's one action for "has this taken effect yet?"
+                        // also destroyed the command they were about to run — and
+                        // if the read then failed, the screen was left with
+                        // neither. The command outlives a refresh; only a real
+                        // state change retires it, which `applyDaemonStatus`
+                        // decides from what the refresh actually returns.
                         await model.loadDaemonStatus()
                     }
                 }
+                .disabled(model.daemonLoading)
             } else {
                 Text(L.noCommandAvailable.tr(language))
                     .font(Typography.rowSubtitle)

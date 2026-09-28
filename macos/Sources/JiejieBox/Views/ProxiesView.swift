@@ -418,7 +418,19 @@ struct ProxiesView: View {
         // that slips through; it is no longer the only thing preventing one.
         let rowBusy = switching || testing
         let selectDisabled = rowBusy || model.proxyGroupTestInFlight || model.proxySwitchInFlight
-        let testDisabled = rowBusy || model.proxyGroupTestInFlight
+        // MEASUREMENT IS SERIALISED, SO EVERY TEST CONTROL SAYS SO.
+        //
+        // This omitted the "another node is being measured" case, so while node A
+        // was being tested every other row still offered a live Test button —
+        // and the model, which admits one operation at a time, refused the click
+        // with an error this screen deliberately does not show. The user saw a
+        // control that did nothing.
+        //
+        // The rule now comes from the model (`proxySingleTestInFlight`), so the
+        // disable state and the guard cannot describe different products: if
+        // measurement ever becomes concurrent, that one property changes and
+        // every control follows.
+        let testDisabled = rowBusy || model.proxyGroupTestInFlight || model.proxySingleTestInFlight
 
         return ActionRow(actions: [
             RowAction(
@@ -453,6 +465,10 @@ struct ProxiesView: View {
                 isDisabled: testDisabled,
                 weight: 1,
                 help: testHelp(node),
+                // The visual title is empty by design (the row shows the number),
+                // so the spoken label has to be supplied separately or VoiceOver
+                // announces nothing at all.
+                accessibilityLabel: node.delayAccessibilityLabel(language),
                 action: { Task { await model.testProxy(node) } }
             ),
         ])

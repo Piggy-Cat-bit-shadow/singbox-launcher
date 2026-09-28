@@ -285,6 +285,58 @@ final class AppModel {
     /// Command a setup step produced, for the user to copy or run.
     private(set) var daemonCommand: DaemonCommandResult?
 
+    /// A prepared Terminal command, together with what would invalidate it.
+    ///
+    /// WHY THIS IS NOT JUST `daemonCommand`. A command is generated for a
+    /// SPECIFIC situation ("the service is installed but not paired", "the
+    /// service is not installed"), and it stays useful until that situation
+    /// actually changes. The previous rule was far cruder: whenever the daemon
+    /// was reported ready, ANY command was cleared. That threw away commands for
+    /// the two operations whose whole point is that the state has NOT changed yet
+    /// — Re-pair and Remove Service both generate a command while the service is
+    /// perfectly healthy, so the command disappeared the moment it was created.
+    ///
+    /// A command now records the state it was generated FOR, and the daemon
+    /// status is compared against that rather than against a constant. It
+    /// survives any event that leaves its precondition true, which is exactly the
+    /// behaviour "run this in Terminal, then come back" requires.
+    private(set) var preparedCommand: PreparedDaemonCommand?
+
+    /// A command plus the daemon state it was prepared for.
+    struct PreparedDaemonCommand {
+        let result: DaemonCommandResult
+        /// The state the command was generated in, as the backend reported it.
+        /// The command is stale only when the daemon's state has moved on from
+        /// this.
+        let preparedFor: DaemonStateFingerprint
+        /// Monotonic id, so a late response cannot replace a newer command.
+        let id: UInt64
+    }
+
+    /// The parts of the daemon status that decide whether a command still
+    /// applies.
+    ///
+    /// Deliberately a small, named set rather than the whole DTO: comparing
+    /// everything would make an unrelated field (a version string, a timestamp)
+    /// invalidate a command the user is about to run, which is the same defect
+    /// wearing a different hat.
+    struct DaemonStateFingerprint: Equatable {
+        let installed: Bool
+        let ready: Bool
+        let activeMode: Bool
+        let paired: Bool
+
+        init(_ status: DaemonStatus) {
+            installed = status.installed
+            ready = status.ready
+            activeMode = status.active_mode
+            paired = status.paired
+        }
+    }
+
+    /// Monotonic counter for prepared commands.
+    private var preparedCommandCounter: UInt64 = 0
+
     // MARK: - Navigation
     //
     // Back is an explicit model operation rather than the system affordance.
@@ -1096,6 +1148,21 @@ final class AppModel {
         return saved
     }
 
+    /// True when "Update All" would actually fetch something.
+    ///
+    /// The row used to be enabled whenever the list was non-empty, which is not
+    /// the same question: a list of only DISABLED sources, or of nothing but
+    /// imported local files (which have no provider to fetch from), makes the
+    /// button a no-op that looks available. An action that cannot do anything
+    /// must not be offered as though it could.
+    ///
+    /// Stated on the model rather than inline in the view so the rule can be
+    /// tested without a running UI.
+    var canUpdateAllSubscriptions: Bool {
+        guard pending == nil else { return false }
+        return subscriptions.contains { $0.enabled && $0.isRefreshable }
+    }
+
     func setSubscriptionEnabled(_ id: String, enabled: Bool) async {
         await withPending(.updatingSetting(.subscriptionEnabled(id)),
                           success: enabled ? "Subscription enabled." : "Subscription disabled.") {
@@ -1194,15 +1261,75 @@ final class AppModel {
 
     // MARK: - Daemon
 
+    /// Re-read the daemon status.
+    ///
+    /// SINGLE-FLIGHT, and the newest request wins.
+    ///
+    /// This was a bare `await client.daemonStatus()` with a `daemonLoading`
+    /// flag that only the defer cleared. Nothing rejected a second concurrent
+    /// call — several Refresh controls did not even test the flag — so three
+    /// rapid clicks issued three requests and whatever returned LAST wrote the
+    /// status. A slow older response overwriting a newer one leaves the screen
+    /// showing a state the backend has already moved past, and the user acts on
+    /// it.
+    ///
+    /// Each call takes a generation, and a response is committed only if it is
+    /// still the newest. A caller that arrives while a read is in flight joins
+    /// that read instead of starting another, so repeated clicks cost one
+    /// request and every waiter still gets a fresh answer.
     func loadDaemonStatus() async {
-        daemonLoading = true
-        defer { daemonLoading = false }
-        do {
-            daemon = try await client.daemonStatus()
-        } catch {
-            lastError = error.localizedDescription
+        // Join the read already in flight rather than starting a second one.
+        if let existing = daemonStatusTask {
+            await existing.value
+            return
         }
+        let generation = daemonStatusGeneration &+ 1
+        daemonStatusGeneration = generation
+        daemonLoading = true
+        let task = Task { @MainActor in
+            defer { daemonLoading = false }
+            do {
+                let status = try await client.daemonStatus()
+                // Only the newest read may write, and only while it is newest.
+                guard generation == daemonStatusGeneration else { return }
+                applyDaemonStatus(status)
+            } catch {
+                guard generation == daemonStatusGeneration else { return }
+                // A failed refresh must not destroy the last known status: the
+                // screen would lose the context for the command it is showing.
+                lastError = error.localizedDescription
+            }
+        }
+        daemonStatusTask = task
+        await task.value
+        if generation == daemonStatusGeneration { daemonStatusTask = nil }
     }
+
+    /// Adopt a status and retire any command the new state has invalidated.
+    ///
+    /// The ONLY place that decides a prepared command is dead, so there is one
+    /// rule instead of a scattering of `daemonCommand = nil` assignments that
+    /// each had to guess.
+    private func applyDaemonStatus(_ status: DaemonStatus) {
+        daemon = status
+        guard let prepared = preparedCommand else { return }
+        // Still the situation the command was generated for: it remains valid,
+        // which is what lets the user go to Terminal and come back.
+        if prepared.preparedFor == DaemonStateFingerprint(status) { return }
+        // The state moved. Some commands are still meaningful afterward (a
+        // fresh invite stays usable until it is redeemed or expires), so the
+        // decision is per-operation rather than "any change clears it".
+        if prepared.result.operation == DaemonOperation.freshInvite,
+           status.installed, !status.paired {
+            return
+        }
+        clearDaemonCommand()
+    }
+
+    /// The refresh currently in flight, if any, so callers can join it.
+    private var daemonStatusTask: Task<Void, Never>?
+    /// Monotonic id for daemon status reads.
+    private var daemonStatusGeneration: UInt64 = 0
 
     /// Ask the backend for a setup command (install, start, repair, uninstall).
     ///
@@ -1211,15 +1338,31 @@ final class AppModel {
     /// selecting Daemon look like a freeze.
     func daemonSetup(_ step: DaemonSetupStep) async {
         await withPending(.configuringDaemon, success: nil) {
+            let result: DaemonCommandResult
             switch step {
-            case .install: self.daemonCommand = try await self.client.daemonInstall()
-            case .start: self.daemonCommand = try await self.client.daemonStart()
-            case .repair: self.daemonCommand = try await self.client.daemonRepair()
-            case .uninstall: self.daemonCommand = try await self.client.daemonUninstall(purge: false)
-            case .removeAll: self.daemonCommand = try await self.client.daemonUninstall(purge: true)
+            case .install: result = try await self.client.daemonInstall()
+            case .start: result = try await self.client.daemonStart()
+            case .repair: result = try await self.client.daemonRepair()
+            case .uninstall: result = try await self.client.daemonUninstall(purge: false)
+            case .removeAll: result = try await self.client.daemonUninstall(purge: true)
             }
-            if let cmd = self.daemonCommand { self.daemon = cmd.status }
+            // Record the command WITH the state it was generated for. Adopting
+            // the status the backend returned alongside it is what makes the
+            // fingerprint describe the situation on screen.
+            self.daemon = result.status
+            self.preparedCommand = PreparedDaemonCommand(
+                result: result,
+                preparedFor: DaemonStateFingerprint(result.status),
+                id: self.nextPreparedCommandID())
+            self.daemonCommand = result
         }
+    }
+
+    /// Ids are monotonic so "is this still the current command?" is answerable
+    /// without comparing payloads.
+    private func nextPreparedCommandID() -> UInt64 {
+        preparedCommandCounter &+= 1
+        return preparedCommandCounter
     }
 
     /// Begin pairing: produce the one-time invite command.
@@ -1272,8 +1415,9 @@ final class AppModel {
             if paired {
                 self.showTransient(L.daemonPaired.tr(self.resolvedLanguage))
                 // The invite is spent; leaving the command on screen would
-                // invite the user to paste it again, which cannot work.
-                self.daemonCommand = nil
+                // invite the user to paste it again, which cannot work. Both
+                // representations go, through the one method that owns them.
+                self.clearDaemonCommand()
             }
         }
         return paired
@@ -1744,7 +1888,14 @@ final class AppModel {
 
     /// Drop the last setup command, so a stale command is not shown next to
     /// refreshed status.
-    func clearDaemonCommand() { daemonCommand = nil }
+    /// Drop the prepared command and its invalidation state.
+    ///
+    /// Both fields together, always: leaving `preparedCommand` behind would let
+    /// the staleness rule reason about a command that is no longer displayed.
+    func clearDaemonCommand() {
+        daemonCommand = nil
+        preparedCommand = nil
+    }
 
     // MARK: - Derived state for the views
 
@@ -1838,7 +1989,25 @@ final class AppModel {
         return false
     }
 
-    /// True while the whole group is being measured.
+    /// True while a SINGLE node measurement is in flight, for any node.
+    ///
+    /// The counterpart to `proxySwitchInFlight`, and it exists because the UI and
+    /// the model disagreed about it: `withPending` admits ONE operation at a time,
+    /// so a second single-node test is refused — but the row's own disable rule
+    /// did not mention this state at all, leaving every other node's Test control
+    /// looking live. Clicking one produced "another operation is running", which
+    /// on that screen was not even visible.
+    ///
+    /// The product rule is serialization (measurements share the core's delay
+    /// endpoint and the same measurement table), so the rule is named here ONCE
+    /// and both the guard and every control read it. When measurement becomes
+    /// genuinely concurrent, this is the single place that changes.
+    var proxySingleTestInFlight: Bool {
+        guard let pending else { return false }
+        if case .testingProxy = pending { return true }
+        return false
+    }
+
     /// Live "Test All" state. Distinct from `pending`, which covers one-shot
     /// actions: a group test streams progress and must survive its own request
     /// being outstanding.
@@ -2109,17 +2278,15 @@ final class AppModel {
         case BackendEventName.daemonChanged:
             // The daemon's setup state changed underneath us (installed,
             // started, paired, removed). Without this the Daemon screen would
-            // keep showing the state it loaded on entry, and a command prepared
-            // for a previous state would linger as if still valid — the user
-            // would be told to run an invite command the service no longer
-            // needs.
+            // keep showing the state it loaded on entry.
+            //
+            // Whether a prepared command survives is decided by
+            // `applyDaemonStatus`, from the state it was generated for — NOT
+            // here, and not from a constant. The old rule ("if the daemon is
+            // ready, drop any command") destroyed the commands for Re-pair and
+            // Remove Service on creation, because both are generated precisely
+            // while the daemon IS ready and stay valid until the user runs them.
             requestReload(.daemonStatus)
-            // A command is only valid for the state that produced it: once the
-            // daemon reports ready, a prepared install or invite command is
-            // stale and would send the user to run something already done.
-            if daemon?.ready == true {
-                daemonCommand = nil
-            }
         case BackendEventName.shuttingDown:
             // The backend announced it is exiting. Handled rather than
             // ignored so the event is not dead protocol: it is how we learn

@@ -45,6 +45,12 @@ struct RowAction: Identifiable {
     /// always get the larger share.
     var weight: CGFloat
     var help: String?
+    /// Spoken label, when the visual title cannot serve as one.
+    ///
+    /// The latency control draws a number and leaves `title` empty, so without
+    /// this its accessibility label was the empty string. Nil means "the title
+    /// is the label", which is right for text actions.
+    var accessibilityLabel: String?
     var action: () -> Void
 
     init(
@@ -61,6 +67,7 @@ struct RowAction: Identifiable {
         leading: AnyView? = nil,
         weight: CGFloat = 1,
         help: String? = nil,
+        accessibilityLabel: String? = nil,
         action: @escaping () -> Void
     ) {
         self.id = id
@@ -76,6 +83,7 @@ struct RowAction: Identifiable {
         self.leading = leading
         self.weight = weight
         self.help = help
+        self.accessibilityLabel = accessibilityLabel
         self.action = action
     }
 }
@@ -163,10 +171,19 @@ private struct ActionRowButton: View {
         }
         .buttonStyle(MenuRowButtonStyle())
         .layoutPriority(action.weight)
-        .onHover { hover.isHovering = $0 && !isEnabled }
+        // Hover feedback is for a control the user CAN use. This read
+        // `$0 && !isEnabled`, which inverted it: an ENABLED action never lit up
+        // under the pointer, and a DISABLED one highlighted as though it were
+        // live — the exact opposite of what hover is for on both counts.
+        .onHover { hover.isHovering = $0 && isEnabled }
         .disabled(!isEnabled)
         .help(action.help ?? "")
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(action.title)
+        // An action may carry a label for assistive technology that differs from
+        // what it draws. The latency control is the case that forced this: its
+        // visual title is an empty string (the row already shows the number), so
+        // `accessibilityLabel(action.title)` published an EMPTY label and
+        // VoiceOver could not describe the control at all.
+        .accessibilityLabel(action.accessibilityLabel ?? action.title)
     }
 }

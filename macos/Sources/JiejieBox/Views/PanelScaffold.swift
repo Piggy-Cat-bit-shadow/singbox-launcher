@@ -37,6 +37,12 @@ struct PanelScaffold<Content: View>: View {
     ///
     /// The invariant this exists to hold: ONE page, ONE vertical scroll owner.
     var scrollsContent: Bool
+    /// Whether the scaffold draws the shared action feedback (error + success).
+    ///
+    /// True for every ordinary page. A page that shows the same messages itself
+    /// — Home, which owns the richest banner layout — sets this false so the
+    /// message is not drawn twice.
+    var showsFeedback: Bool
     @ViewBuilder var content: () -> Content
 
     init(
@@ -45,6 +51,7 @@ struct PanelScaffold<Content: View>: View {
         onBack: (() -> Void)? = nil,
         headerAccessory: AnyView? = nil,
         scrollsContent: Bool = true,
+        showsFeedback: Bool = true,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.model = model
@@ -52,6 +59,7 @@ struct PanelScaffold<Content: View>: View {
         self.onBack = onBack
         self.headerAccessory = headerAccessory
         self.scrollsContent = scrollsContent
+        self.showsFeedback = showsFeedback
         self.content = content
     }
 
@@ -61,6 +69,22 @@ struct PanelScaffold<Content: View>: View {
             // Quit can never be scrolled out of reach.
             PanelHeader(model: model, title: title, onBack: onBack, accessory: headerAccessory)
             Divider()
+            // THE FEEDBACK IS PART OF THE CHROME, NOT OF ANY ONE PAGE.
+            //
+            // Every command writes its outcome to `lastError` / `transientStatus`,
+            // and only Home and Subscriptions ever drew them. On the other nine
+            // screens a failed action looked like nothing happening at all: the
+            // spinner flashed, the error was recorded, and the user was shown no
+            // reason. A click that produces neither a visible result nor a visible
+            // explanation is indistinguishable from a broken button.
+            //
+            // Drawing it here means a screen cannot forget: the surface belongs to
+            // the navigation chrome every page already uses. It sits OUTSIDE the
+            // scroll view, next to the header, so a failure cannot be scrolled out
+            // of sight either.
+            if showsFeedback {
+                ActionFeedbackStrip(model: model)
+            }
             if scrollsContent {
                 ScrollView {
                     content()
@@ -72,6 +96,52 @@ struct PanelScaffold<Content: View>: View {
                 // its list has a bounded frame to scroll within.
                 content()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+}
+
+/// The shared success/failure strip every page shows.
+///
+/// One implementation, drawn by `PanelScaffold`, so the eleven screens cannot
+/// disagree about whether an action's outcome is visible. Deliberately compact
+/// and non-modal: it states what happened and gets out of the way, and it never
+/// steals focus from the page.
+///
+/// The two messages have different lifetimes ON PURPOSE, and that difference is
+/// preserved here rather than flattened: a success line is transient (it is
+/// information about something that already worked), while a failure persists
+/// until dismissed or superseded, because an error that disappears on a timer is
+/// an error the user may never read.
+struct ActionFeedbackStrip: View {
+    let model: AppModel
+    @Environment(\.localization) private var language
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let error = model.lastError, !error.isEmpty {
+                Banner(kind: .error, message: error) {
+                    Button {
+                        model.clearError()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help(L.dismiss.tr(language))
+                    .accessibilityLabel(L.dismiss.tr(language))
+                }
+            }
+            if let status = model.transientStatus, !status.isEmpty {
+                Banner(kind: .info, message: status) {
+                    Button {
+                        model.clearTransientStatus()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help(L.dismiss.tr(language))
+                    .accessibilityLabel(L.dismiss.tr(language))
+                }
             }
         }
     }
