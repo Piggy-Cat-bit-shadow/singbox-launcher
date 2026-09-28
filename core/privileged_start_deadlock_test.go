@@ -101,7 +101,7 @@ func TestPrivilegedStart_NoNestedCmdMutexDeadlock(t *testing.T) {
 	ac.CmdMutex.Lock()
 	go func() {
 		// startSingBoxPrivileged сам мьютекс не берёт и не имеет права.
-		err := svc.startSingBoxPrivileged()
+		err := svc.startSingBoxPrivileged(ac.classic.currentGeneration())
 		ac.CmdMutex.Unlock() // отпускаем уже после возврата, как defer в Start
 		done <- err
 	}()
@@ -155,7 +155,7 @@ func TestPrivilegedStart_StateCommittedBeforeReturn(t *testing.T) {
 	defer restore()
 
 	ac.CmdMutex.Lock()
-	err := svc.startSingBoxPrivileged()
+	err := svc.startSingBoxPrivileged(ac.classic.currentGeneration())
 	running := ac.RunningState.IsRunning()
 	ac.CmdMutex.Unlock()
 	_ = running
@@ -186,7 +186,7 @@ func TestPrivilegedStart_ErrorPathDoesNotLock(t *testing.T) {
 	done := make(chan error, 1)
 	ac.CmdMutex.Lock()
 	go func() {
-		err := svc.startSingBoxPrivileged()
+		err := svc.startSingBoxPrivileged(ac.classic.currentGeneration())
 		ac.CmdMutex.Unlock()
 		done <- err
 	}()
@@ -224,7 +224,7 @@ func TestPrivilegedStart_NoPIDKeepsStateClean(t *testing.T) {
 	svc.privDeps.start = func(_, _, _ string) (int, int, error) { return 0, 0, nil }
 
 	ac.CmdMutex.Lock()
-	err := svc.startSingBoxPrivileged()
+	err := svc.startSingBoxPrivileged(ac.classic.currentGeneration())
 	ac.CmdMutex.Unlock()
 
 	if err == nil {
@@ -246,7 +246,7 @@ func TestPrivilegedStart_WritesPIDFile(t *testing.T) {
 	defer restore()
 
 	ac.CmdMutex.Lock()
-	err := svc.startSingBoxPrivileged()
+	err := svc.startSingBoxPrivileged(ac.classic.currentGeneration())
 	pidFile := ac.SingboxPrivilegedPIDFile
 	ac.CmdMutex.Unlock()
 

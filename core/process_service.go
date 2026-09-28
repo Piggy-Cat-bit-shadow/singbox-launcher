@@ -320,6 +320,28 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		return nil
 	}
 
+	// CLAIM THE RUNTIME, under the same lock as the re-check above.
+	//
+	// From here until the commit point the phase is "starting", which is the
+	// statement that was missing before: a start in progress (rebuild,
+	// authorization, spawn) looked exactly like "stopped" to every other caller,
+	// so the engine could be switched out from under it and the core this
+	// function eventually spawned belonged to nobody.
+	//
+	// beginOperation also REFUSES when an operation is already in flight, which
+	// is what makes a double click start exactly one core: the second call sees
+	// a busy runtime rather than an idle one.
+	startGen, startOpID, claimed := ac.classic.beginOperation(ClassicStarting, false)
+	if !claimed {
+		debuglog.InfoLog("startSingBox: a start is already in progress, ignoring duplicate request")
+		return nil
+	}
+	debuglog.InfoLog("startSingBox: starting (generation=%d op=%d)", startGen, startOpID)
+	// A new attempt supersedes the previous failure: keeping a stale error
+	// visible while a retry is already running would show the user a problem
+	// that may no longer exist.
+	ac.ClearLifecycleError()
+
 	// SPEC 045 phase 5.C — pre-start config rebuild:
 	// если Wizard Save поднял dirty-маркеры (CacheStale / ConfigStale),
 	// перед запуском sing-box пересобираем config.json из state + cache.
@@ -332,6 +354,12 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	// неоткуда.
 	if err := ac.rebuildConfigBeforeStart(false); err != nil {
 		debuglog.ErrorLog("startSingBox: config rebuild failed, sing-box not started: %v", err)
+		// Release the claim: nothing was started, so the runtime must not stay
+		// "starting" forever. A phase that never settles would block the mode
+		// switch permanently, which is a worse failure than the one it guards.
+		ac.classic.setPhase(startGen, ClassicFailed)
+		ac.RecordConfigError(LifecycleErrConfigRebuild, "start",
+			"the config could not be rebuilt, so the core was not started", err.Error())
 		return NewStartFailure(StartErrConfigRebuildFailed, err)
 	}
 
@@ -343,6 +371,7 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		if ac.uiPort != nil {
 			ac.uiPort.ReportCoreStartAborted("")
 		}
+		ac.classic.setPhase(startGen, ClassicStopped)
 		return ErrStartAborted
 	}
 
@@ -353,6 +382,9 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 			cmd := platform.GetSetCapCommand(ac.FileService.SingboxPath)
 			ac.uiPort.ShowCommandNeedsTerminal(locale.T("Linux capabilities required"), locale.T("Linux capabilities required")+"\n\n"+suggestion, cmd)
 		}
+		ac.RecordLifecycleError(LifecycleErrPermission, "start",
+			"the core needs additional Linux capabilities", suggestion, false)
+		ac.classic.setPhase(startGen, ClassicFailed)
 		return ErrStartAborted
 	}
 
@@ -380,7 +412,7 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 			hasTun = false
 		}
 		if hasTun {
-			if err := svc.startSingBoxPrivileged(); err != nil {
+			if err := svc.startSingBoxPrivileged(startGen); err != nil {
 				// Отказ гейта копии уже показан своим диалогом с командой; он
 				// сообщает о себе сам, поэтому наружу уходит Aborted, а не
 				// вторая ошибка про то же самое.
@@ -410,13 +442,27 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		corePath, privilegedLog = path, logFile
 	}
 
+	// LATE-SUPERSEDE CHECK, immediately before spawning.
+	//
+	// Everything above (rebuild, authorization, capability probes) can take
+	// seconds to minutes. If the runtime was abandoned in the meantime — the
+	// user switched to the daemon engine, or the app is shutting down — this
+	// start must not produce a process. Checking here rather than only at the
+	// entry is what closes the window: at entry the generation WAS current, so
+	// an entry check alone would pass and the core would still appear later.
+	if !ac.classic.isCurrent(startGen) {
+		debuglog.WarnLog("startSingBox: generation %d was superseded before spawn; not starting a core", startGen)
+		return ErrStartAborted
+	}
+
 	debuglog.WarnLog("startSingBox: Starting Sing-Box...")
-	ac.SingboxCmd = exec.Command(corePath, "run", "-c", filepath.Base(ac.FileService.ConfigPath))
-	platform.PrepareCommand(ac.SingboxCmd)
-	ac.SingboxCmd.Dir = ac.FileService.Layout.Data.Bin()
+	cmd := exec.Command(corePath, "run", "-c", filepath.Base(ac.FileService.ConfigPath))
+	platform.PrepareCommand(cmd)
+	cmd.Dir = ac.FileService.Layout.Data.Bin()
+	ac.SingboxCmd = cmd
 	if privilegedLog != nil {
-		ac.SingboxCmd.Stdout = privilegedLog
-		ac.SingboxCmd.Stderr = privilegedLog
+		cmd.Stdout = privilegedLog
+		cmd.Stderr = privilegedLog
 	} else if ac.FileService.ChildLogFile != nil {
 		// Check and rotate log file before starting new process to prevent unbounded growth
 		ac.FileService.CheckAndRotateLogFile(ac.FileService.ChildLogPath)
@@ -424,31 +470,54 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		// Write directly to file - no buffering in memory
 		// This prevents memory leaks from accumulating log output
 		// Logs are written immediately to disk, not stored in memory
-		ac.SingboxCmd.Stdout = ac.FileService.ChildLogFile
-		ac.SingboxCmd.Stderr = ac.FileService.ChildLogFile
+		cmd.Stdout = ac.FileService.ChildLogFile
+		cmd.Stderr = ac.FileService.ChildLogFile
 	} else {
 		debuglog.WarnLog("startSingBox: Warning: sing-box log file not available, output will not be logged.")
 	}
-	startErr := ac.SingboxCmd.Start()
+	startErr := cmd.Start()
 	if privilegedLog != nil {
 		// У ядра свой дескриптор classic.log; наш больше не нужен.
 		_ = privilegedLog.Close()
 	}
 	if err := startErr; err != nil {
 		debuglog.ErrorLog("startSingBox: Failed to start Sing-Box: %v", err)
-		return NewClassifiedStartFailure(StartErrSpawnFailed,
+		ac.classic.setPhase(startGen, ClassicFailed)
+		failure := NewClassifiedStartFailure(StartErrSpawnFailed,
 			fmt.Errorf("failed to start Sing-Box process: %w", err))
+		svc.recordStartFailure("start", failure)
+		return failure
 	}
 	if privilegedLog != nil {
 		svc.coreLog.Store(coreLogPrivileged)
 	} else {
 		svc.coreLog.Store(coreLogUser)
 	}
+
+	// THE COMMIT POINT.
+	//
+	// The process now exists, so ownership must be recorded — but only for the
+	// generation that asked for it. A superseded generation that reaches this
+	// line has a live process on its hands and nobody to own it: the correct
+	// action is to kill what it just created and report cancellation, NOT to
+	// adopt it into a runtime that has moved on. This is the orphan case: a
+	// process that exists, holds the TUN, and appears in no state the user can
+	// act on.
+	if !ac.classic.commitChild(startGen, cmd, corePath) {
+		pid := 0
+		if cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
+		debuglog.WarnLog("startSingBox: generation %d was superseded at the commit point; stopping the just-started core (PID=%d)", startGen, pid)
+		svc.killSupersededStart(cmd, corePath, pid)
+		return ErrStartAborted
+	}
+	ac.SingboxCmd = cmd
 	ac.RunningState.Set(true)
 	ac.StoppedByUser = false
 	ac.StateService.ResetAutoUpdateFailedAttempts() // Reset so auto-update can retry after successful Start
 	// Add log with PID
-	debuglog.DebugLog("startSingBox: Sing-Box started. PID=%d", ac.SingboxCmd.Process.Pid)
+	debuglog.DebugLog("startSingBox: Sing-Box started. PID=%d", cmd.Process.Pid)
 
 	// Start auto-loading proxies after sing-box is running
 	go func() {
@@ -518,9 +587,14 @@ type privilegedStartResult struct {
 // Вызывающий получает PID из канала и коммитит состояние сам, поэтому
 // инвариант «Start() вернул успех ⇒ RunningState уже true» сохраняется без
 // вложенного захвата.
-func (svc *ProcessService) commitPrivilegedStartLocked(scriptPID, singboxPID int, pidFilePath string) {
+// Returns false when the generation was superseded, in which case ownership was
+// deliberately NOT recorded: the caller must stop the process it just started.
+func (svc *ProcessService) commitPrivilegedStartLocked(gen uint64, scriptPID, singboxPID int, pidFilePath, corePath string) bool {
 	ac := svc.ac
 	svc.coreLog.Store(coreLogPrivileged)
+	if !ac.classic.commitPrivileged(gen, scriptPID, singboxPID, pidFilePath, corePath) {
+		return false
+	}
 	ac.SingboxCmd = nil
 	ac.SingboxPrivilegedMode = true
 	ac.SingboxPrivilegedPID = scriptPID
@@ -532,6 +606,7 @@ func (svc *ProcessService) commitPrivilegedStartLocked(scriptPID, singboxPID int
 		ac.StateService.ResetAutoUpdateFailedAttempts() // auto-update may retry after a successful start
 	}
 	ac.RunningState.Set(true)
+	return true
 }
 
 // startSingBoxPrivileged starts sing-box with elevated privileges on macOS (for TUN).
@@ -545,7 +620,7 @@ func (svc *ProcessService) commitPrivilegedStartLocked(scriptPID, singboxPID int
 //
 // PRECONDITION: ac.CmdMutex удерживается вызывающим (Start). Worker НЕ берёт
 // CmdMutex — см. commitPrivilegedStartLocked.
-func (svc *ProcessService) startSingBoxPrivileged() error {
+func (svc *ProcessService) startSingBoxPrivileged(gen uint64) error {
 	ac := svc.ac
 	deps := svc.deps()
 	corePath, err := deps.gate(ac)
@@ -580,16 +655,25 @@ func (svc *ProcessService) startSingBoxPrivileged() error {
 	}()
 
 	var pids privilegedStartResult
+	timedOut := false
 	select {
 	case pids = <-pidCh:
 	case <-time.After(privilegedStartTimeout):
-		// Авторизация может висеть сколько угодно долго, но не бесконечно:
-		// иначе GUI остаётся с «идёт запуск» навсегда. Таймаут не снимает
-		// процесс (его мог запустить пользователь позже) — он только
-		// возвращает управление, а PID подхватит следующий Start/adoption.
+		// The user stopped waiting, but the OPERATION has not stopped: the
+		// authorization dialog is still on screen and the worker will still
+		// return a result — possibly a running ROOT core.
+		//
+		// This is the orphan case. Returning here and letting the worker write
+		// into a buffered channel nobody reads leaves a root sing-box holding the
+		// TUN, with no RunningState, no owner and no waiter. Handing the channel
+		// to a supervisor is what makes the late result actionable: it is either
+		// adopted (if this generation is still current) or stopped (if not).
+		timedOut = true
+		go svc.superviseLatePrivilegedStart(gen, corePath, pidCh)
 		return fmt.Errorf("privileged start did not return within %s (authorization still pending?)", privilegedStartTimeout)
 	}
 
+	_ = timedOut
 	if pids.Err != nil {
 		// Отказ/отмена авторизации: ничего не коммитим, состояние не трогаем.
 		// CmdMutex отпустит defer в Start().
@@ -601,17 +685,36 @@ func (svc *ProcessService) startSingBoxPrivileged() error {
 	}
 
 	// Caller владеет CmdMutex — коммитим состояние здесь, до возврата.
-	svc.commitPrivilegedStartLocked(pids.Script, pids.Singbox, pidFilePath)
+	if !svc.commitPrivilegedStartLocked(gen, pids.Script, pids.Singbox, pidFilePath, corePath) {
+		// Superseded between the authorization returning and this commit: the
+		// root core is up and this generation no longer owns anything. Stopping
+		// it is the only correct outcome — adopting it would run a core for an
+		// engine the user has already left.
+		debuglog.WarnLog("startSingBox: generation %d was superseded during privileged start; stopping the root core (PIDs %d/%d)",
+			gen, pids.Script, pids.Singbox)
+		svc.stopSupersededPrivileged(pids.Script, pids.Singbox, pidFilePath, corePath)
+		return ErrStartAborted
+	}
 	// pid-файл пишем как пользователь; ошибка не глотается (SPEC 145).
 	svc.writePIDFile(pidFilePath, pids.Script, pids.Singbox)
 	debuglog.DebugLog("startSingBox: Sing-Box started with privileges (script PID=%d, sing-box PID=%d).", pids.Script, pids.Singbox)
 
 	// Долгое ожидание выхода root-процесса — в отдельной горутине, вне пути
 	// старта: она не держит CmdMutex и не задерживает возврат Start().
-	go func(scriptPID int) {
+	//
+	// The generation is captured HERE and checked inside the callback: this
+	// goroutine can outlive the runtime that created it (the user switches to
+	// the daemon engine while the root core is running), and without the check
+	// its exit would be applied to a runtime it does not belong to.
+	go func(scriptPID int, g uint64) {
 		deps.waitExit(scriptPID)
+		if !ac.classic.isCurrent(g) {
+			debuglog.InfoLog("startSingBox: privileged waiter for generation %d is stale (current=%d); ignoring exit",
+				g, ac.classic.currentGeneration())
+			return
+		}
 		svc.onPrivilegedScriptExited()
-	}(pids.Script)
+	}(pids.Script, gen)
 
 	go func() {
 		<-time.After(2 * time.Second)
@@ -624,11 +727,31 @@ func (svc *ProcessService) startSingBoxPrivileged() error {
 // The script waits on sing-box, so when the script exits, sing-box has exited too.
 func (svc *ProcessService) onPrivilegedScriptExited() {
 	ac := svc.ac
+	// This runs from the waiter goroutine, which outlives the runtime that
+	// created it. The caller already checks the generation before invoking this;
+	// the check is repeated here because this function also has a direct call
+	// site in the privileged exit path, and a state write without it would let a
+	// dead generation clear a live one's ownership.
+	gen := ac.classic.currentGeneration()
+	if !ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("onPrivilegedScriptExited: stale generation %d, ignoring", gen)
+		return
+	}
 	ac.CmdMutex.Lock()
 	defer ac.CmdMutex.Unlock()
+	if !ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("onPrivilegedScriptExited: generation became stale while acquiring the lock, ignoring")
+		return
+	}
 	if !ac.SingboxPrivilegedMode {
 		return
 	}
+	// The owned root process is gone (the wrapper exited and the waiter
+	// returned), so ownership is cleared together with the phase. Clearing
+	// ownership here rather than only the individual fields is what keeps the
+	// identity from outliving the process it describes.
+	ac.classic.clearOwnership(gen)
+	ac.classic.setPhase(gen, ClassicStopped)
 	ac.SingboxPrivilegedMode = false
 	ac.SingboxPrivilegedPID = 0
 	ac.SingboxPrivilegedSingboxPID = 0
@@ -653,6 +776,13 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 		ac.RestartRequestedByUser = false
 		debuglog.InfoLog("onPrivilegedScriptExited: Restart requested by user, starting sing-box...")
 		ac.CmdMutex.Unlock()
+		// Generation re-checked after releasing the lock: this is the window in
+		// which a mode switch or a newer start can supersede us, and restarting
+		// into someone else's runtime is the failure this guards.
+		if !ac.classic.isCurrent(gen) {
+			debuglog.InfoLog("onPrivilegedScriptExited: superseded before restart, not restarting")
+			return
+		}
 		runGhostTunCleanup(true)
 		svc.Start(true)
 		{
@@ -681,6 +811,12 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 	}
 	ac.CmdMutex.Unlock()
 	<-time.After(2 * time.Second)
+	// Same window as the child-process monitor, same guard: after the delay the
+	// runtime may belong to another engine entirely.
+	if !ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("onPrivilegedScriptExited: generation %d superseded during the restart delay; not restarting", gen)
+		return
+	}
 	svc.Start(true)
 	ac.CmdMutex.Lock()
 	if ac.RunningState.IsRunning() {
@@ -702,17 +838,46 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 }
 
 // Monitor tracks the sing-box process and auto-restarts on crash (same logic as before).
+//
+// THE GENERATION CHECK IS THE POINT. This goroutine blocks in Wait() for as long
+// as the core lives, then unlocks and may start a NEW core. In between, the world
+// can change: the user switches to the daemon engine, the app shuts down, or a
+// newer start supersedes this one. The PID comparison that used to guard this
+// (is ac.SingboxCmd still my PID?) cannot express those cases — a switched engine
+// clears the process state, and "no cmd" was indistinguishable from "nothing to
+// do", so a crash monitor in its restart delay would wake up and start a classic
+// core next to the daemon's.
+//
+// The generation captured at spawn is checked before ANY state write and before
+// any restart. A stale monitor is a complete no-op: it must not set state, clear
+// ownership, count a crash, or start anything.
 func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	ac := svc.ac
 	// Store the PID we're monitoring to avoid conflicts with restarted processes
 	monitoredPID := cmdToMonitor.Process.Pid
+	// The generation this process belongs to, captured at creation.
+	monGen := ac.classic.currentGeneration()
 
 	// Wait for process completion - no timeout for long-running processes
-	// The process should run until it exits or is stopped by user
+	// The process should exit or be stopped by user
 	err := cmdToMonitor.Wait()
+
+	// STALE MONITOR GATE — before the lock, before any state.
+	if !ac.classic.isCurrent(monGen) {
+		debuglog.InfoLog("monitorSingBox: monitor for generation %d is stale (current=%d); ignoring exit of PID %d",
+			monGen, ac.classic.currentGeneration(), monitoredPID)
+		return
+	}
 
 	ac.CmdMutex.Lock()
 	defer ac.CmdMutex.Unlock()
+
+	// Re-check under the lock: the generation can change between the gate above
+	// and acquiring CmdMutex (that is exactly the mode-switch window).
+	if !ac.classic.isCurrent(monGen) {
+		debuglog.InfoLog("monitorSingBox: generation %d became stale while acquiring the lock; ignoring exit", monGen)
+		return
+	}
 
 	// GOLDEN STANDARD: Check order to prevent all race conditions
 	// 1. First PID (is this my process?)
@@ -799,6 +964,25 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 
 	ac.CmdMutex.Unlock()
 	<-time.After(2 * time.Second)
+
+	// THE MODE-SWITCH WINDOW, closed.
+	//
+	// These two seconds are precisely where the reported race lived: a crash
+	// enters the restart delay, the user switches to the daemon engine, the delay
+	// expires — and the old code called svc.Start(true) unconditionally,
+	// bringing a classic core up alongside the daemon's. Two engines, one VPN,
+	// no way for the user to tell which one owns the TUN.
+	//
+	// Re-checking the generation AFTER the wait (not just before it) makes the
+	// stale case impossible: a switch renews the generation, so this monitor's
+	// claim is void and it must do nothing at all. Not even cleanup — the
+	// TUN-ghost cleanup below would otherwise touch devices belonging to the
+	// engine that now owns them.
+	if !ac.classic.isCurrent(monGen) {
+		debuglog.InfoLog("monitorSingBox: generation %d was superseded during the restart delay; not restarting", monGen)
+		return
+	}
+
 	// SPEC 065 hotfix (v0.9.9.1): cleanup phantom singbox-tun adapter from
 	// the just-crashed sing-box BEFORE auto-restart. Без этого хука каждый
 	// retry создаёт новый адаптер (singbox-tun0 → tun1 → tun2) потому что
@@ -806,6 +990,12 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	// попытки = 3 phantom-адаптера, даже если юзер вообще не нажимал Stop.
 	// Sync mode: cleanup точно завершится ДО Start.
 	runGhostTunCleanup(true)
+	// Start(true) runs on THIS generation's behalf; a supersede between the
+	// check above and the call itself is handled inside Start by beginOperation.
+	if !ac.classic.isCurrent(monGen) {
+		debuglog.InfoLog("monitorSingBox: generation %d was superseded before restart; not restarting", monGen)
+		return
+	}
 	svc.Start(true)
 	ac.CmdMutex.Lock()
 
@@ -833,142 +1023,275 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 }
 
 // Stop attempts graceful shutdown, mirroring previous StopSingBoxProcess.
+// Stop terminates the owned core and does not report success until it is gone.
+//
+// THE INVARIANT: "stopped" means the launcher has CONFIRMED that the core it
+// owns has exited. It does not mean "a signal was sent". The old implementation
+// sent SIGTERM and immediately set RunningState=false, so a root sing-box that
+// ignored the signal kept the TUN up and its routes installed while the UI
+// offered to start another one.
+//
+// OWNERSHIP, NOT PHASE. The old entry check was `if !RunningState.IsRunning()
+// { return }`, which is a statement about the launcher's BELIEF. A logical state
+// that says stopped while a root core is up is exactly the desynchronisation
+// this must survive: the process exists, we own it, and the user asked for it to
+// stop. So the decision is made from the recorded process identity, and the
+// phase is only bookkeeping.
 func (svc *ProcessService) Stop() {
 	if svc.stopOverrideForTest != nil {
 		svc.stopOverrideForTest()
 		return
 	}
 	ac := svc.ac
-	ac.CmdMutex.Lock()
 
-	// CRITICAL: Set flag BEFORE sending signal
-	// This ensures the monitor sees the flag even if the process exits very quickly
+	ac.CmdMutex.Lock()
+	owned, hasOwned, privileged := ac.classic.ownedProcess()
+	if !hasOwned {
+		// Nothing recorded as ours. Fall back to the legacy fields only when
+		// they describe a process we can still verify — a recorded PID without a
+		// verified executable is not something to signal.
+		if ac.SingboxPrivilegedMode && ac.SingboxPrivilegedPID != 0 {
+			owned = ProcessIdentity{PID: ac.SingboxPrivilegedPID, Executable: svc.privilegedCorePath()}
+			hasOwned = owned.Executable != ""
+			privileged = true
+		} else if ac.SingboxCmd != nil && ac.SingboxCmd.Process != nil {
+			owned = ProcessIdentity{PID: ac.SingboxCmd.Process.Pid, Executable: svc.currentCorePath()}
+			hasOwned = owned.Executable != ""
+		}
+	}
+	if !hasOwned {
+		// Genuinely nothing to stop.
+		debuglog.InfoLog("stopSingBox: no owned process to stop")
+		ac.RunningState.Set(false)
+		ac.classic.setPhase(ac.classic.currentGeneration(), ClassicStopped)
+		ac.CmdMutex.Unlock()
+		return
+	}
+
+	// Intent is recorded BEFORE the signal and belongs to this operation: the
+	// monitor must see "the user stopped this" even if the process exits
+	// instantly, or a deliberate stop is misread as a crash and auto-restarted.
+	gen := ac.classic.currentGeneration()
+	ac.classic.setIntent(gen, true, false)
+	ac.classic.setPhase(gen, ClassicStopping)
 	ac.StoppedByUser = true
 	ac.ConsecutiveCrashAttempts = 0
+	ac.classic.clearIntent(gen)
 
-	if !ac.RunningState.IsRunning() {
-		ac.StoppedByUser = false
-		ac.CmdMutex.Unlock()
-		return
-	}
-
-	if ac.SingboxPrivilegedMode && ac.SingboxPrivilegedPID != 0 && ac.SingboxPrivilegedPIDFile != "" {
-		pidFile := ac.SingboxPrivilegedPIDFile
-		scriptPID := ac.SingboxPrivilegedPID
-		singboxPID := ac.SingboxPrivilegedSingboxPID
-		ac.CmdMutex.Unlock()
-		debuglog.InfoLog("stopSingBox: Killing privileged Sing-Box (script PID %d, sing-box PID %d)...", scriptPID, singboxPID)
-		if err := platform.KillPrivilegedProcess(scriptPID, singboxPID, pidFile); err != nil {
-			debuglog.WarnLog("stopSingBox: Privileged kill failed: %v", err)
-			ac.CmdMutex.Lock()
-			ac.StoppedByUser = false
-			ac.CmdMutex.Unlock()
-			// На пути выхода диалог бессмысленен: GracefulExit идёт на
-			// main-потоке Fyne, окно закрывается — ошибка остаётся в логе.
-			if ac.hasUI() && !ac.IsExiting() {
-				ac.uiPort.ShowError(locale.T("Error"), locale.T(stopPrivilegedFailedText)+": "+err.Error())
-			}
-			return
-		}
-		ac.CmdMutex.Lock()
-		ac.SingboxPrivilegedMode = false
-		ac.SingboxPrivilegedPID = 0
-		ac.SingboxPrivilegedSingboxPID = 0
-		ac.SingboxPrivilegedPIDFile = ""
-		ac.RunningState.Set(false)
-		ac.StoppedByUser = false
-		ac.CmdMutex.Unlock()
-		// SPEC 065: privileged path не идёт через Monitor (нет cmd.Wait),
-		// поэтому хук дублируется здесь. KillPrivilegedProcess вернулся
-		// успешно ⇒ sing-box процесс подтверждённо завершён.
-		triggerGhostTunCleanup()
-		return
-	}
-
-	if ac.SingboxCmd == nil || ac.SingboxCmd.Process == nil {
-		debuglog.InfoLog("StopSingBoxProcess: Inconsistent state detected. Correcting state.")
-		ac.RunningState.Set(false)
-		ac.StoppedByUser = false
-		ac.CmdMutex.Unlock()
-		return
-	}
-
-	debuglog.InfoLog("stopSingBox: Attempting graceful shutdown...")
-	processToStop := ac.SingboxCmd.Process
-
-	// Разблокируем мьютекс перед отправкой сигнала, чтобы не блокировать
+	// Everything needed for termination is captured under the lock; the signals
+	// themselves run without it so a slow exit does not block the UI thread.
+	cmd := ac.SingboxCmd
+	scriptPID := ac.SingboxPrivilegedPID
+	singboxPID := ac.SingboxPrivilegedSingboxPID
+	pidFile := ac.SingboxPrivilegedPIDFile
+	corePath := svc.currentCorePath()
 	ac.CmdMutex.Unlock()
 
-	var err error
-	if runtime.GOOS == "windows" {
-		debuglog.InfoLog("stopSingBox: Stopping Sing-Box PID %d...", processToStop.Pid)
-		err = platform.KillProcessByPID(processToStop.Pid)
+	checker := platformChecker{}
+	var termErr error
+
+	if privileged {
+		debuglog.InfoLog("stopSingBox: stopping privileged core (script PID %d, sing-box PID %d)", scriptPID, singboxPID)
+		_, termErr = terminatePrivilegedOwned(scriptPID, singboxPID, pidFile, corePath, "stop", checker)
 	} else {
-		err = processToStop.Signal(os.Interrupt)
+		debuglog.InfoLog("stopSingBox: stopping core (PID %d)", owned.PID)
+		_, termErr = terminateOwnedProcess(owned, "stop", checker, func(pid int, force bool) error {
+			return signalLocalProcess(cmd, pid, force)
+		})
 	}
 
-	if err != nil {
-		debuglog.WarnLog("stopSingBox: Graceful signal failed: %v. Forcing kill.", err)
-		if killErr := processToStop.Kill(); killErr != nil {
-			debuglog.ErrorLog("stopSingBox: Failed to kill Sing-Box process: %v", killErr)
+	ac.CmdMutex.Lock()
+	defer ac.CmdMutex.Unlock()
+
+	if termErr != nil {
+		// NOT stopped. Saying otherwise would be the original lie: the UI would
+		// offer Start while a root core still holds the interface.
+		debuglog.ErrorLog("stopSingBox: could not confirm exit: %v", termErr)
+		// Keep ownership: the process may still be alive, and dropping the
+		// identity would make it unreachable for the next stop attempt.
+		ac.classic.setPhase(gen, ClassicFailed)
+		ac.RecordLifecycleError(LifecycleErrStopFailed, "stop",
+			"the core could not be stopped", termErr.Error(), true)
+		if ac.hasUI() && !ac.IsExiting() {
+			ac.uiPort.ShowError(locale.T("Error"), locale.T(stopPrivilegedFailedText)+": "+termErr.Error())
 		}
-	} else {
-		// Start watchdog timer that will kill the process if it doesn't close itself
-		go func(pid int) {
-			<-time.After(gracefulShutdownTimeout)
-			pInfo, found, err := process.FindProcess(pid)
-			if err == nil && found {
-				_ = pInfo // pInfo is the process info; we only need to know it exists
-				debuglog.DebugLog("stopSingBox watchdog: Process %d still running after timeout. Forcing kill.", pid)
-				// Reliably kill the process and its child processes
-				_ = platform.KillProcessByPID(pid)
-			} else if err != nil {
-				debuglog.DebugLog("stopSingBox watchdog: error checking process %d: %v", pid, err)
-			}
-		}(processToStop.Pid)
+		return
 	}
+
+	// Confirmed gone.
+	ac.classic.clearOwnership(gen)
+	ac.classic.setPhase(gen, ClassicStopped)
+	ac.SingboxPrivilegedMode = false
+	ac.SingboxPrivilegedPID = 0
+	ac.SingboxPrivilegedSingboxPID = 0
+	ac.SingboxPrivilegedPIDFile = ""
+	ac.StoppedByUser = false
+	ac.RunningState.Set(false)
+	if pidFile != "" {
+		_ = os.Remove(pidFile)
+	}
+	// The TUN interface is released only now, after the process that owned it is
+	// confirmed dead: cleaning up while it is still alive races the core's own
+	// teardown and can leave a phantom adapter.
+	triggerGhostTunCleanup()
 }
 
-// KillForRestart kills the sing-box process and asks the watcher to restart it (RestartRequestedByUser).
+// signalLocalProcess sends a graceful or forced signal to a locally owned child.
+//
+// Identity was verified by the caller before this point; the verified PID is
+// passed explicitly so the signal can never be aimed at a recycled one.
+func signalLocalProcess(cmd *exec.Cmd, pid int, force bool) error {
+	if pid <= 0 {
+		return fmt.Errorf("invalid PID %d", pid)
+	}
+	// Prefer the exec.Cmd handle when it is the same process: signaling through
+	// it cannot target anything else.
+	if cmd != nil && cmd.Process != nil && cmd.Process.Pid == pid {
+		if force {
+			return cmd.Process.Kill()
+		}
+		if runtime.GOOS == "windows" {
+			return platform.KillProcessByPID(pid)
+		}
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	if force {
+		return platform.KillProcessByPID(pid)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return platform.KillProcessByPID(pid)
+	}
+	return proc.Signal(os.Interrupt)
+}
+
+// currentCorePath returns the core binary path this launcher would run.
+func (svc *ProcessService) currentCorePath() string {
+	if svc == nil || svc.ac == nil || svc.ac.FileService == nil {
+		return ""
+	}
+	return svc.ac.FileService.SingboxPath
+}
+
+// privilegedCorePath returns the path of the root-owned core copy, which is the
+// executable identity a privileged core must match.
+func (svc *ProcessService) privilegedCorePath() string {
+	if svc == nil || svc.ac == nil {
+		return ""
+	}
+	if path, err := svc.ac.privilegedCoreCopyGate(); err == nil && path != "" {
+		return path
+	}
+	return svc.currentCorePath()
+}
+
+// KillForRestart stops the owned core and asks for a restart.
+//
+// Uses the SAME termination primitive as Stop. Previously restart was a second,
+// weaker implementation: it sent the interrupt and returned, relying on the
+// crash watcher to notice the exit and bring the process back. When the signal
+// was ignored — a wedged core — restart never happened at all: no timeout, no
+// forced kill, no error, and a Restart button that appeared dead. Stop had a
+// watchdog; restart did not. One primitive, two policies, is the fix.
+//
+// The restart intent is OPERATION-SCOPED. It is recorded only after the
+// termination is confirmed and consumed by whoever acts on it, so a failed
+// restart cannot leave a sticky "the user wants a restart" that makes an
+// unrelated later exit start a core nobody asked for.
 func (svc *ProcessService) KillForRestart() {
 	ac := svc.ac
 	ac.CmdMutex.Lock()
 
-	if !ac.RunningState.IsRunning() {
-		ac.CmdMutex.Unlock()
-		return
-	}
-
-	ac.RestartRequestedByUser = true // watcher will see exit and call Start(true)
-
-	if ac.SingboxPrivilegedMode && ac.SingboxPrivilegedPID != 0 && ac.SingboxPrivilegedPIDFile != "" {
-		pidFile := ac.SingboxPrivilegedPIDFile
-		scriptPID := ac.SingboxPrivilegedPID
-		singboxPID := ac.SingboxPrivilegedSingboxPID
-		ac.CmdMutex.Unlock()
-		debuglog.InfoLog("KillForRestart: Killing privileged Sing-Box (script PID %d, sing-box PID %d)...", scriptPID, singboxPID)
-		if err := platform.KillPrivilegedProcess(scriptPID, singboxPID, pidFile); err != nil {
-			debuglog.WarnLog("KillForRestart: Privileged kill failed: %v", err)
+	owned, hasOwned, privileged := ac.classic.ownedProcess()
+	if !hasOwned {
+		if ac.SingboxPrivilegedMode && ac.SingboxPrivilegedPID != 0 {
+			owned = ProcessIdentity{PID: ac.SingboxPrivilegedPID, Executable: svc.privilegedCorePath()}
+			hasOwned = owned.Executable != ""
+			privileged = true
+		} else if ac.SingboxCmd != nil && ac.SingboxCmd.Process != nil {
+			owned = ProcessIdentity{PID: ac.SingboxCmd.Process.Pid, Executable: svc.currentCorePath()}
+			hasOwned = owned.Executable != ""
 		}
-		return
 	}
-
-	if ac.SingboxCmd == nil || ac.SingboxCmd.Process == nil {
+	if !hasOwned {
+		// Nothing to restart from. Starting fresh is what the user wants, and it
+		// is honest: there was no process to preserve.
+		debuglog.InfoLog("KillForRestart: nothing owned to restart; starting instead")
 		ac.CmdMutex.Unlock()
+		svc.Start(true)
 		return
 	}
 
-	processToStop := ac.SingboxCmd.Process
+	gen := ac.classic.currentGeneration()
+	// Mark the intent for THIS generation before the signal, so the exit that
+	// follows is understood as deliberate rather than a crash.
+	ac.classic.setIntent(gen, false, true)
+	ac.classic.setPhase(gen, ClassicRestarting)
+	ac.RestartRequestedByUser = true
+
+	cmd := ac.SingboxCmd
+	scriptPID := ac.SingboxPrivilegedPID
+	singboxPID := ac.SingboxPrivilegedSingboxPID
+	pidFile := ac.SingboxPrivilegedPIDFile
+	corePath := svc.currentCorePath()
 	ac.CmdMutex.Unlock()
 
-	debuglog.InfoLog("KillForRestart: Sending signal to PID %d...", processToStop.Pid)
-	if runtime.GOOS == "windows" {
-		_ = platform.KillProcessByPID(processToStop.Pid)
+	checker := platformChecker{}
+	var termErr error
+	if privileged {
+		debuglog.InfoLog("KillForRestart: stopping privileged core (script PID %d, sing-box PID %d)", scriptPID, singboxPID)
+		_, termErr = terminatePrivilegedOwned(scriptPID, singboxPID, pidFile, corePath, "restart", checker)
 	} else {
-		if err := processToStop.Signal(os.Interrupt); err != nil {
-			_ = processToStop.Kill()
-		}
+		debuglog.InfoLog("KillForRestart: stopping core (PID %d)", owned.PID)
+		_, termErr = terminateOwnedProcess(owned, "restart", checker, func(pid int, force bool) error {
+			return signalLocalProcess(cmd, pid, force)
+		})
 	}
+
+	ac.CmdMutex.Lock()
+	if termErr != nil {
+		// The restart did not happen. Clear the intent rather than leaving it
+		// set: a sticky restart flag turns the NEXT, unrelated exit into an
+		// unwanted start. Reporting the failure is what stops the user waiting
+		// for a restart that will never come.
+		ac.classic.clearIntent(gen)
+		ac.RestartRequestedByUser = false
+		ac.classic.setPhase(gen, ClassicFailed)
+		debuglog.ErrorLog("KillForRestart: could not confirm exit: %v", termErr)
+		ac.RecordLifecycleError(LifecycleErrStopFailed, "restart",
+			"the core could not be stopped for a restart", termErr.Error(), true)
+		ac.CmdMutex.Unlock()
+		return
+	}
+
+	// Confirmed gone. Ownership is dropped here and the intent is left for the
+	// restart to consume; the exit watcher may already have raced us, in which
+	// case it saw the intent and is starting the replacement itself.
+	ac.classic.clearOwnership(gen)
+	ac.SingboxPrivilegedMode = false
+	ac.SingboxPrivilegedPID = 0
+	ac.SingboxPrivilegedSingboxPID = 0
+	ac.SingboxPrivilegedPIDFile = ""
+	ac.RunningState.Set(false)
+	if pidFile != "" {
+		_ = os.Remove(pidFile)
+	}
+	ac.CmdMutex.Unlock()
+
+	// The watcher (Monitor or the privileged waiter) normally observes the exit
+	// and performs the restart. If the process was adopted — no watcher exists —
+	// or the watcher is gone, nothing would bring it back, so the restart is
+	// performed here. takeRestartIntent makes this mutually exclusive with the
+	// watcher's own handling.
+	if !ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("KillForRestart: generation %d was superseded; not restarting", gen)
+		return
+	}
+	runGhostTunCleanup(true)
+	svc.Start(true)
 }
 
 // CheckIfRunningAtStart checks if sing-box is already running at application start.
@@ -1374,4 +1697,171 @@ func (svc *ProcessService) isSingBoxProcessRunningWithPS(ourPID int) (bool, int)
 	}
 	debuglog.DebugLog("isSingBoxProcessRunningWithPS: No sing-box process found (checked %d processes)", len(processes))
 	return false, -1
+}
+
+// recordStartFailure records a start failure in the unified lifecycle store so
+// the headless backend and the SwiftUI client see it, not just the log.
+//
+// The Fyne dialog path is kept for the Fyne UI, but it is no longer the only
+// consumer: that arrangement left the macOS app structurally unable to learn
+// that a start had failed.
+func (svc *ProcessService) recordStartFailure(operation string, err error) {
+	if svc == nil || svc.ac == nil || err == nil {
+		return
+	}
+	code, recoverable := ClassifyLifecycleError(err)
+	svc.ac.RecordLifecycleError(code, operation, "the core failed to start", err.Error(), recoverable)
+}
+
+// killSupersededStart stops a core this (now abandoned) generation just spawned.
+//
+// This is the second half of the orphan fix. A superseded generation must not
+// leave a process behind: it would hold the TUN, be invisible in the UI, and be
+// impossible for the user to stop. Killing it is safe by construction — the
+// process was created microseconds ago by this function, and the identity is
+// taken from the cmd handle we still own, so no PID reuse is possible.
+func (svc *ProcessService) killSupersededStart(cmd *exec.Cmd, exe string, pid int) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// Best-effort but *reported*: if this fails the process outlives its
+	// owner, which is exactly the condition worth telling the user about.
+	if err := cmd.Process.Kill(); err != nil {
+		debuglog.ErrorLog("startSingBox: could not stop the superseded core (PID=%d): %v", pid, err)
+		if svc.ac != nil {
+			svc.ac.RecordLifecycleError(LifecycleErrStopFailed, "start",
+				"a superseded start left a process behind",
+				fmt.Sprintf("PID %d could not be stopped: %v", pid, err), false)
+		}
+		return
+	}
+	// Reap it so the handle does not linger, and confirm it is actually gone
+	// rather than assuming the kill call was the end of it.
+	_ = cmd.Wait()
+	checker := platformChecker{}
+	if alive, err := checker.alive(pid, exe); err == nil && alive {
+		debuglog.ErrorLog("startSingBox: superseded core (PID=%d) survived the kill", pid)
+		if svc.ac != nil {
+			svc.ac.RecordLifecycleError(LifecycleErrStopFailed, "start",
+				"a superseded start left a process behind",
+				fmt.Sprintf("PID %d survived a forced kill", pid), false)
+		}
+		return
+	}
+	debuglog.InfoLog("startSingBox: superseded core (PID=%d) stopped", pid)
+}
+
+// superviseLatePrivilegedStart drains a privileged start whose result the UI
+// stopped waiting for.
+//
+// # WHY THIS EXISTS
+//
+// Authorization can take arbitrarily long — the user may leave the password
+// dialog on screen for minutes. The UI must not wait forever, so the start path
+// times out. But timing out the WAIT is not the same as abandoning the
+// OPERATION: the worker keeps running, and if the user finally authenticates it
+// starts a ROOT sing-box. Previously that result was written into a buffered
+// channel that nobody read again, producing a root core that held the TUN while
+// the launcher reported "stopped" and offered to start another one.
+//
+// This supervisor is what makes the late result safe. It waits for the worker
+// however long it takes and then does exactly one of two things:
+//
+//   - the generation is still current: adopt the process (recording ownership
+//     and starting the exit watcher), so it appears as running and can be
+//     stopped;
+//   - the generation was superseded (mode switch, shutdown, a newer start):
+//     stop the process immediately and confirm it is gone.
+//
+// Either way no process is left unowned.
+func (svc *ProcessService) superviseLatePrivilegedStart(gen uint64, corePath string, pidCh <-chan privilegedStartResult) {
+	if svc == nil || svc.ac == nil {
+		// Nothing can own the result; still must not leak a root process.
+		if res, ok := <-pidCh; ok && res.Err == nil && res.Script > 0 {
+			svc.stopSupersededPrivileged(res.Script, res.Singbox, svc.pidFilePath(), corePath)
+		}
+		return
+	}
+	res, ok := <-pidCh
+	if !ok {
+		return
+	}
+	// The worker failed or the user cancelled: nothing was started, so there is
+	// nothing to adopt or kill. Recording the reason is still worthwhile — this
+	// is precisely the case that used to vanish into the log.
+	if res.Err != nil {
+		debuglog.WarnLog("startSingBox: late privileged result for generation %d failed: %v", gen, res.Err)
+		svc.recordStartFailure("start", NewStartFailure(StartErrSpawnFailed, res.Err))
+		return
+	}
+	if res.Script <= 0 {
+		debuglog.WarnLog("startSingBox: late privileged result for generation %d carried no PID", gen)
+		return
+	}
+
+	if !svc.ac.classic.isCurrent(gen) {
+		debuglog.WarnLog("startSingBox: late privileged start for generation %d arrived after it was superseded; stopping the root core (PIDs %d/%d)",
+			gen, res.Script, res.Singbox)
+		svc.stopSupersededPrivileged(res.Script, res.Singbox, svc.pidFilePath(), corePath)
+		return
+	}
+
+	// Still current: adopt it properly, which means recording ownership (so Stop
+	// can find it) and starting the exit watcher (so an unexpected death is
+	// noticed rather than leaving the UI showing "running" forever).
+	debuglog.InfoLog("startSingBox: adopting the late privileged start (PIDs %d/%d, generation %d)", res.Script, res.Singbox, gen)
+	svc.ac.CmdMutex.Lock()
+	defer svc.ac.CmdMutex.Unlock()
+	if svc.ac.RunningState.IsRunning() {
+		// A newer successful start already owns the runtime; this late result is
+		// a duplicate and must not overwrite it.
+		debuglog.WarnLog("startSingBox: a core is already running; stopping the late privileged start (PIDs %d/%d)", res.Script, res.Singbox)
+		svc.stopSupersededPrivileged(res.Script, res.Singbox, svc.pidFilePath(), corePath)
+		return
+	}
+	pidFilePath := svc.pidFilePath()
+	if !svc.commitPrivilegedStartLocked(gen, res.Script, res.Singbox, pidFilePath, corePath) {
+		svc.stopSupersededPrivileged(res.Script, res.Singbox, pidFilePath, corePath)
+		return
+	}
+	svc.writePIDFile(pidFilePath, res.Script, res.Singbox)
+	svc.ac.classic.setPhase(gen, ClassicRunning)
+	go func(scriptPID int, g uint64) {
+		svc.deps().waitExit(scriptPID)
+		if !svc.ac.classic.isCurrent(g) {
+			return
+		}
+		svc.onPrivilegedScriptExited()
+	}(res.Script, gen)
+	svc.ac.EmitCoreStateChange()
+}
+
+// stopSupersededPrivileged terminates a root core that no generation owns.
+//
+// Used for the two orphan-producing cases: a start superseded at its commit
+// point, and a late result arriving after abandonment. Both have the same
+// requirement — the process exists and must not, so it is stopped and the exit
+// is CONFIRMED rather than assumed.
+func (svc *ProcessService) stopSupersededPrivileged(scriptPID, singboxPID int, pidFile, corePath string) {
+	if scriptPID <= 0 && singboxPID <= 0 {
+		return
+	}
+	checker := platformChecker{}
+	outcome, err := terminatePrivilegedOwned(scriptPID, singboxPID, pidFile, corePath,
+		"superseded start", checker)
+	if err != nil {
+		debuglog.ErrorLog("startSingBox: superseded privileged core (PIDs %d/%d) could not be stopped: %v",
+			scriptPID, singboxPID, err)
+		if svc.ac != nil {
+			svc.ac.RecordLifecycleError(LifecycleErrStopFailed, "start",
+				"a superseded start left a root process running",
+				fmt.Sprintf("PIDs %d/%d: %v", scriptPID, singboxPID, err), false)
+		}
+		return
+	}
+	if pidFile != "" {
+		_ = os.Remove(pidFile)
+	}
+	debuglog.InfoLog("startSingBox: superseded privileged core stopped (PIDs %d/%d, graceful=%v forced=%v, %s)",
+		scriptPID, singboxPID, outcome.Graceful, outcome.Forced, outcome.Elapsed)
 }

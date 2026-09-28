@@ -49,6 +49,17 @@ func KillPrivilegedProcess(scriptPID, singboxPID int, pidFile string) error {
 	return nil
 }
 
+// KillPrivilegedProcessForce — non-darwin stub. Privileged (root) core
+// management exists only on macOS; on other platforms the launcher owns the
+// process directly, so there is nothing to signal through a helper.
+func KillPrivilegedProcessForce(scriptPID, singboxPID int, pidFile string, force bool) error {
+	_ = scriptPID
+	_ = singboxPID
+	_ = pidFile
+	_ = force
+	return nil
+}
+
 // KillPrivilegedByPattern is macOS-only.
 func KillPrivilegedByPattern() error {
 	return errPrivilegedNotSupported

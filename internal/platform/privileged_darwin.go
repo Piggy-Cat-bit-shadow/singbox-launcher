@@ -329,6 +329,51 @@ func KillPrivilegedProcess(scriptPID, singboxPID int, pidFile string) error {
 	return nil
 }
 
+// KillPrivilegedProcessForce signals the privileged shell and sing-box PIDs,
+// choosing TERM or KILL, and removes the pid file ONLY on the graceful call.
+//
+// # WHY A FORCE VARIANT EXISTS
+//
+// SIGTERM can be ignored. The caller's confirmation loop needs a second,
+// stronger step for exactly that case — without it a wedged root core stays up
+// while the launcher reports it stopped, and the user starts a second one.
+//
+// The security shape is unchanged from KillPrivilegedProcess: the tool is an
+// absolute system path, arguments are PIDs only (so no shell metacharacter can
+// be introduced), PID <= 0 is never passed because `kill 0` targets the whole
+// process group, and the caller has already verified executable identity.
+//
+// The pid file is left in place on the force call deliberately: it is evidence
+// of which PIDs we tried to stop, and the caller removes it only after exit is
+// CONFIRMED. Removing it here would repeat the original bug of treating "signal
+// sent" as "process gone" — and would destroy the record needed to find the
+// process again if it survived.
+func KillPrivilegedProcessForce(scriptPID, singboxPID int, pidFile string, force bool) error {
+	sig := "-TERM"
+	if force {
+		sig = "-KILL"
+	}
+	args := []string{sig}
+	for _, pid := range []int{scriptPID, singboxPID} {
+		// PID <= 0 is never passed: `kill 0` would signal the entire process
+		// group, which is far beyond what this launcher owns.
+		if pid > 0 {
+			args = append(args, strconv.Itoa(pid))
+		}
+	}
+	if len(args) > 1 {
+		if _, _, err := RunWithPrivileges(privilegedKillTool, args); err != nil {
+			return err
+		}
+	}
+	if !force && pidFile != "" {
+		if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+			debuglog.WarnLog("KillPrivilegedProcessForce: remove %s: %v", pidFile, err)
+		}
+	}
+	return nil
+}
+
 // KillPrivilegedPIDsByPattern — SIGTERM конкретным PID, найденным по
 // шаблону командной строки. Шаблон используется ТОЛЬКО для поиска
 // кандидатов; решение убивать принимает caller, проверив личность каждого

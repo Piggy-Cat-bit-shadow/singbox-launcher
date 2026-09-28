@@ -170,9 +170,28 @@ func (ac *AppController) BackendMode() BackendMode {
 // SwitchBackendMode переключает движок ядра в рантайме (Settings → режим).
 // Требует остановленного VPN: живой процесс classic-режима нельзя молча
 // передать демону и наоборот. Персистит настройку caller (load-mutate-save).
+//
+// THE HANDOVER IS ATOMIC, and the guard is "settled", not "not running".
+//
+// The old check was `RunningState.IsRunning()`. A start in progress is not
+// running YET, so that check passed and the engine could be switched out from
+// under an in-flight start: the rebuild, the authorization dialog and the spawn
+// continued, and the classic core they eventually produced belonged to a runtime
+// that no longer existed. The user then had a classic core AND a daemon core.
+//
+// `ClassicSettled` closes that window because a start claims the runtime, making
+// it busy from the moment it is accepted — before any process exists.
+//
+// The order is equally load-bearing: the outgoing engine is CLOSED and its
+// generation invalidated BEFORE the new backend is published. Publishing first
+// would let the old engine's callbacks run against a runtime that has already
+// been handed over — the "old backend comes back and starts a core" failure.
 func (ac *AppController) SwitchBackendMode(mode BackendMode) error {
 	if ac.BackendMode() == mode {
 		return nil
+	}
+	if !ac.ClassicSettled() {
+		return fmt.Errorf("a start or stop is still in progress; wait for it to finish before switching the core engine")
 	}
 	if ac.RunningState.IsRunning() {
 		return fmt.Errorf("stop the VPN before switching the core engine")
@@ -183,6 +202,11 @@ func (ac *AppController) SwitchBackendMode(mode BackendMode) error {
 		if leaver, ok := ac.Backend().(interface{ onEngineLeave() }); ok {
 			leaver.onEngineLeave()
 		}
+		// Abandon the outgoing generation BEFORE publishing the new backend, so
+		// any asynchronous work still in flight (a crash monitor's restart
+		// delay, a late authorization result) is already stale by the time it
+		// looks at the runtime.
+		ac.classic.renewGeneration()
 		ac.setBackend(NewLegacyBackend(ac))
 		return nil
 	case BackendDaemon:
@@ -190,6 +214,11 @@ func (ac *AppController) SwitchBackendMode(mode BackendMode) error {
 		if err != nil {
 			return err
 		}
+		// Same ordering: invalidate the classic generation before the daemon
+		// backend becomes visible. A classic monitor that wakes after this point
+		// finds its generation stale and does nothing, which is what keeps the
+		// two engines from running at once.
+		ac.classic.renewGeneration()
 		ac.setBackend(b)
 		return nil
 	default:

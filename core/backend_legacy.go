@@ -1,5 +1,7 @@
 package core
 
+import "singbox-launcher/internal/debuglog"
+
 // LegacyBackend — классический движок: делегирует в ProcessService ровно те
 // же вызовы, которые раньше делали package-level обёртки. Поведение старого
 // режима не меняется ни на байт: вся логика (диалоги, привилегированный
@@ -119,6 +121,29 @@ func (b *LegacyBackend) OnAppExit() bool {
 	return true
 }
 
-// Close implements CoreBackend. Nothing to release: ProcessService живёт в
-// контроллере и не имеет фоновых ресурсов, привязанных к режиму.
-func (b *LegacyBackend) Close() {}
+// Close implements CoreBackend: it abandons this engine's runtime so that any
+// work still in flight becomes a no-op.
+//
+// This used to be empty, on the reasoning that ProcessService lives on the
+// controller and owns no mode-scoped resources. That was true of MEMORY and
+// false of WORK: Start/Stop/Restart are fire-and-forget goroutines, and a start
+// can be sitting in a rebuild or an authorization dialog for minutes. With no
+// Close, nothing told that work it had been abandoned, so it finished and
+// spawned a core for an engine the user had already left.
+//
+// What Close does NOT do is kill the running core: switching engines is refused
+// while anything is in flight (see SwitchBackendMode) and while the VPN is up, so
+// reaching Close means there is nothing to stop. Invalidating the generation is
+// the complete action — it makes every outstanding callback stale, which is
+// precisely the guarantee that was missing.
+func (b *LegacyBackend) Close() {
+	if b == nil || b.ac == nil {
+		return
+	}
+	gen := b.ac.classic.currentGeneration()
+	// Renew first, then report: a start that was mid-flight samples the
+	// generation at entry, so bumping it here makes that start's commit point
+	// fail and its just-spawned process get stopped instead of adopted.
+	newGen := b.ac.classic.renewGeneration()
+	debuglog.InfoLog("classic backend closed: generation %d abandoned, %d is now current", gen, newGen)
+}

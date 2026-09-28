@@ -100,6 +100,19 @@ type AppController struct {
 	// --- VPN Operation State ---
 	RunningState *RunningState
 
+	// classic is the classic engine's lifecycle owner: generation, phase and
+	// process identity in one place. Asynchronous work (crash monitor,
+	// privileged waiter, restart delay) captures the generation it was created
+	// in and must confirm it is still current before touching state or starting
+	// a process — see core/classic_runtime.go.
+	classic classicRuntime
+
+	// lifecycleErr is the single record of the last runtime failure. Every
+	// layer that notices a lifecycle problem writes here, and coreState()
+	// reads here, so the frontend has one authoritative source instead of
+	// depending on which UI happened to be attached.
+	lifecycleErr lifecycleErrors
+
 	// --- Context for goroutine cancellation ---
 	ctx        context.Context    // Context for cancellation
 	cancelFunc context.CancelFunc // Cancel function for stopping goroutines
