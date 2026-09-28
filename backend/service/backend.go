@@ -8,6 +8,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"sync"
 	"time"
@@ -30,6 +31,11 @@ type Backend struct {
 	// the UI presents one progress state, and a new run supersedes the old.
 	groupTests groupTestManager
 	ac         *core.AppController
+	// ops tracks the in-flight start/stop request and the last start failure.
+	// Kept apart from `mu` because a start can block for tens of seconds on a
+	// daemon apply, and holding the snapshot mutex for that long would stall
+	// every other IPC call.
+	ops coreOpState
 
 	mu sync.Mutex
 	// seq is the monotonic event sequence. It lets the frontend discard an
@@ -83,8 +89,24 @@ func New(layout paths.Layout) (*Backend, error) {
 		return nil, err
 	}
 	b := &Backend{ac: ac}
+	b.installOwnershipPolicy()
 	b.watchCoreState()
 	return b, nil
+}
+
+// installOwnershipPolicy hands core the ONE answer to "may a rebuild replace
+// config.json?".
+//
+// Without this the pre-start hook had no idea about provenance and rebuilt
+// regardless, so pressing Start could overwrite a config the Home screen had
+// just said it would not touch. Installing it here — where the marker is parsed
+// — keeps that rule in a single implementation while letting both engines
+// (classic spawn and daemon apply) honour it.
+func (b *Backend) installOwnershipPolicy() {
+	if b.ac == nil {
+		return
+	}
+	b.ac.SetConfigOwnershipPolicy(func() bool { return b.configIsRebuildable() })
 }
 
 // watchCoreState subscribes to real running-state transitions.
@@ -155,6 +177,16 @@ func (b *Backend) Snapshot() protocol.AppSnapshot {
 	seq := b.seq
 	b.mu.Unlock()
 
+	// One adoption attempt per snapshot, and only while ownership is UNKNOWN.
+	// This is where a legacy config gets recognised: the user opens the app, the
+	// snapshot is built, and a config that reproduces from our own state is
+	// adopted before the UI ever asks what it is looking at. After the marker is
+	// written the ownership read below returns MANAGED, so the cost is paid once.
+	//
+	// Deliberately here rather than at startup: provenance must not add work (or
+	// a build) to every launch of an app whose config is already accounted for.
+	b.adoptLegacyConfig()
+
 	return protocol.AppSnapshot{
 		SnapshotSeq: seq,
 		Handshake:   b.Handshake(),
@@ -209,13 +241,19 @@ func (b *Backend) coreState() protocol.CoreState {
 	}
 
 	bs := b.ac.GetVPNButtonState()
-	state := protocol.CoreStateStopped
-	switch {
-	case bs.IsRunning:
-		state = protocol.CoreStateRunning
-	case !bs.BinaryExists:
+	// The runtime transition decides, and the operation record only fills the
+	// gaps the runtime cannot express: a start that has been accepted but has
+	// not produced a running core yet, an in-flight stop, and a remembered
+	// failure. Crucially the state is NOT derived from "is it running", which
+	// is what made a successful click look like an immediate revert.
+	state := b.coreLifecycleState()
+	if !bs.BinaryExists && state == protocol.CoreStateStopped {
+		// No core binary: an error the user must act on (install/point at a
+		// binary). Still subordinate to running — a core that is up is up even
+		// if the configured path later goes missing.
 		state = protocol.CoreStateError
 	}
+	errCode, errMessage := b.coreErrorInfo()
 
 	version, err := b.ac.GetInstalledCoreVersion()
 	if err != nil {
@@ -237,6 +275,13 @@ func (b *Backend) coreState() protocol.CoreState {
 		// Report ownership alongside staleness: the UI pairs "this is out of
 		// date" with "and I can/cannot fix it", so they belong in one payload.
 		ConfigRebuildable: b.configIsRebuildable(),
+		ConfigOwnership:   string(b.configOwnership()),
+		// ErrorCode is a STABLE token the frontend localizes; ErrorDetail is the
+		// technical text for logs and the tooltip. Sending only a Go error
+		// string would leave the UI with nothing translatable, which is why the
+		// failure used to reach the screen as silence.
+		ErrorCode:   errCode,
+		ErrorDetail: errMessage,
 	}
 }
 
@@ -389,9 +434,9 @@ func (b *Backend) StartCore() error {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
 	debuglog.InfoLog("backend: start_core requested")
-	core.StartSingBoxProcess()
-	b.EmitCoreState()
-	return nil
+	return b.runCoreOp("start", coreOpTimeout, func(ctx context.Context) error {
+		return b.ac.StartVPNContext(ctx)
+	})
 }
 
 // StopCore stops the sing-box core and publishes the resulting state.
@@ -400,9 +445,11 @@ func (b *Backend) StopCore() error {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
 	debuglog.InfoLog("backend: stop_core requested")
-	core.StopSingBoxProcess()
-	b.EmitCoreState()
-	return nil
+	// Stop is deliberately NOT awaited: it tears down processes and the TUN
+	// device, which can take a while, and the outcome is reported by the
+	// runtime transition anyway. Only the pending flag and the initial
+	// "stopping" state are published here.
+	return b.runCoreOpFireAndForget("stop", func() { core.StopSingBoxProcess() })
 }
 
 // Shutdown releases backend resources. The core stop policy is unchanged:
@@ -481,9 +528,9 @@ func (b *Backend) RestartCore() error {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
 	debuglog.InfoLog("backend: restart_core requested")
-	core.KillSingBoxForRestart()
-	b.EmitCoreState()
-	return nil
+	return b.runCoreOp("restart", coreOpTimeout, func(ctx context.Context) error {
+		return b.ac.RestartVPNContext(ctx)
+	})
 }
 
 // SetCoreMode switches between the classic and daemon engines.

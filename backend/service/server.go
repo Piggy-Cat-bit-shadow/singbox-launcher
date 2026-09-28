@@ -271,6 +271,13 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		}
 		return protocol.Response{ID: req.ID, Result: result}
 
+	case protocol.MethodAdoptConfig:
+		result, err := s.backend.AdoptConfig()
+		if err != nil {
+			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
+		}
+		return protocol.Response{ID: req.ID, Result: result}
+
 	case protocol.MethodUpdateSubscriptions:
 		result, err := s.backend.UpdateSubscriptions()
 		if err != nil {

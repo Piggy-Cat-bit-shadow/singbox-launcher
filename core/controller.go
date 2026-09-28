@@ -44,6 +44,15 @@ type AppController struct {
 	// uiPort is the GUI boundary (see uiport.go). It is nil in the headless
 	// backend, which is why core never imports a GUI toolkit.
 	uiPort uiport.Port
+	// ownershipPolicy answers "may a rebuild replace config.json?" for the
+	// pre-start hook. Installed by whichever backend owns config provenance
+	// (backend/service), so the marker is parsed in exactly one place and this
+	// package never learns the marker's format.
+	//
+	// nil means "no opinion", which is treated as NOT rebuildable: a caller that
+	// forgot to install the policy gets the safe answer, not a silent overwrite.
+	ownershipMu     sync.RWMutex
+	ownershipPolicy func() bool
 	// APIService manages Clash API interactions and proxy list management
 	APIService *services.APIService
 	// StateService manages application state including version caches and auto-update state

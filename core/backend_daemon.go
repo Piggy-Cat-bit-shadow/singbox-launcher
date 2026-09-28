@@ -273,14 +273,37 @@ func (b *DaemonBackend) Admin() *lxdclient.Client { return b.admin }
 // доставка его демону через POST /admin/apply. Apply валидирует конфиг
 // сабпроцессом и поднимает ядро; провал старта откатывается на last-good.
 func (b *DaemonBackend) StartVPN(skipRunningCheck ...bool) {
+	go func() {
+		if err := b.StartVPNContext(context.Background()); err != nil {
+			b.ac.ShowStartupError(err)
+		}
+	}()
+}
+
+// StartVPNContext applies the current config to the daemon and returns the
+// reason on failure.
+//
+// THE BUG THIS FIXES: StartVPN used to `go b.applyCurrentConfig(...)` and return
+// immediately. The IPC call therefore reported SUCCESS before the daemon had
+// been contacted, the frontend cleared its "starting" state on that success, and
+// when the apply then failed the only trace was a log line. The result was the
+// reported symptom — the button snapped back to "Start" with no explanation —
+// and it could not have been otherwise, because the failure happened strictly
+// after the success had already been announced.
+//
+// Now the apply is awaited and its outcome returned, so "the request succeeded"
+// and "the core is running" are no longer conflated. The transition to running
+// still arrives asynchronously via the supervisor's status stream, which is the
+// only truthful source for it.
+func (b *DaemonBackend) StartVPNContext(ctx context.Context) error {
 	ac := b.ac
 	if ac.RunningState.IsRunning() {
 		if ac.uiPort != nil {
-			b.ac.uiPort.ShowInfo(locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
+			ac.uiPort.ShowInfo(locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
 		}
-		return
+		return nil
 	}
-	go b.applyCurrentConfig("StartVPN", false)
+	return b.applyCurrentConfigContext(ctx, "StartVPN", false)
 }
 
 // RestartVPN implements CoreBackend: тот же apply — демон подменит инстанс
@@ -292,14 +315,33 @@ func (b *DaemonBackend) StartVPN(skipRunningCheck ...bool) {
 // доехали бы до демона — ровно тот баг «новый конфиг не загружается при
 // перезапуске». Согласовано с classic-путём кнопки Rebuild (forced=true).
 func (b *DaemonBackend) RestartVPN() {
-	go b.applyCurrentConfig("RestartVPN", true)
+	go func() {
+		if err := b.RestartVPNContext(context.Background()); err != nil {
+			b.ac.ShowStartupError(err)
+		}
+	}()
+}
+
+// RestartVPNContext is RestartVPN with the apply awaited and its error returned.
+// Same reasoning as StartVPNContext.
+func (b *DaemonBackend) RestartVPNContext(ctx context.Context) error {
+	return b.applyCurrentConfigContext(ctx, "RestartVPN", true)
 }
 
 // applyCurrentConfig — общий путь Start/Restart: rebuild → read → apply.
 // forced прокидывается в RebuildConfigIfDirty: Restart форсирует полную
 // пересборку, Start — обычный dirty-путь. 422 с именем узла выключает
 // узел и повторяет apply в этом же заходе (потолок daemonRejectStartCap).
-func (b *DaemonBackend) applyCurrentConfig(caller string, forced bool) {
+func (b *DaemonBackend) applyCurrentConfig(caller string, forced bool) error {
+	return b.applyCurrentConfigContext(context.Background(), caller, forced)
+}
+
+// applyCurrentConfigContext is applyCurrentConfig with cancellation.
+//
+// ctx is checked before each attempt, so a superseded or cancelled request does
+// not leave an apply racing behind it, and between attempts so a retry loop
+// cannot outlive its caller.
+func (b *DaemonBackend) applyCurrentConfigContext(ctx context.Context, caller string, forced bool) error {
 	b.applyMu.Lock()
 	defer b.applyMu.Unlock()
 	// Сброс — только у настоящего нового захода (Start/Restart). Заход
@@ -311,15 +353,27 @@ func (b *DaemonBackend) applyCurrentConfig(caller string, forced bool) {
 		atomic.StoreInt32(&b.rejectTries, 0)
 	}
 	for {
-		if !b.applyOnce(caller, forced) {
-			return
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		retry, err := b.applyOnce(caller, forced)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			return nil
 		}
 		forced = true
 	}
 }
 
-// applyOnce — один проход rebuild→apply. true = повторить (узел выключен).
-func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
+// applyOnce — один проход rebuild→apply.
+//
+// retry=true means "a node was disabled, run again". A non-nil error always ends
+// the loop: the caller owns reporting, so this function never shows UI. That is
+// what lets the headless backend return a structured failure instead of writing
+// to a log nobody reads.
+func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err error) {
 	ac := b.ac
 
 	// Pre-start rebuild — тот же хук, что в classic ProcessService.Start:
@@ -329,9 +383,8 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 	// доставка демону старого файла.
 	if err := ac.rebuildConfigBeforeStart(forced); err != nil {
 		debuglog.ErrorLog("daemon.%s: config rebuild failed, config not applied: %v", caller, err)
-		ac.ShowRebuildError(err)
 		b.refreshUI()
-		return false
+		return false, NewStartFailure(StartErrConfigRebuildFailed, err)
 	}
 
 	// Синхронизируем APIService с пересобранным config.json. В daemon-режиме
@@ -350,17 +403,20 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 
 	config, err := os.ReadFile(ac.FileService.ConfigPath)
 	if err != nil {
-		ac.ShowStartupError(fmt.Errorf("daemon apply: cannot read config.json: %w", err))
-		return false
+		// No config to deliver: the same class as a failed rebuild, and equally
+		// the user's business — the core did not start.
+		return false, NewStartFailure(StartErrConfigRebuildFailed,
+			fmt.Errorf("daemon apply: cannot read config.json: %w", err))
 	}
 
 	// Pre-flight: убеждаемся, что демон жив и его сертификат совпадает с
 	// закреплённым, ДО отправки конфига — иначе пользователь видит сырой
 	// "connection refused" / "fingerprint mismatch" вместо понятного совета.
 	if _, err := b.admin.Status(); err != nil {
-		msg := b.diagnoseReachError(err)
-		ac.ShowStartupError(fmt.Errorf("%s", msg))
-		return false
+		// The daemon did not answer. "Cannot reach the daemon" is a different
+		// remedy from "the daemon rejected the config", so it gets its own code
+		// rather than one generic failure.
+		return false, NewStartFailuref(StartErrDaemonUnreachable, "%s", b.diagnoseReachError(err))
 	}
 
 	// Подготовка конфига для демона: (1) абсолютизация cache_file в каталог,
@@ -392,8 +448,8 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 	}
 	prepared, err := prepareDaemonConfig(config, runtimeDir, daemonPlatformPrepOptions())
 	if err != nil {
-		ac.ShowStartupError(fmt.Errorf("daemon apply: prepare config: %w", err))
-		return false
+		return false, NewStartFailure(StartErrDaemonApplyFailed,
+			fmt.Errorf("daemon apply: prepare config: %w", err))
 	}
 	config, proxyServer := prepared.Bytes, prepared.ProxyServer
 
@@ -402,20 +458,20 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 		var applyErr *lxdclient.ApplyError
 		if errors.As(err, &applyErr) && applyErr.Rejected() && b.retryCoreReject(applyErr.Message) {
 			debuglog.WarnLog("daemon.%s: apply rejected a node — rebuild and retry", caller)
-			return true
+			return true, nil
 		}
 		debuglog.ErrorLog("daemon.%s: apply failed: %v", caller, err)
-		ac.ShowStartupError(fmt.Errorf("daemon apply: %w", err))
 		// Статус мог смениться (откат/фатал) — supervisor подтянет.
 		b.refreshUI()
-		return false
+		return false, NewClassifiedStartFailure(StartErrDaemonApplyFailed,
+			fmt.Errorf("daemon apply: %w", err))
 	}
 
 	if !b.isActive() {
 		// Backend вытеснен (смена адреса/пересопряжение) пока летел apply —
 		// не трогаем общее состояние: им владеет новый backend.
 		debuglog.InfoLog("daemon.%s: applied but backend is no longer active; skipping state update", caller)
-		return false
+		return false, nil
 	}
 	atomic.StoreInt32(&b.rejectTries, 0)
 	// The daemon accepted the config, so the Clash API it will serve is now the
@@ -456,7 +512,7 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 		}
 		ac.AutoLoadProxies()
 	}()
-	return false
+	return false, nil
 }
 
 // retryCoreReject выключает названный узел, если не исчерпан потолок захода.

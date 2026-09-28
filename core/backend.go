@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -581,4 +582,76 @@ func (ac *AppController) DaemonLink() (DaemonLinkState, bool) {
 		return DaemonLinkState{}, false
 	}
 	return src.LinkState(), true
+}
+
+// contextualCoreBackend — необязательная возможность движка: выполнить
+// Start/Restart/Stop и ВЕРНУТЬ причину отказа.
+//
+// Зачем отдельный интерфейс, а не расширение CoreBackend: старые методы
+// асинхронны by design (GUI не должен ждать), и менять их сигнатуру значило бы
+// переписать все вызовы ради одного потребителя. Headless-бэкенд, который
+// обязан отдать ошибку фронтенду, проверяет эту возможность и падает обратно
+// на асинхронный путь, если движок её не реализует.
+type contextualCoreBackend interface {
+	// StartVPNContext запускает ядро и возвращает ошибку запуска.
+	StartVPNContext(ctx context.Context) error
+	// RestartVPNContext перезапускает ядро и возвращает ошибку.
+	RestartVPNContext(ctx context.Context) error
+}
+
+// StartVPNContext — единая точка запуска ядра с возвратом ошибки.
+//
+// Возвращает ошибку запуска (см. StartFailure) либо nil, если запуск ПРИНЯТ:
+// процесс порождён в classic-режиме, либо демон принял конфиг. Переход в
+// running приходит отдельно, из RunningState, — только он и может честно
+// сообщить, что ядро поднялось.
+//
+// Отсутствие возможности у движка не ошибка: тогда запуск идёт обычным
+// асинхронным путём, а nil означает «запрос принят».
+func (ac *AppController) StartVPNContext(ctx context.Context, skipRunningCheck ...bool) error {
+	if ac == nil {
+		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("no app controller"))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ac.RunningState != nil && ac.RunningState.IsRunning() {
+		return nil
+	}
+	if b := ac.Backend(); b != nil {
+		if cb, ok := b.(contextualCoreBackend); ok {
+			return cb.StartVPNContext(ctx)
+		}
+		b.StartVPN(skipRunningCheck...)
+		return nil
+	}
+	if ac.ProcessService == nil {
+		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("ProcessService not initialized"))
+	}
+	return ac.ProcessService.StartContext(ctx, skipRunningCheck...)
+}
+
+// RestartVPNContext — перезапуск ядра с возвратом ошибки. См. StartVPNContext.
+func (ac *AppController) RestartVPNContext(ctx context.Context) error {
+	if ac == nil {
+		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("no app controller"))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if b := ac.Backend(); b != nil {
+		if cb, ok := b.(contextualCoreBackend); ok {
+			return cb.RestartVPNContext(ctx)
+		}
+		b.RestartVPN()
+		return nil
+	}
+	if ac.ProcessService == nil {
+		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("ProcessService not initialized"))
+	}
+	// Classic restart is kill + auto-restart by the process monitor, so the
+	// request is complete once the kill is issued; there is no synchronous
+	// outcome to await on this path.
+	ac.ProcessService.KillForRestart()
+	return nil
 }

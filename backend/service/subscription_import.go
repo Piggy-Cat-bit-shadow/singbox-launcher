@@ -50,6 +50,10 @@ type SubscriptionImportResult struct {
 	RawBytes int64 `json:"raw_bytes"`
 	// ConfigStale reports that the built config no longer matches the state.
 	ConfigStale bool `json:"config_stale"`
+	// ConfigOwnership is who owns the config on disk: managed / unknown /
+	// external. Reported next to ConfigRebuildable so the UI never has to infer
+	// ownership from permission.
+	ConfigOwnership string `json:"config_ownership"`
 	// ConfigRebuildable reports whether JiejieBox may rebuild that config; false
 	// for an externally managed one.
 	ConfigRebuildable bool `json:"config_rebuildable"`
@@ -207,6 +211,7 @@ func (b *Backend) ImportSubscriptionFile(path string) (SubscriptionImportResult,
 		RawBytes:          int64(len(raw)),
 		ConfigStale:       b.configStale(),
 		ConfigRebuildable: b.configIsRebuildable(),
+		ConfigOwnership:   string(b.configOwnership()),
 	}
 	return result, nil
 }

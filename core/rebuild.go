@@ -419,7 +419,25 @@ func (ac *AppController) loadTemplateForBuild(l paths.Layout) (td *template.Temp
 //
 // No state.json is not an error: config.json is then managed by hand and there
 // is nothing to rebuild it from.
+//
+// OWNERSHIP GATE. A rebuild REPLACES config.json, so it must never run for a
+// config the launcher does not own. The Home screen already refused to offer a
+// manual reload in that case, but this pre-start hook did not check, so pressing
+// Start rebuilt — and overwrote — an external or unverified config anyway. The
+// button was protected and the actual writer was not, which is precisely
+// backwards.
+//
+// Policy comes from `SetConfigOwnershipPolicy` (set by the backend that owns
+// provenance) rather than being re-derived here: the marker parser must exist
+// once, and this package deliberately does not read it.
 func (ac *AppController) rebuildConfigBeforeStart(forced bool) error {
+	if !ac.mayRebuildConfig() {
+		// Not an error. The config on disk is used as-is, which is exactly what
+		// "we do not own this file" means; reporting a failure would block a
+		// start that is perfectly valid.
+		debuglog.InfoLog("pre-start rebuild: skipped — config.json is not managed by JiejieBox")
+		return nil
+	}
 	err := ac.RebuildConfigIfDirty(forced)
 	if errors.Is(err, state.ErrNotFound) {
 		debuglog.InfoLog("pre-start rebuild: no state.json — config.json is used as is")
@@ -468,4 +486,120 @@ func cleanupLegacyOutboundsCache(d paths.DataDir) {
 			debuglog.WarnLog("cleanupLegacyOutboundsCache: failed to remove %s: %v", path, remErr)
 		}
 	}
+}
+
+// SetConfigOwnershipPolicy installs the predicate that decides whether a
+// rebuild may replace config.json.
+//
+// This is the ONE ownership seam. `backend/service` owns the provenance marker
+// and hands its verdict down; `core` consumes it in the pre-start hook shared by
+// the classic and daemon engines. Copying the marker parser into core instead
+// would create a second implementation of a security-relevant rule, and the two
+// would eventually disagree about which configs the launcher may overwrite.
+//
+// A nil policy is accepted and means "do not rebuild": a caller that has not
+// installed a policy must not get permission by omission.
+func (ac *AppController) SetConfigOwnershipPolicy(policy func() bool) {
+	if ac == nil {
+		return
+	}
+	ac.ownershipMu.Lock()
+	defer ac.ownershipMu.Unlock()
+	ac.ownershipPolicy = policy
+}
+
+// mayRebuildConfig reports whether a rebuild may replace config.json.
+//
+// DEFAULT FALSE. Every doubt resolves to "do not touch the file": no policy
+// installed, no controller, or no FileService all answer no. Rebuilding is an
+// overwrite of the user's configuration, so the safe default is the only
+// defensible one.
+func (ac *AppController) mayRebuildConfig() bool {
+	if ac == nil {
+		return false
+	}
+	ac.ownershipMu.RLock()
+	policy := ac.ownershipPolicy
+	ac.ownershipMu.RUnlock()
+	if policy == nil {
+		return false
+	}
+	return policy()
+}
+
+// BuildConfigReadOnly builds what config.json WOULD contain for the current
+// state, and returns the bytes without writing anything.
+//
+// It exists so config provenance can decide whether the launcher authored the
+// file on disk. That question is answered by reproducing the file from our own
+// state, which requires the real build pipeline — but it must not be able to
+// change the user's data as a side effect of ASKING. So this path is read-only
+// by construction:
+//
+//   - it never writes config.json (the bytes are returned, not saved);
+//   - it never fetches the template, unlike a rebuild, because a provenance
+//     check must not depend on — or trigger — network access;
+//   - it does not clear or set dirty markers, so a failed adoption attempt
+//     leaves the pending-rebuild state exactly as it found it.
+//
+// Any of those conditions being unsatisfiable (no state, no template, no
+// materialized nodes) returns an error, which the caller treats as "cannot
+// prove authorship" rather than as a failure to report.
+func (ac *AppController) BuildConfigReadOnly() ([]byte, error) {
+	if ac == nil || ac.StateService == nil {
+		return nil, fmt.Errorf("not initialized")
+	}
+	if ac.FileService == nil {
+		return nil, fmt.Errorf("FileService not initialized")
+	}
+	layout := ac.FileService.Layout
+
+	statePath := platform.GetWizardStatePath(layout.Data)
+	s, err := state.Load(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("load state: %w", err)
+	}
+
+	// LoadTemplateData, not loadTemplateForBuild: the latter downloads a missing
+	// template and pops UI, which a read-only provenance probe must never do.
+	td, err := template.LoadTemplateData(layout)
+	if err != nil {
+		return nil, fmt.Errorf("load template: %w", err)
+	}
+
+	cacheSnap, _, snapErr := buildSnapshotFromState(s, layout, nil, td)
+	if snapErr != nil {
+		return nil, fmt.Errorf("build snapshot: %w", snapErr)
+	}
+
+	ctx := ac.buildContextFromState(s, cacheSnap, td)
+	res, err := build.BuildConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("build: %w", err)
+	}
+	if len(res.ConfigJSON) == 0 {
+		return nil, fmt.Errorf("build produced no config")
+	}
+	return res.ConfigJSON, nil
+}
+
+// MayRebuildConfig reports whether a rebuild may replace config.json, through
+// the installed ownership policy.
+//
+// Exported because the policy is a cross-package contract: `backend/service`
+// installs it and needs to assert that the seam reports what provenance decided.
+// A test-only accessor would be the wrong shape — the whole point of the seam is
+// that the writer path consults it, so a caller must be able to ask the same
+// question the writer asks.
+func (ac *AppController) MayRebuildConfig() bool {
+	return ac.mayRebuildConfig()
+}
+
+// RebuildConfigBeforeStart runs the pre-start rebuild hook.
+//
+// Exported for the same reason as MayRebuildConfig: the gate it applies is the
+// behaviour under test, and calling `RebuildConfigIfDirty` directly would skip
+// exactly the check being verified.
+func (ac *AppController) RebuildConfigBeforeStart(forced bool) error {
+	return ac.rebuildConfigBeforeStart(forced)
 }

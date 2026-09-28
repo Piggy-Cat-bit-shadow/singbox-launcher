@@ -57,11 +57,21 @@ func (b *Backend) ReloadConfig() (MaintenanceResult, error) {
 	// state.json, which the user has never heard of, while this tells them the
 	// configuration was made elsewhere and where to change it.
 	if !b.configIsRebuildable() {
+		// The message depends on WHICH refusal this is, because the two have
+		// different remedies. UNKNOWN must not be described as "made by another
+		// tool" — that is an unproven claim, and for a config written by an
+		// older JiejieBox it is simply false.
+		msg := "JiejieBox cannot confirm that it created this configuration, so it " +
+			"will not rebuild it here. You can let JiejieBox manage it, or edit " +
+			"config.json directly."
+		if b.configOwnership() == OwnershipExternal {
+			msg = "This configuration is managed by another tool, so it cannot be " +
+				"rebuilt here. Edit config.json directly, or change it in the tool " +
+				"that owns it."
+		}
 		return MaintenanceResult{}, &protocol.Error{
-			Code: "not_rebuildable",
-			Message: "This configuration was not created by JiejieBox's wizard, so it " +
-				"cannot be rebuilt here. Edit config.json directly, or rebuild it " +
-				"from the wizard on the desktop build.",
+			Code:        "not_rebuildable",
+			Message:     msg,
 			Recoverable: false,
 		}
 	}
@@ -167,4 +177,51 @@ func plural(n int, noun string) string {
 		return "1 " + noun
 	}
 	return strconv.Itoa(n) + " " + noun + "s"
+}
+
+// AdoptConfig hands ownership of config.json to JiejieBox.
+//
+// Called ONLY from an explicit user confirmation that states the consequence —
+// that the launcher may from then on rebuild and overwrite the file. It is
+// deliberately not reachable from any automatic path: seizing ownership of a
+// file the launcher may not have written is exactly the kind of silent action
+// that destroyed user configs in the first place.
+//
+// Restricted to UNKNOWN. A config that is already managed needs no adoption, and
+// one that is external carries positive evidence of another owner that a button
+// press does not overrule.
+func (b *Backend) AdoptConfig() (MaintenanceResult, error) {
+	if b.ac == nil {
+		return MaintenanceResult{}, &protocol.Error{
+			Code: "not_ready", Message: "backend not initialised", Recoverable: true,
+		}
+	}
+	ownership := b.configOwnership()
+	if ownership == OwnershipManaged {
+		return MaintenanceResult{Message: "already managed"}, nil
+	}
+	if ownership == OwnershipExternal {
+		return MaintenanceResult{}, &protocol.Error{
+			Code: "not_adoptable",
+			Message: "This configuration is managed by another tool. " +
+				"JiejieBox will not take it over.",
+			Recoverable: false,
+		}
+	}
+	if !b.configExists() {
+		return MaintenanceResult{}, &protocol.Error{
+			Code: "no_config", Message: "there is no config.json to adopt", Recoverable: true,
+		}
+	}
+	debuglog.InfoLog("backend: adopt_config requested — the user accepted the overwrite consequence")
+	// The user has said the file is ours to manage, so the marker may be written
+	// directly. No build is run: the point of adoption is to take responsibility
+	// for the EXISTING file, not to replace it.
+	if err := b.markConfigManaged(); err != nil {
+		return MaintenanceResult{}, &protocol.Error{
+			Code: "adopt_failed", Message: err.Error(), Recoverable: true,
+		}
+	}
+	b.EmitCoreState()
+	return MaintenanceResult{Message: "adopted"}, nil
 }

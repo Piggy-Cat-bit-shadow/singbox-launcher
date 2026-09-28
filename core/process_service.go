@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -254,20 +255,53 @@ func NewProcessService(ac *AppController) *ProcessService {
 // Start launches the sing-box process. Behavior is identical to the previous StartSingBoxProcess.
 // skipRunningCheck: если true, пропускает проверку на уже запущенный процесс (для автоперезапуска).
 func (svc *ProcessService) Start(skipRunningCheck ...bool) {
+	err := svc.StartContext(context.Background(), skipRunningCheck...)
+	if err != nil {
+		// The GUI wrapper owns presentation. The headless backend calls
+		// StartContext directly and turns the error into a protocol error the
+		// frontend can show — the same business function serving both, instead
+		// of core showing dialogs nobody is there to see.
+		svc.ac.ShowStartupError(err)
+	}
+}
+
+// StartContext starts the core and RETURNS the reason on failure.
+//
+// This is the headless-capable entry point. `Start` remains as the GUI wrapper
+// for the Fyne build and every existing caller.
+//
+// WHY THIS EXISTS: the only error channel used to be ShowStartupError, which
+// ends in showErrorUI, which logs and then does nothing at all when uiPort is
+// nil. In the headless backend uiPort IS nil, so a failed start was written to a
+// log file and the user saw the button flip back to "Start" with no explanation.
+// Making the failure a return value is what lets the backend hand it to the
+// frontend as a structured error.
+//
+// ctx is honoured before the commit point (template refresh wait, lock
+// acquisition), so a cancelled request does not leave a start racing behind it.
+func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ...bool) error {
 	ac := svc.ac
 	if ac.RunningState.IsRunning() {
 		if ac.uiPort != nil {
 			ac.uiPort.ShowInfo(locale.TN(1, "Info"), locale.T("Sing-Box already running (according to internal state)."))
 		}
-		return
+		// Already running is SUCCESS, not failure: the user's intent (a running
+		// core) is satisfied. Reporting an error here would make a harmless
+		// double click look like a fault.
+		return nil
 	}
 
 	// Проверяем, не запущен ли уже процесс на уровне ОС (пропускаем при автоперезапуске)
 	skipCheck := len(skipRunningCheck) > 0 && skipRunningCheck[0]
 	if !skipCheck {
 		if svc.checkAndShowSingBoxRunningWarning("startSingBox") {
-			return
+			// The warning dialog was shown by the check itself; the start did not
+			// proceed. Canceled is the honest code — nothing failed.
+			return ErrStartAborted
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Шаблон после апгрейда докачивается в фоне (StartTemplateRefresh) —
@@ -283,7 +317,7 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	// launch a duplicate sing-box process and orphan the first Cmd handle.
 	if ac.RunningState.IsRunning() {
 		debuglog.WarnLog("startSingBox: already running (lost start race), skipping duplicate start")
-		return
+		return nil
 	}
 
 	// SPEC 045 phase 5.C — pre-start config rebuild:
@@ -298,8 +332,7 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	// неоткуда.
 	if err := ac.rebuildConfigBeforeStart(false); err != nil {
 		debuglog.ErrorLog("startSingBox: config rebuild failed, sing-box not started: %v", err)
-		ac.ShowRebuildError(err)
-		return
+		return NewStartFailure(StartErrConfigRebuildFailed, err)
 	}
 
 	// SPEC 139 §4: на Windows TUN без прав администратора не стартует —
@@ -310,7 +343,7 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 		if ac.uiPort != nil {
 			ac.uiPort.ReportCoreStartAborted("")
 		}
-		return
+		return ErrStartAborted
 	}
 
 	// Check capabilities on Linux before starting
@@ -320,7 +353,7 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 			cmd := platform.GetSetCapCommand(ac.FileService.SingboxPath)
 			ac.uiPort.ShowCommandNeedsTerminal(locale.T("Linux capabilities required"), locale.T("Linux capabilities required")+"\n\n"+suggestion, cmd)
 		}
-		return
+		return ErrStartAborted
 	}
 
 	// Reload Clash API configuration from config.json before starting
@@ -348,13 +381,16 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 		}
 		if hasTun {
 			if err := svc.startSingBoxPrivileged(); err != nil {
-				// Отказ гейта копии уже показан своим диалогом с командой.
-				if !errors.Is(err, errPrivilegedCopyNotReady) {
-					ac.ShowStartupError(err)
+				// Отказ гейта копии уже показан своим диалогом с командой; он
+				// сообщает о себе сам, поэтому наружу уходит Aborted, а не
+				// вторая ошибка про то же самое.
+				if errors.Is(err, errPrivilegedCopyNotReady) {
+					return ErrStartAborted
 				}
-				return
+				return NewStartFailure(StartErrSpawnFailed, err)
 			}
-			return
+			// startSingBoxPrivileged commits RunningState itself on success.
+			return nil
 		}
 	}
 
@@ -366,11 +402,10 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	if classicElevatedUsesCopy() {
 		path, logFile, err := ac.elevatedClassicStart()
 		if err != nil {
-			// Отказ гейта копии уже показан своим диалогом с командой.
-			if !errors.Is(err, errPrivilegedCopyNotReady) {
-				ac.ShowStartupError(err)
+			if errors.Is(err, errPrivilegedCopyNotReady) {
+				return ErrStartAborted
 			}
-			return
+			return NewStartFailure(StartErrSpawnFailed, err)
 		}
 		corePath, privilegedLog = path, logFile
 	}
@@ -400,9 +435,9 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 		_ = privilegedLog.Close()
 	}
 	if err := startErr; err != nil {
-		ac.ShowStartupError(fmt.Errorf("failed to start Sing-Box process: %w", err))
 		debuglog.ErrorLog("startSingBox: Failed to start Sing-Box: %v", err)
-		return
+		return NewClassifiedStartFailure(StartErrSpawnFailed,
+			fmt.Errorf("failed to start Sing-Box process: %w", err))
 	}
 	if privilegedLog != nil {
 		svc.coreLog.Store(coreLogPrivileged)
@@ -423,6 +458,7 @@ func (svc *ProcessService) Start(skipRunningCheck ...bool) {
 	}()
 
 	go svc.Monitor(ac.SingboxCmd)
+	return nil
 }
 
 // errPrivilegedCopyNotReady — гейт привилегированного старта отказал по

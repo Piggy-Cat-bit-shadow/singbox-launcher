@@ -60,6 +60,12 @@ const (
 	MethodTestProxyGroup = "test_proxy_group"
 	// MethodReloadConfig rebuilds config.json from the current state.
 	MethodReloadConfig = "reload_config"
+	// MethodAdoptConfig hands ownership of config.json to JiejieBox.
+	//
+	// A separate method rather than a flag on reload: adoption is not a rebuild,
+	// and it must only ever follow an explicit user confirmation that names the
+	// overwrite consequence.
+	MethodAdoptConfig = "adopt_config"
 	// MethodUpdateSubscriptions refreshes all subscription nodes.
 	MethodUpdateSubscriptions = "update_subscriptions"
 	// MethodListSubscriptions returns the configured subscription sources.
@@ -303,6 +309,22 @@ type CoreState struct {
 	// The backend keeps enforcing this independently: hiding the affordance is
 	// presentation, not a security boundary.
 	ConfigRebuildable bool `json:"config_rebuildable"`
+	// ConfigOwnership is who owns the config on disk: "managed" / "unknown" /
+	// "external".
+	//
+	// The UI must branch on THIS rather than inferring "external" from
+	// ConfigRebuildable=false. Those are different statements: a config written
+	// by an older JijieBox has no provenance marker, so it is UNKNOWN — not
+	// owned by some other tool — and telling the user otherwise is a false
+	// accusation about their own file.
+	ConfigOwnership string `json:"config_ownership"`
+	// ErrorCode is a stable token naming why the core failed to start
+	// ("config_rebuild_failed", "daemon_unreachable", ...), for localization.
+	// Empty when there is no failure to report.
+	ErrorCode string `json:"error_code,omitempty"`
+	// ErrorDetail is the technical explanation, for logs and tooltips. Not for
+	// direct display: it is not translated and may name internal functions.
+	ErrorDetail string `json:"error_detail,omitempty"`
 	// ErrorMessage carries the last failure, if any.
 	ErrorMessage string `json:"error_message,omitempty"`
 }

@@ -16,13 +16,28 @@
 // about ownership.
 //
 // So ownership is recorded explicitly, in a marker written only when the
-// launcher has actually built the config. A marker is the smallest durable fact
-// that answers the question, and it stays true across restarts.
+// launcher has actually built the config.
+//
+// WHY THREE STATES AND NOT A BOOL
+//
+// The first version of this file mapped "no marker" to "external", and that was
+// wrong in the most common upgrade path there is: a config.json written by an
+// OLDER JiejieBox, before markers existed, has no marker and never did. Calling
+// it external told long-standing users that some other tool manages their config
+// — a false accusation about their own file, and one that (before the policy
+// seam) also blocked the rebuild they were entitled to.
+//
+// Absence of evidence is not evidence of absence. A missing marker means
+// UNKNOWN, and unknown is resolved the only safe way: by checking whether the
+// config on disk is what the current state would build anyway (see
+// adoptLegacyConfig).
 
 package service
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -36,10 +51,35 @@ import (
 // records only that the launcher built the config next to it, and when.
 const provenanceFileName = ".jiejiebox-config.json"
 
+// ConfigOwnership says who is responsible for the config on disk.
+//
+// The UI must branch on THIS, never on `ConfigRebuildable`: rebuildable is a
+// derived permission, and reading "not rebuildable" as "external" is exactly the
+// inference that libelled historical JiejieBox configs.
+type ConfigOwnership string
+
+const (
+	// OwnershipManaged — the launcher wrote this config and may rewrite it.
+	OwnershipManaged ConfigOwnership = "managed"
+	// OwnershipUnknown — the launcher cannot tell. Either there is no marker at
+	// all (an older build's config, or a hand-written one) or the marker is
+	// unreadable. The UI explains the ambiguity and offers explicit adoption;
+	// nothing is overwritten without the user saying so.
+	OwnershipUnknown ConfigOwnership = "unknown"
+	// OwnershipExternal — there is positive evidence that another tool owns this
+	// file, so the launcher never touches it.
+	OwnershipExternal ConfigOwnership = "external"
+)
+
 // configProvenance is the marker's contents.
 type configProvenance struct {
 	// Managed is true when the launcher built the config beside this marker.
-	Managed bool `json:"managed"`
+	//
+	// A pointer so a marker that omits the key is distinguishable from one that
+	// sets it false. The distinction matters: an absent key is a marker we do
+	// not understand, whereas `managed: false` is a deliberate statement that
+	// another tool owns the file.
+	Managed *bool `json:"managed,omitempty"`
 	// BuiltAt is when the launcher last wrote the config. Informational.
 	BuiltAt string `json:"built_at,omitempty"`
 	// AppVersion records which build produced it, for support.
@@ -58,45 +98,75 @@ func (b *Backend) provenancePath() string {
 	return filepath.Join(filepath.Dir(configPath), provenanceFileName)
 }
 
-// configIsRebuildable reports whether a rebuild may safely replace config.json.
-//
-// Three cases, and the distinction between the last two is the whole point:
-//
-//  1. No config.json — nothing to overwrite, so a rebuild is how the file comes
-//     into existence. Allowed.
-//  2. config.json with our marker — the launcher built it, so rebuilding it is
-//     exactly what the user is asking for. Allowed.
-//  3. config.json with no marker — somebody else owns this file. Refused,
-//     whatever else exists in the data directory.
-//
-// Case 3 is why the state file cannot be used as the signal: the subscription
-// manager creates one the first time a source is added, so an external config
-// acquires a state file while remaining entirely external.
-func (b *Backend) configIsRebuildable() bool {
-	if b.ac == nil || b.ac.FileService == nil {
+// configExists reports whether there is a config on disk to reason about.
+func (b *Backend) configExists() bool {
+	if b.ac == nil || b.ac.FileService == nil || b.ac.FileService.ConfigPath == "" {
 		return false
 	}
+	_, err := os.Stat(b.ac.FileService.ConfigPath)
+	return err == nil
+}
 
-	// Case 1: nothing to lose.
-	if _, err := os.Stat(b.ac.FileService.ConfigPath); os.IsNotExist(err) {
-		return true
+// configOwnership decides who owns the config, WITHOUT performing adoption.
+//
+// It is a pure-ish read: no I/O beyond stat and one small file read, no
+// network, and no writes. Adoption (which does write) is a separate, explicit
+// step so that merely asking the question can never change the answer.
+func (b *Backend) configOwnership() ConfigOwnership {
+	if b.ac == nil || b.ac.FileService == nil {
+		return OwnershipUnknown
+	}
+	// No config at all: there is nothing to own. Reported as managed because the
+	// launcher is free to create one — the same case that used to answer "yes,
+	// rebuildable" and still does.
+	if !b.configExists() {
+		return OwnershipManaged
 	}
 
-	// Cases 2 and 3: the marker decides.
 	path := b.provenancePath()
 	if path == "" {
-		return false
+		return OwnershipUnknown
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		if os.IsNotExist(err) {
+			// THE case this file was rewritten for. A missing marker proves
+			// nothing: it is the normal state for any config built before
+			// markers existed. Never reported as external.
+			return OwnershipUnknown
+		}
+		debuglog.WarnLog("config provenance: cannot read marker %s: %v", path, err)
+		return OwnershipUnknown
 	}
+
 	var p configProvenance
 	if err := json.Unmarshal(raw, &p); err != nil {
-		debuglog.WarnLog("config provenance: unreadable marker %s: %v", path, err)
-		return false
+		// A corrupt marker is not a statement about ownership either.
+		debuglog.WarnLog("config provenance: malformed marker %s: %v", path, err)
+		return OwnershipUnknown
 	}
-	return p.Managed
+	if p.Managed == nil {
+		// Well-formed JSON that says nothing about ownership.
+		debuglog.WarnLog("config provenance: marker %s has no 'managed' field", path)
+		return OwnershipUnknown
+	}
+	if *p.Managed {
+		return OwnershipManaged
+	}
+	// An explicit `managed: false` is positive evidence of another owner. This
+	// is the ONLY path that yields external.
+	return OwnershipExternal
+}
+
+// configIsRebuildable reports whether a rebuild may safely replace config.json.
+//
+// Derived from ownership, and deliberately narrower than "managed": a config
+// that does not exist yet is rebuildable because building it is how it comes
+// into existence, while UNKNOWN and EXTERNAL are refused. The refusal is a
+// permission, not a claim — the UI must not read it as "external" (see
+// ConfigOwnership).
+func (b *Backend) configIsRebuildable() bool {
+	return b.configOwnership() == OwnershipManaged
 }
 
 // markConfigManaged records that the launcher now owns the config on disk.
@@ -110,8 +180,9 @@ func (b *Backend) markConfigManaged() error {
 	if path == "" {
 		return nil
 	}
+	managed := true
 	p := configProvenance{
-		Managed:    true,
+		Managed:    &managed,
 		BuiltAt:    time.Now().UTC().Format(time.RFC3339),
 		AppVersion: b.Handshake().BackendVersion,
 	}
@@ -125,4 +196,127 @@ func (b *Backend) markConfigManaged() error {
 	}
 	debuglog.InfoLog("config provenance: marked %s as launcher-managed", filepath.Base(path))
 	return nil
+}
+
+// canonicalJSON re-encodes JSON so two documents can be compared structurally.
+//
+// Ownership cannot be decided by bytes: the same config round-tripped through a
+// different encoder differs in key order, spacing and indentation while being
+// the same configuration. Numbers are compared as json.Number so that 5000 and
+// 5e3 — which decode to the same float but are different text — are still
+// distinguished where it matters, and no precision is lost to float64.
+func canonicalJSON(raw []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	// Re-marshalling a map sorts keys, and encoding/json emits a stable form for
+	// the same structure, so equal structures produce equal bytes.
+	return json.Marshal(v)
+}
+
+// configMatchesState reports whether the config on disk is structurally equal to
+// the one the CURRENT state would build.
+//
+// This is the evidence that lets a legacy config be adopted. It is deliberately
+// a structural, not byte, comparison, because a config written by an older build
+// differs in formatting while representing the same configuration.
+//
+// Every value participates, secrets included: comparing only a subset could
+// declare two different configs equal, which would hand ownership of a file the
+// launcher did not write. A build failure, or any unreadable input, is reported
+// as "cannot prove" (false) rather than as a match.
+func (b *Backend) configMatchesState(candidate []byte) bool {
+	if b.ac == nil || b.ac.FileService == nil {
+		return false
+	}
+	onDisk, err := os.ReadFile(b.ac.FileService.ConfigPath)
+	if err != nil {
+		debuglog.InfoLog("config provenance: cannot read config for adoption check: %v", err)
+		return false
+	}
+	want, err := canonicalJSON(candidate)
+	if err != nil {
+		debuglog.InfoLog("config provenance: candidate config is not valid JSON: %v", err)
+		return false
+	}
+	got, err := canonicalJSON(onDisk)
+	if err != nil {
+		// A config the launcher cannot parse is certainly not one it can claim
+		// to have produced.
+		debuglog.InfoLog("config provenance: on-disk config is not valid JSON: %v", err)
+		return false
+	}
+	return bytes.Equal(want, got)
+}
+
+// adoptLegacyConfig attempts a ONE-TIME, evidence-based adoption of a config
+// that has no provenance marker.
+//
+// The upgrade path this exists for: a config.json written by an older JijieBox,
+// before markers existed. It has no marker and never did, so it reads as UNKNOWN
+// and — without this — would stay unmanaged forever, leaving a long-standing user
+// unable to reload their own config and (until the policy seam) warned that some
+// other tool owned it.
+//
+// Adoption is granted only when the launcher can PROVE the file is its own work:
+// the config on disk must be structurally identical to the config the current
+// state would build. That is a real proof of authorship in the only sense that
+// matters — the launcher's own state reproduces this exact file — and it is why
+// nothing here trusts the file's LOCATION. A hand-written config parked in the
+// data directory does not match the state and is therefore never adopted, which
+// is the trap that "it lives in DataDir, so it is ours" would have walked into.
+//
+// Strictly read-only with respect to the user's data: it does not write
+// config.json, does not touch state.json, and does not fetch anything. The build
+// reuses the same pipeline a rebuild would, but takes only its in-memory bytes.
+// A build that fails, or any input it cannot read, means "cannot prove", which
+// means UNKNOWN — never adoption.
+//
+// Returns true only if the marker was written, so a caller can report the new
+// ownership immediately.
+func (b *Backend) adoptLegacyConfig() bool {
+	if b.ac == nil || b.ac.FileService == nil {
+		return false
+	}
+	// Only ever for a config that exists and has no verdict yet. An explicit
+	// `managed: false` is evidence of another owner and must not be reconsidered.
+	if b.configOwnership() != OwnershipUnknown || !b.configExists() {
+		return false
+	}
+
+	candidate, err := b.buildCandidateConfig()
+	if err != nil {
+		// Expected in several legitimate situations (no state, unreadable
+		// template, no materialized nodes). Not an error the user needs: the
+		// outcome is simply that ownership stays UNKNOWN.
+		debuglog.InfoLog("config provenance: cannot build a candidate for adoption (%v) — ownership stays unknown", err)
+		return false
+	}
+	if !b.configMatchesState(candidate) {
+		debuglog.InfoLog("config provenance: on-disk config does not match what the current state builds — " +
+			"not adopting (ownership stays unknown)")
+		return false
+	}
+	if err := b.markConfigManaged(); err != nil {
+		return false
+	}
+	debuglog.InfoLog("config provenance: adopted a legacy config — it reproduces from the current state")
+	return true
+}
+
+// buildCandidateConfig builds the config the current state would produce,
+// WITHOUT writing it anywhere.
+//
+// Delegates to the same core pipeline a rebuild uses, so "what the launcher
+// would write" has one definition and cannot drift from what a rebuild actually
+// writes. The guards around it are the point: no forced rebuild, no template
+// download, no state mutation.
+func (b *Backend) buildCandidateConfig() ([]byte, error) {
+	if b.ac == nil {
+		return nil, fmt.Errorf("no app controller")
+	}
+	return b.ac.BuildConfigReadOnly()
 }

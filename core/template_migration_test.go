@@ -406,6 +406,13 @@ func TestProcessServiceStart_RebuildFailureDoesNotStartCore(t *testing.T) {
 	}
 	ac.ProcessService = NewProcessService(ac)
 
+	// This test's subject is the rebuild FAILING and the core not starting, so
+	// it must exercise the rebuild path at all — which the ownership gate now
+	// guards. Granting ownership mirrors the real backend, which installs the
+	// policy from the provenance marker; without it the hook correctly skips and
+	// the assertion below would pass for the wrong reason.
+	ac.SetConfigOwnershipPolicy(func() bool { return true })
+
 	if err := ac.rebuildConfigBeforeStart(false); err == nil {
 		t.Fatal("rebuild with an unusable template must fail")
 	}

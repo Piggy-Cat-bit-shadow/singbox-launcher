@@ -882,11 +882,19 @@ func TestReloadConfigExplainsAnUnrebuildableConfig(t *testing.T) {
 		t.Errorf("code = %q, want not_rebuildable for a config with no wizard state", pe.Code)
 	}
 	if pe.Code == "not_rebuildable" {
-		for _, want := range []string{"wizard", "config.json"} {
-			if !strings.Contains(pe.Message, want) {
-				t.Errorf("message %q does not mention %q; it would not tell the user what to do",
-					pe.Message, want)
-			}
+		// The message must name the FILE and must offer a next step. It must not
+		// claim a foreign owner here: an unmarked config is UNKNOWN, and
+		// asserting "another tool manages it" about a config this launcher may
+		// well have written is the false accusation the tri-state exists to
+		// prevent (see TestReloadRefusalCopyDoesNotClaimAnotherTool).
+		if !strings.Contains(pe.Message, "config.json") {
+			t.Errorf("message %q does not name config.json; it would not tell the user what to do",
+				pe.Message)
+		}
+		if !strings.Contains(strings.ToLower(pe.Message), "manage") &&
+			!strings.Contains(strings.ToLower(pe.Message), "edit") {
+			t.Errorf("message %q offers no next step; the UI puts a Reload button "+
+				"behind it, and a dead end is worse than no button", pe.Message)
 		}
 		if pe.Recoverable {
 			t.Error("a configuration that was never wizard-built will not become rebuildable by retrying")
