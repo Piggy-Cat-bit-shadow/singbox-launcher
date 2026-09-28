@@ -50,6 +50,16 @@ type DaemonBackend struct {
 	// свой override, а setBackend мог переустановить его после Close чужого.
 	transport *daemonProxyTransport
 
+	// clashFallback — локальный Clash API ЭТОГО демона: чем заменить RPC,
+	// которых у сборки демона нет (см. daemon_clash_fallback.go).
+	clashFallback daemonClashFallback
+	// fallbackMu охраняет expectedGroups (пишется из apply, читается из
+	// proxy-запросов на других горутинах).
+	fallbackMu sync.Mutex
+	// expectedGroups — selector-теги конфига, который демон реально получил.
+	// Доказательство при проверке fallback-эндпоинта.
+	expectedGroups []string
+
 	// applyMu сериализует Start/Restart/Stop от дребезга кнопок.
 	applyMu sync.Mutex
 
@@ -380,12 +390,12 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 		debuglog.WarnLog("daemon.%s: the daemon service is installed but not running (%s) — run: %s",
 			caller, check.Detail, daemonBootstrapCommand())
 	}
-	var proxyServer string
-	config, proxyServer, err = prepareConfigForDaemonWith(config, runtimeDir, daemonPlatformPrepOptions())
+	prepared, err := prepareDaemonConfig(config, runtimeDir, daemonPlatformPrepOptions())
 	if err != nil {
 		ac.ShowStartupError(fmt.Errorf("daemon apply: prepare config: %w", err))
 		return false
 	}
+	config, proxyServer := prepared.Bytes, prepared.ProxyServer
 
 	debuglog.InfoLog("daemon.%s: applying config.json (%d bytes) to %s", caller, len(config), b.admin.AddrString())
 	if err := b.admin.Apply(config); err != nil {
@@ -408,6 +418,23 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) bool {
 		return false
 	}
 	atomic.StoreInt32(&b.rejectTries, 0)
+	// The daemon accepted the config, so the Clash API it will serve is now the
+	// one this transformation described. Committing here and NOT before is the
+	// whole point: a failed apply leaves the daemon on its previous config (or
+	// on last-good after a rollback), and registering the new endpoint early
+	// would aim the fallback at a port that nothing is listening on.
+	//
+	// Remote daemons never get a local fallback: 127.0.0.1 on this machine is
+	// not the daemon's host.
+	if isLocalDaemonAddress(b.admin.AddrString()) {
+		b.clashFallback.setConfigured(prepared.ClashFallback)
+		b.fallbackMu.Lock()
+		b.expectedGroups = prepared.SelectorGroups
+		b.fallbackMu.Unlock()
+	} else {
+		b.clashFallback.block()
+		debuglog.InfoLog("daemon.%s: remote daemon — local Clash API fallback disabled", caller)
+	}
 	// SPEC 141 §7: системный прокси пользователя ставит лаунчер (Windows;
 	// на macOS — no-op).
 	b.appliedProxy.Store(proxyServer)
@@ -470,6 +497,10 @@ func (b *DaemonBackend) StopVPN() {
 		}
 		ac.clearDaemonSystemProxy("VPN stopped")
 		ac.RunningState.Set(false)
+		// The core is down, so its Clash API listener is gone with it. Dropping
+		// verification (not the configuration) means the next use re-proves the
+		// endpoint instead of trusting a socket that no longer exists.
+		b.clashFallback.invalidate()
 	}()
 }
 
@@ -578,6 +609,10 @@ func (b *DaemonBackend) Close() {
 		b.conn = nil
 	}
 	b.connMu.Unlock()
+	// This backend no longer owns the daemon (reconnect, address change,
+	// re-pairing, or shutdown). Its verification belongs to a connection that
+	// is now gone.
+	b.clashFallback.invalidate()
 }
 
 // refreshUI дёргает статус-виджеты после операций, которые могли не дать
@@ -986,16 +1021,23 @@ func (t *daemonProxyTransport) SetEndpointEnabled(tag string, enabled bool) (str
 // services.ErrProxyListUnsupported lets the backend answer "this engine cannot
 // list proxies" and the UI explain it calmly instead.
 func (t *daemonProxyTransport) GroupProxies(group string) ([]api.ProxyInfo, string, error) {
+	// RPC is the daemon's native control plane: already paired, already mTLS,
+	// needs no extra listener. It is therefore tried FIRST and is not second-
+	// guessed by the fallback.
+	//
+	// Which method to use is a property of the SERVER, established once. Asking
+	// the generated client's interface instead is what produced the original
+	// "unknown method GetGroups" failure.
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcGetGroups) {
+		return t.b.groupProxiesViaFallback(group)
+	}
+
 	client, ctx, cancel, err := t.rpc()
 	if err != nil {
 		return nil, "", err
 	}
 	defer cancel()
-
-	// Which method to use is a property of the SERVER, established once. Asking
-	// the generated client's interface instead is what produced the original
-	// "unknown method GetGroups" failure.
-	t.b.ensureProbed()
 
 	groups, err := t.groupsSnapshot(ctx, client)
 	if err != nil {
@@ -1043,15 +1085,23 @@ func (t *daemonProxyTransport) groupsSnapshot(ctx context.Context, client daemon
 
 // SwitchProxy implements services.ProxyTransport через SelectOutbound.
 func (t *daemonProxyTransport) SwitchProxy(group, name string) error {
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcSelectOutbound) {
+		// On the measured daemon SelectOutbound IS supported, so this is the
+		// rare branch; it exists so a future build that drops the RPC does not
+		// lose switching merely because the list is served elsewhere.
+		//
+		// Consistency caveat: if list comes from the fallback and switch goes
+		// over gRPC, both must observe the SAME running core. They do — both
+		// address the one daemon process — but a mismatch would be a real bug,
+		// which is why the hybrid consistency test exists.
+		return t.b.switchProxyViaFallback(group, name)
+	}
 	client, ctx, cancel, err := t.rpc()
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	t.b.ensureProbed()
-	if !t.b.caps.supported(rpcSelectOutbound) {
-		return services.NewProxyCapabilityError(services.CapabilitySwitch)
-	}
 	if _, err := client.SelectOutbound(ctx, &daemonpb.SelectOutboundRequest{GroupTag: group, OutboundTag: name}); err != nil {
 		if isUnimplemented(err) {
 			return services.NewProxyCapabilityError(services.CapabilitySwitch)
@@ -1074,6 +1124,13 @@ func (t *daemonProxyTransport) Delay(proxyName string) (int64, error) {
 // A cancelled run must stop promptly, while a merely slow node must still
 // return an honest number — which is why the two are not merged.
 func (t *daemonProxyTransport) DelayContext(ctx context.Context, proxyName string) (int64, error) {
+	// Same RPC-first rule as the other two actions, and the same separation of
+	// concerns: the latency scheduler above calls this and never learns whether
+	// the number came from gRPC or HTTP.
+	t.b.ensureProbed()
+	if !t.b.caps.supported(rpcURLTestOutbound) {
+		return t.b.delayViaFallback(ctx, proxyName)
+	}
 	client, err := t.b.grpcClient()
 	if err != nil {
 		return 0, err

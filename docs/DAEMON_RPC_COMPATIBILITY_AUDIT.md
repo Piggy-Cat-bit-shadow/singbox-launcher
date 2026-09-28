@@ -329,3 +329,68 @@ Raw Unimplemented leaks remaining: 0
 - **The new Chinese copy was not reviewed by a native speaker.**
 - **No manual GUI walkthrough was performed**; the spacing and layout claims rest
   on the build plus guard tests, not on visual inspection.
+
+---
+
+# ADDENDUM: HTTP fallback for absent proxy RPCs
+
+The compatibility work above established WHICH RPCs the daemon lacks and made the
+launcher report that honestly instead of leaking `Unimplemented` strings. It left
+a real limitation standing: on the measured machine, listing and latency were
+simply unavailable, even though the same daemon process was running the user's
+core and could answer both over its own Clash API.
+
+This addendum records the follow-up that removes the limitation where it is safe
+to do so. Full detail: **[DAEMON_PROXY_FALLBACK_AUDIT.md](DAEMON_PROXY_FALLBACK_AUDIT.md)**.
+
+## What changed
+
+`prepareConfigForDaemonWith` used to DELETE `experimental.clash_api`, on the
+premise that daemon mode runs entirely over gRPC. That premise is false for a
+daemon build that implements only part of the proxy RPC surface, and deleting the
+section removed the only endpoint that could have covered the gap. The section is
+now KEPT with its host forced to loopback (port and secret preserved), and the
+transformation returns the resulting endpoint as a structured, authoritative
+value.
+
+`daemonProxyTransport` became a composite transport:
+
+| Operation | RPC available | HTTP fallback | Effective transport (measured machine) |
+|---|---|---|---|
+| List | no — `GetGroups` | yes | **clash_http** |
+| Switch | **yes** — `SelectOutbound` | yes | **rpc** |
+| Latency | no — `URLTestOutbound` | yes | **clash_http** |
+
+RPC is tried first wherever it exists; the fallback is consulted only on
+capability ABSENCE, never on an operational failure such as a timeout.
+
+## RPC compatibility vs effective capability
+
+The distinction this audit introduced is preserved and extended. Two separate
+statements now coexist:
+
+```
+RPC compatibility (this document):
+    GetGroups         UNIMPLEMENTED
+    URLTestOutbound   UNIMPLEMENTED
+    SelectOutbound    supported
+
+Effective product capability (what the user can do):
+    List      available via the daemon's loopback Clash API
+    Latency   available via the daemon's loopback Clash API
+    Switch    available via gRPC
+```
+
+They are not contradictory, and neither is allowed to overwrite the other. In
+particular, `DaemonProtocolStaleness` no longer reports the missing RPCs as a
+user-facing problem when the fallback covers them — the installed daemon is
+already the newest build on the machine, so an "update required" prompt would be
+both wrong and unactionable.
+
+## Safety boundary
+
+The fallback is refused unless the daemon is LOCAL and its config yields a
+loopback endpoint that answers a genuine, authenticated, group-consistent Clash
+API. Remote daemons never get a local fallback, because `127.0.0.1` on this
+machine is not the daemon's host. A TCP connect alone is never accepted as proof.
+Secrets stay in Go and never reach IPC or logs.

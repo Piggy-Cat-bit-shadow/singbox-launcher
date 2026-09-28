@@ -89,28 +89,39 @@ func TestPrepareConfigForDaemon(t *testing.T) {
 		}
 	})
 
-	t.Run("clash_api removed entirely (daemon uses gRPC)", func(t *testing.T) {
+	// BEHAVIOUR CHANGE. clash_api used to be deleted here ("daemon uses gRPC"),
+	// which left the daemon with NO Clash API and therefore no way to answer the
+	// proxy RPCs its build does not implement. It is now KEPT, with its host
+	// forced to loopback: that endpoint is what the fallback transport uses.
+	t.Run("clash_api kept and pinned to loopback", func(t *testing.T) {
 		in := []byte(`{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"s"}}}`)
 		out, err := prepareConfigForDaemon(in, testRuntimeDir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(out), "clash_api") {
-			t.Fatalf("clash_api not removed: %s", out)
+		if !strings.Contains(string(out), "clash_api") {
+			t.Fatalf("clash_api was removed, so the daemon has no Clash API at all: %s", out)
 		}
-		if strings.Contains(string(out), "9090") {
-			t.Fatalf("clash_api port leaked: %s", out)
+		if !strings.Contains(string(out), "127.0.0.1:9090") {
+			t.Fatalf("clash_api endpoint lost or not loopback: %s", out)
+		}
+		if !strings.Contains(string(out), `"secret":"s"`) {
+			t.Fatalf("clash_api secret not preserved: %s", out)
 		}
 	})
 
-	t.Run("cache_file absolutized AND clash_api removed together", func(t *testing.T) {
-		in := []byte(`{"experimental":{"cache_file":{"path":"cache.db"},"clash_api":{"external_controller":"127.0.0.1:9090"}}}`)
+	t.Run("wildcard controller is narrowed, cache_file still absolutized", func(t *testing.T) {
+		in := []byte(`{"experimental":{"cache_file":{"path":"cache.db"},"clash_api":{"external_controller":"0.0.0.0:9090"}}}`)
 		out, err := prepareConfigForDaemon(in, testRuntimeDir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(out), "clash_api") {
-			t.Fatalf("clash_api not removed: %s", out)
+		if strings.Contains(string(out), "0.0.0.0") {
+			t.Fatalf("wildcard controller reached the daemon; it would publish the "+
+				"control API on every interface: %s", out)
+		}
+		if !strings.Contains(string(out), "127.0.0.1:9090") {
+			t.Fatalf("controller not narrowed to loopback: %s", out)
 		}
 		if strings.Contains(string(out), `"path":"cache.db"`) {
 			t.Fatalf("cache_file not absolutized: %s", out)

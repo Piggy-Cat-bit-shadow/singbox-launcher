@@ -510,12 +510,24 @@ func (ac *AppController) DaemonCoreLogLines(max int) ([]string, bool) {
 // Empty when the daemon is fine, when it is not reachable, or when classic mode
 // is active — in every one of those cases "protocol stale" would be a claim the
 // launcher cannot support.
+//
+// ALSO EMPTY when every missing method's action is served by the daemon's own
+// loopback Clash API. The user's abilities are intact in that case, so telling
+// them to update the daemon would be advice that fixes nothing — and on the
+// measured machine the daemon is already the newest build available, so the
+// warning would be unactionable as well as wrong.
 func (ac *AppController) DaemonProtocolStaleness() ([]string, string) {
 	b, ok := ac.Backend().(*DaemonBackend)
 	if !ok {
 		return nil, ""
 	}
-	return b.daemonProtocolStaleness()
+	missing, version := b.daemonProtocolStaleness()
+	if b.coveredByFallback(missing) {
+		debuglog.InfoLog("daemon: %v missing RPCs are covered by the local Clash API fallback; "+
+			"reporting no protocol staleness", missing)
+		return nil, version
+	}
+	return missing, version
 }
 
 // initBackendFromSettings поднимает daemon-режим при старте лаунчера, если

@@ -202,6 +202,12 @@ func (b *DaemonBackend) probeCapabilities(ctx context.Context, client daemonpb.S
 // limitation as a surprise rather than as a stated setup problem.
 //
 // Returns the missing methods sorted, plus the daemon's self-reported version.
+//
+// IMPORTANT: this is the RPC story, not the USER story. A method listed here is
+// absent from the daemon's gRPC surface; it does not follow that the user has
+// lost that ability. Where the daemon's own loopback Clash API covers the
+// action, the product works and the user should NOT be told to update — see
+// coveredByFallback and ProxyActionCapabilities.
 func (b *DaemonBackend) daemonProtocolStaleness() (missing []string, version string) {
 	if b == nil || b.caps == nil {
 		return nil, ""
@@ -227,6 +233,36 @@ func (b *DaemonBackend) daemonProtocolStaleness() (missing []string, version str
 	}
 	sort.Strings(missing)
 	return missing, version
+}
+
+// coveredByFallback reports whether every missing RPC's ACTION is still
+// available through the daemon's own loopback Clash API.
+//
+// This is what stops the Daemon screen from demanding an update that would not
+// fix anything: the measured daemon IS the newest build on the machine, and its
+// missing GetGroups/URLTestOutbound are covered by the fallback, so there is
+// nothing for the user to do and nothing to warn about.
+//
+// False when the fallback is not configured, or when a missing RPC has no
+// fallback equivalent at all.
+func (b *DaemonBackend) coveredByFallback(missing []string) bool {
+	if len(missing) == 0 {
+		return false
+	}
+	_, readiness := b.clashFallback.config()
+	if readiness != fallbackUnverified && readiness != fallbackReady {
+		return false
+	}
+	for _, m := range missing {
+		switch daemonRPC(m) {
+		case rpcGetGroups, rpcURLTestOutbound, rpcSelectOutbound:
+			// Each of these has an equivalent operation on the Clash API
+			// (/proxies read, /proxies/{name}/delay, PUT /proxies/{group}).
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ensureProbed runs the capability probe once, on first use.
@@ -281,6 +317,13 @@ type ProxyActionCapabilities struct {
 	ListReason   string
 	SwitchReason string
 	TestReason   string
+
+	// Which wire each action actually uses: rpc / clash_http / none.
+	// Diagnostics only — the UI does not show these. Recorded because "why did
+	// listing work?" is otherwise unanswerable from a bug report.
+	ListTransport   string
+	SwitchTransport string
+	TestTransport   string
 }
 
 // Reason tokens. Stable identifiers, safe to switch on in the frontend.
@@ -293,6 +336,11 @@ const (
 	ReasonCoreStopped = "core_stopped"
 	// ReasonUnknown — capability could not be established (probe did not run).
 	ReasonUnknown = "unknown"
+
+	// Transport tokens naming the wire an action uses. Diagnostics, not UI.
+	TransportRPC       = "rpc"
+	TransportClashHTTP = "clash_http"
+	TransportNone      = "none"
 )
 
 // proxyActionCapabilities derives the per-action set for this backend.
@@ -322,16 +370,47 @@ func (b *DaemonBackend) ProxyActionCapabilities() ProxyActionCapabilities {
 	if !probed {
 		// The daemon did not answer. Unreachability is reported by the status,
 		// and claiming "unsupported" here would be a fact we never established.
+		//
+		// The fallback cannot rescue this branch either: an unprobed daemon is
+		// one we have not reached, so we hold no evidence of ANY capability.
+		// Reporting one here would be a claim from nowhere — which is exactly
+		// the "assume supported" mistake this file exists to prevent.
 		return ProxyActionCapabilities{
 			ListReason: ReasonUnknown, SwitchReason: ReasonUnknown, TestReason: ReasonUnknown,
+			ListTransport: TransportNone, SwitchTransport: TransportNone, TestTransport: TransportNone,
 		}
 	}
 
+	// EFFECTIVE capability: what the user can actually do, which is the RPC
+	// OR the daemon's own loopback Clash API.
+	//
+	// This distinction is the point of the fallback. RPC absence is a fact
+	// about the daemon build and stays reported in the audit; it is NOT the
+	// same statement as "the product cannot list proxies". On the measured
+	// daemon GetGroups and URLTestOutbound are Unimplemented, yet listing and
+	// measuring work perfectly over the same process's Clash API — so telling
+	// the user "this engine cannot list proxies" would be false.
+	//
+	// The fallback is only counted when it is CONFIGURED for this daemon. It is
+	// deliberately not verified here: this query must stay cheap and must not
+	// perform I/O, because it is called while building UI state. A configured
+	// but not-yet-listening endpoint is reported as capable and simply fails
+	// once, honestly, if the core is not up — which is the same "start the
+	// core" state listing already has.
+	_, fbReadiness := b.clashFallback.config()
+	fbConfigured := fbReadiness == fallbackUnverified || fbReadiness == fallbackReady
+
 	caps := ProxyActionCapabilities{ListReason: ReasonOK, SwitchReason: ReasonOK, TestReason: ReasonOK}
-	caps.CanList = supports[rpcGetGroups]
-	caps.CanSwitch = supports[rpcSelectOutbound]
-	caps.CanTestSingle = supports[rpcURLTestOutbound]
-	caps.CanTestGroup = supports[rpcURLTestOutbound]
+	caps.CanList = supports[rpcGetGroups] || fbConfigured
+	caps.CanSwitch = supports[rpcSelectOutbound] || fbConfigured
+	caps.CanTestSingle = supports[rpcURLTestOutbound] || fbConfigured
+	caps.CanTestGroup = supports[rpcURLTestOutbound] || fbConfigured
+
+	// Transport actually in use, per action — diagnostics and the audit, not
+	// user-facing. RPC always wins where it exists.
+	caps.ListTransport = pickTransport(supports[rpcGetGroups], fbConfigured)
+	caps.SwitchTransport = pickTransport(supports[rpcSelectOutbound], fbConfigured)
+	caps.TestTransport = pickTransport(supports[rpcURLTestOutbound], fbConfigured)
 
 	if !caps.CanList {
 		caps.ListReason = ReasonEngineLacksRPC
@@ -343,4 +422,16 @@ func (b *DaemonBackend) ProxyActionCapabilities() ProxyActionCapabilities {
 		caps.TestReason = ReasonEngineLacksRPC
 	}
 	return caps
+}
+
+// pickTransport names the wire an action will use.
+func pickTransport(rpcSupported, fallbackConfigured bool) string {
+	switch {
+	case rpcSupported:
+		return TransportRPC
+	case fallbackConfigured:
+		return TransportClashHTTP
+	default:
+		return TransportNone
+	}
 }

@@ -175,6 +175,15 @@ func validControllerHost(host string) bool {
 }
 
 // isLoopbackHost — адрес указывает на петлю.
+// IsLoopbackHost reports whether addr is a loopback controller address.
+//
+// Exported so the daemon fallback can reuse THIS rule instead of growing a
+// second, subtly different one: "loopback" is a security boundary here, and two
+// definitions of it is how a 0.0.0.0 endpoint eventually slips through.
+func IsLoopbackHost(addr string) bool {
+	return isLoopbackHost(addr)
+}
+
 func isLoopbackHost(host string) bool {
 	h, _, err := net.SplitHostPort(host)
 	if err != nil {

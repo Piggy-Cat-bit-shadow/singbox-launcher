@@ -14,6 +14,7 @@ import (
 
 	"github.com/muhammadmuzzammil1998/jsonc"
 
+	"singbox-launcher/api"
 	"singbox-launcher/core/services"
 	"singbox-launcher/internal/constants"
 	"singbox-launcher/internal/debuglog"
@@ -55,12 +56,8 @@ const (
 //  1. cache_file.path → абсолютный в runtimeDir — каталоге, которым владеет
 //     демон (state_dir из /admin/info; демон cwd="/", иначе относительный
 //     путь уходит в read-only корень и валит старт);
-//  2. experimental.clash_api УДАЛЯЕТСЯ — в daemon-режиме управление и ноды
-//     идут по gRPC (GetGroups/SelectOutbound/URLTestOutbound), а трафик — по
-//     gRPC SubscribeConnections. Clash API демону не нужен вовсе: убираем его,
-//     чтобы не занимать порт и не плодить второй управляющий канал. Classic
-//     этой функции не проходит — там Clash остаётся (см. развилку
-//     ProxyTransport: classic=Clash HTTP, daemon=gRPC).
+//  2. experimental.clash_api СОХРАНЯЕТСЯ, но его хост принудительно
+//     приводится к loopback (см. DaemonClashFallbackConfig).
 //
 // Шаги (3)–(4) — платформенные (prepareConfigForDaemonWith).
 //
@@ -68,8 +65,53 @@ const (
 // сериализуем чистым JSON (демон толерантен к обоим). Возвращает исходный
 // конфиг без изменений, если править нечего.
 func prepareConfigForDaemon(config []byte, runtimeDir string) ([]byte, error) {
-	out, _, err := prepareConfigForDaemonWith(config, runtimeDir, daemonPrepOptions{})
-	return out, err
+	res, err := prepareDaemonConfig(config, runtimeDir, daemonPrepOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return res.Bytes, nil
+}
+
+// DaemonClashFallbackConfig — авторитетный ответ на вопрос «какой Clash API
+// реально окажется у демона после применения конфига».
+//
+// Это ЕДИНСТВЕННЫЙ источник правды для fallback-транспорта. Вычислять его
+// заново из disk-конфига нельзя: disk-конфиг может писать
+// `0.0.0.0:9090`, тогда как демон получает `127.0.0.1:9090`, — то есть две
+// разные истины об одном и том же. Поэтому структура едет ИЗ той же
+// трансформации, которая породила байты для демона, а не восстанавливается
+// потом догадкой.
+//
+// Enabled=false означает «у демона не будет Clash API» — это не ошибка, а
+// честная семантика конфига без experimental.clash_api.
+type DaemonClashFallbackConfig struct {
+	// Enabled — в подготовленном конфиге есть clash_api с валидным
+	// loopback-адресом, поэтому fallback в принципе возможен.
+	Enabled bool
+	// BaseURL — endpoint, который реально получит демон ("http://127.0.0.1:PORT").
+	BaseURL string
+	// Token — secret из того же конфига (может быть пустым: проект разрешает
+	// неаутентифицированный loopback Clash API). Наружу, в Swift, не уходит
+	// НИКОГДА.
+	Token string
+}
+
+// PreparedDaemonConfig — результат подготовки конфига для демона.
+type PreparedDaemonConfig struct {
+	// Bytes — то, что будет отправлено демону.
+	Bytes []byte
+	// ProxyServer — адрес системного прокси первого inbound (шаг 3); "" — нет.
+	ProxyServer string
+	// ClashFallback — какой Clash API окажется у демона (шаг 2).
+	ClashFallback DaemonClashFallbackConfig
+	// SelectorGroups — теги selector-outbound'ов из ЭТОГО конфига. Служат
+	// доказательством при проверке fallback-эндпоинта: если запущенный
+	// Clash API не знает группы, которую мы сами же и отправили, значит он
+	// обслуживает не наш конфиг (или не наш процесс).
+	//
+	// Считается здесь, а не отдельным чтением с диска: только так список
+	// групп гарантированно относится к тем же байтам, что уехали демону.
+	SelectorGroups []string
 }
 
 // daemonPrepOptions — платформенные шаги подготовки конфига (SPEC 141 §7).
@@ -93,17 +135,32 @@ func daemonPlatformPrepOptions() daemonPrepOptions {
 // как её строит ядро) первого inbound с set_system_proxy: true; "" — нет
 // или шаг (3) выключен. config.json на диске не меняется.
 func prepareConfigForDaemonWith(config []byte, runtimeDir string, opts daemonPrepOptions) (out []byte, proxyServer string, err error) {
+	res, err := prepareDaemonConfig(config, runtimeDir, opts)
+	if err != nil {
+		return nil, "", err
+	}
+	return res.Bytes, res.ProxyServer, nil
+}
+
+// prepareDaemonConfig — та же работа, но с полным результатом, включая
+// runtime-параметры Clash API демона.
+//
+// Чистая функция: на диск ничего не пишет, disk-байты не меняет. Именно
+// поэтому её можно тестировать напрямую на парах «вход → выход» вместо
+// grep по строке конфига (§15).
+func prepareDaemonConfig(config []byte, runtimeDir string, opts daemonPrepOptions) (PreparedDaemonConfig, error) {
 	clean := jsonc.ToJSON(config)
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(clean, &root); err != nil {
-		return nil, "", fmt.Errorf("parse config: %w", err)
+		return PreparedDaemonConfig{}, fmt.Errorf("parse config: %w", err)
 	}
 	changed := false
+	fallback := DaemonClashFallbackConfig{}
 
 	if expRaw, ok := root["experimental"]; ok {
 		var exp map[string]json.RawMessage
 		if err := json.Unmarshal(expRaw, &exp); err != nil {
-			return nil, "", fmt.Errorf("parse experimental: %w", err)
+			return PreparedDaemonConfig{}, fmt.Errorf("parse experimental: %w", err)
 		}
 		expChanged := false
 
@@ -111,7 +168,7 @@ func prepareConfigForDaemonWith(config []byte, runtimeDir string, opts daemonPre
 		if cfRaw, ok := exp["cache_file"]; ok {
 			var cf map[string]json.RawMessage
 			if err := json.Unmarshal(cfRaw, &cf); err != nil {
-				return nil, "", fmt.Errorf("parse cache_file: %w", err)
+				return PreparedDaemonConfig{}, fmt.Errorf("parse cache_file: %w", err)
 			}
 			var pathStr string
 			if p, ok := cf["path"]; ok {
@@ -129,12 +186,54 @@ func prepareConfigForDaemonWith(config []byte, runtimeDir string, opts daemonPre
 			}
 		}
 
-		// (2) clash_api — удаляем целиком (daemon работает по gRPC).
-		if _, ok := exp["clash_api"]; ok {
-			delete(exp, "clash_api")
-			expChanged = true
-			debuglog.InfoLog("daemon: removed clash_api (daemon uses gRPC)")
+		// (2) clash_api — СОХРАНЯЕМ, но хост → loopback.
+		//
+		// Раньше секция удалялась целиком («в daemon-режиме всё по gRPC»).
+		// Это перестало быть верным: демон вправе не реализовывать часть
+		// proxy-RPC (GetGroups, URLTestOutbound), и тогда единственный способ
+		// показать пользователю его же узлы — Clash API ТОГО ЖЕ процесса.
+		//
+		// Хост принудительно loopback, потому что disk-конфиг мог объявить
+		// 0.0.0.0/[::]/LAN-адрес: публиковать управляющий интерфейс демона в
+		// сеть ради внутреннего fallback нельзя. Порт и secret сохраняются —
+		// второй порт не изобретаем.
+		if caRaw, ok := exp["clash_api"]; ok {
+			var ca map[string]json.RawMessage
+			if err := json.Unmarshal(caRaw, &ca); err != nil {
+				return PreparedDaemonConfig{}, fmt.Errorf("parse clash_api: %w", err)
+			}
+			var controller string
+			if v, ok := ca["external_controller"]; ok {
+				_ = json.Unmarshal(v, &controller)
+			}
+			var secret string
+			if v, ok := ca["secret"]; ok {
+				_ = json.Unmarshal(v, &secret)
+			}
+
+			loopback, ok := loopbackController(controller)
+			if ok {
+				if loopback != controller {
+					ca["external_controller"], _ = json.Marshal(loopback)
+					exp["clash_api"], _ = json.Marshal(ca)
+					expChanged = true
+					debuglog.InfoLog("daemon: clash_api %q → %q (loopback only)", controller, loopback)
+				}
+				fallback = DaemonClashFallbackConfig{
+					Enabled: true,
+					BaseURL: "http://" + loopback,
+					Token:   secret,
+				}
+			} else {
+				// Адрес не разобрать (нет порта, мусор) — Clash API не
+				// поднимаем вовсе. Молча оставить как есть значило бы отдать
+				// демону конфиг, который он отвергнет на старте.
+				delete(exp, "clash_api")
+				expChanged = true
+				debuglog.WarnLog("daemon: clash_api %q is not a usable host:port; removed", controller)
+			}
 		}
+
 		if expChanged {
 			root["experimental"], _ = json.Marshal(exp)
 			changed = true
@@ -142,10 +241,11 @@ func prepareConfigForDaemonWith(config []byte, runtimeDir string, opts daemonPre
 	}
 
 	// (3) set_system_proxy → false, адрес первого — лаунчеру.
+	proxyServer := ""
 	if raw, ok := root["inbounds"]; ok && opts.launcherSetsProxy {
 		updated, server, inChanged, err := daemonInboundsWithoutSystemProxy(raw)
 		if err != nil {
-			return nil, "", err
+			return PreparedDaemonConfig{}, err
 		}
 		proxyServer = server
 		if inChanged {
@@ -158,7 +258,7 @@ func prepareConfigForDaemonWith(config []byte, runtimeDir string, opts daemonPre
 	if raw, ok := root["endpoints"]; ok && opts.tailscaleLocalRoot != "" && runtimeDir != "" {
 		updated, epChanged, err := daemonEndpointsTailscaleStateDir(raw, opts.tailscaleLocalRoot, runtimeDir)
 		if err != nil {
-			return nil, "", err
+			return PreparedDaemonConfig{}, err
 		}
 		if epChanged {
 			root["endpoints"] = updated
@@ -166,14 +266,82 @@ func prepareConfigForDaemonWith(config []byte, runtimeDir string, opts daemonPre
 		}
 	}
 
+	groups := selectorTags(root)
+
 	if !changed {
-		return config, proxyServer, nil
+		return PreparedDaemonConfig{Bytes: config, ProxyServer: proxyServer, ClashFallback: fallback, SelectorGroups: groups}, nil
 	}
-	out, err = json.Marshal(root)
+	out, err := json.Marshal(root)
 	if err != nil {
-		return nil, "", fmt.Errorf("marshal config: %w", err)
+		return PreparedDaemonConfig{}, fmt.Errorf("marshal config: %w", err)
 	}
-	return out, proxyServer, nil
+	return PreparedDaemonConfig{Bytes: out, ProxyServer: proxyServer, ClashFallback: fallback, SelectorGroups: groups}, nil
+}
+
+// selectorTags collects the tags of selector outbounds in a prepared config.
+//
+// Tolerant by design: a config with no outbounds (or an unreadable one) yields
+// no groups, which weakens verification to the Clash-shape and auth checks
+// rather than breaking the fallback outright.
+func selectorTags(root map[string]json.RawMessage) []string {
+	raw, ok := root["outbounds"]
+	if !ok {
+		return nil
+	}
+	var outbounds []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &outbounds); err != nil {
+		return nil
+	}
+	var tags []string
+	for _, o := range outbounds {
+		var typ, tag string
+		if v, ok := o["type"]; ok {
+			_ = json.Unmarshal(v, &typ)
+		}
+		if typ != "selector" && typ != "urltest" {
+			continue
+		}
+		if v, ok := o["tag"]; ok {
+			_ = json.Unmarshal(v, &tag)
+		}
+		if tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+// loopbackController приводит external_controller к loopback-адресу с тем же
+// портом. ok=false — адрес непригоден (нет порта или порт не число).
+//
+// Reuse одной канонической проверки loopback (api.isLoopbackHost): второй
+// набор правил для того же понятия разошёлся бы с первым.
+func loopbackController(controller string) (string, bool) {
+	trimmed := strings.TrimSpace(controller)
+
+	// Go's SplitHostPort accepts "[::]:9090" but not the bare ":::9090" form,
+	// which is nevertheless a common way to write an IPv6 wildcard. Normalising
+	// it here means a config written that way still gets a fallback instead of
+	// silently losing the Clash API.
+	if strings.HasPrefix(trimmed, ":::") {
+		trimmed = "[::]:" + strings.TrimPrefix(trimmed, ":::")
+	}
+
+	host, port, err := net.SplitHostPort(trimmed)
+	if err != nil {
+		return "", false
+	}
+	if port == "" {
+		return "", false
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return "", false
+	}
+	// Уже loopback → оставляем как есть (в т.ч. localhost и ::1).
+	if api.IsLoopbackHost(trimmed) {
+		return net.JoinHostPort(host, port), true
+	}
+	return net.JoinHostPort("127.0.0.1", port), true
 }
 
 // daemonInboundsWithoutSystemProxy — шаг (3): каждый inbound с

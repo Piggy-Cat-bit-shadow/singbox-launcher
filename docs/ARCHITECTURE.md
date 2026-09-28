@@ -1139,6 +1139,36 @@ override is what made the remote connection drag the Local tab onto an empty
 base URL (fixed in `fe575b6`): resolvers must ask for the scope's transport, and
 the gRPC gate must consult the remote override rather than the backend mode.
 
+**Composite daemon transport (per action, RPC first).** A daemon build may
+implement only part of the proxy RPC surface — the measured build answers
+`Unimplemented` to `GetGroups` and `URLTestOutbound` while serving
+`SelectOutbound`. `daemonProxyTransport` is therefore a *composite*: each method
+uses its gRPC RPC when the capability probe says the daemon has it, and otherwise
+falls back to that same daemon's own loopback Clash API.
+
+The wire is chosen per action, never once per engine: switching keeps using RPC
+on the measured machine while listing and latency use HTTP. The trigger is
+capability ABSENCE only — a timeout or permission error is returned as an error
+rather than silently rerouted, so an operational failure cannot change the
+transport underneath the user.
+
+The fallback endpoint is derived by the same pure transformation that prepares
+the config sent to the daemon (`prepareDaemonConfig` → `PreparedDaemonConfig`),
+so there is exactly one source of truth for "which Clash API does the daemon
+have". The daemon copy keeps `experimental.clash_api` with its host forced to
+loopback (port and secret preserved); the disk config is never rewritten.
+
+It is adopted only when the daemon is LOCAL and the endpoint proves itself a
+genuine, authenticated Clash API serving the selector groups from the config we
+sent (a TCP connect is never sufficient). Remote daemons get no local fallback at
+all, since `127.0.0.1` would mean the launcher's own machine. Readiness is a
+state (`not_configured` / `unverified` / `ready` / `blocked`) rather than a
+boolean, so "not configured", "not up yet" and "forbidden" stay distinguishable.
+`ProxyActionCapabilities` reports the resulting *effective* ability (RPC OR
+fallback) while RPC absence remains separately visible for diagnostics.
+
+Full detail: [DAEMON_PROXY_FALLBACK_AUDIT.md](DAEMON_PROXY_FALLBACK_AUDIT.md).
+
 ### 11.3 Target and role are independent axes (SPEC 097)
 
 Config generation used to assume "the machine the launcher runs on": `runtime.GOOS`
