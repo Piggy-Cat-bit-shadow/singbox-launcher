@@ -430,11 +430,66 @@ func (apiSvc *APIService) RecordMeasurementIfNewer(proxyName string, m ProxyMeas
 
 	st := apiSvc.mutableStateLocked()
 	if prev, seen := st.Measurements[proxyName]; seen && prev.Generation > m.Generation {
-		return false
+		// A HAND TEST IS PROTECTED FROM A SCHEDULED RUN OF THE SAME VINTAGE, NOT FOREVER.
+		//
+		// Hand-test generations sit far above every group-run id, so a raw comparison makes a
+		// group run unable to EVER update a node the user once tested by hand. That is not
+		// protection, it is a frozen readout: the node keeps showing the delay from a test the
+		// user ran minutes or hours ago, including after the node has died, and — verified —
+		// the "escape hatch" an earlier comment cited does not exist, because
+		// `ClearMeasurements` has no caller in Go, Swift or the IPC surface.
+		//
+		// The intent was narrower and is worth stating: a group run that was ALREADY IN FLIGHT
+		// when the user pressed "test" must not overwrite their fresh result. Once the
+		// hand test is no longer fresh it is history, and a later group run reporting it is
+		// strictly better information. So the hand-test advantage EXPIRES.
+		if !handTestAdvantageExpired(prev, m) {
+			return false
+		}
 	}
 	apiSvc.setMeasurementLocked(st, proxyName, m)
 	return true
 }
+
+// handTestAdvantageExpiresAfter is how long a hand test outranks a later group run.
+//
+// Long enough to cover every group run that could have been in flight when the user pressed
+// "test" — a full group test is bounded by its own timeout and the per-node budget — and short
+// enough that a stale number cannot masquerade as a current one for a whole session.
+const handTestAdvantageExpiresAfter = 5 * time.Minute
+
+// handTestAdvantageExpired reports whether a stored hand-test result has given up its
+// precedence over the incoming measurement.
+//
+// Two conditions release it, and both are needed:
+//
+//   - the incoming result is a GROUP run (a low generation) and the stored one is a HAND test
+//     (a high one) — the only pair where the generation spaces are not comparable as ages;
+//   - and the stored result is older than handTestAdvantageExpiresAfter.
+//
+// `MeasuredAt` is the age, and a zero value means "unknown", which expires immediately: an
+// absent timestamp cannot be shown to be fresh, and guessing "fresh" is what produces the
+// permanently frozen row. Within the same space the plain comparison already orders correctly,
+// so this function is not consulted.
+func handTestAdvantageExpired(prev, incoming ProxyMeasurementState) bool {
+	prevIsHandTest := prev.Generation >= singleTestGenerationFloor
+	incomingIsGroupRun := incoming.Generation < singleTestGenerationFloor
+	if !prevIsHandTest || !incomingIsGroupRun {
+		return false
+	}
+	if prev.MeasuredAt.IsZero() {
+		return true
+	}
+	return time.Since(prev.MeasuredAt) > handTestAdvantageExpiresAfter
+}
+
+// singleTestGenerationFloor is the low bound of the hand-test generation space.
+//
+// It mirrors `backend/service`'s `singleTestGenerationBase`. The constant is duplicated rather
+// than imported because this package is the lower layer and is what must keep the two spaces
+// ordered; a test in `core/services` pins the value, so lowering it in the scheduler cannot
+// silently make a group id look like a hand test.
+const singleTestGenerationFloor = uint64(1) << 62
 
 // setMeasurementLocked applies a measurement to an already-locked state.
 //

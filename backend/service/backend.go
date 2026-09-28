@@ -65,8 +65,7 @@ type Backend struct {
 	runCtxOnce sync.Once
 	runCtx     context.Context
 	runCancel  context.CancelFunc
-	// sessionID identifies THIS backend process. It is generated once at
-	// construction and is never persisted or reused.
+	// sessionID identifies THIS backend process, and is never persisted or reused.
 	//
 	// It exists because `seq` is a per-process counter: without a session, a
 	// client that remembers a high-water mark across a helper restart discards
@@ -74,7 +73,20 @@ type Backend struct {
 	// dead backend's late event (the counter looks current). Both are real
 	// bugs, and they have opposite fixes, so the ambiguity must be removed
 	// rather than guessed at.
-	sessionID string
+	//
+	// WRITTEN EXACTLY ONCE, UNDER `sessionOnce`, AND ONLY READ AFTERWARDS.
+	//
+	// It was a plain field with a lazy initialiser, and there were two of them under DIFFERENT
+	// locks: `emit` minted it under `eventQueueMu` while `SessionID()` did so under `mu`. Two
+	// goroutines could therefore write the field concurrently — a real data race, reported by
+	// `-race` — and could also observe DIFFERENT values, which is worse than the race: a
+	// client that saw session X on an event and session Y on a status read would discard one
+	// of them as belonging to another process.
+	//
+	// `sync.Once` makes "generated once" true by construction rather than by a comment, and it
+	// is the one lock both entry points take.
+	sessionOnce sync.Once
+	sessionID   string
 	// subscribers receive every emitted event. The IPC layer registers one
 	// writer; tests register their own.
 	subscribers []func(protocol.Event)
@@ -485,11 +497,15 @@ func (b *Backend) SessionID() string {
 	// session compares equal to another empty session — which silently disables
 	// the very defence this field provides.
 	//
-	// Still stable for the process's lifetime: it is written once, under the
-	// same lock every reader takes.
-	if b.sessionID == "" {
-		b.sessionID = newSessionID()
-	}
+	// Stable for the process's lifetime, and the SAME value on every path: the initialiser
+	// runs under `sessionOnce`, which is what `emit` takes too. An earlier version had two
+	// lazy initialisers under two different locks, which is a data race and could hand out two
+	// different session ids for one process.
+	b.sessionOnce.Do(func() {
+		if b.sessionID == "" {
+			b.sessionID = newSessionID()
+		}
+	})
 	return b.sessionID
 }
 
@@ -853,9 +869,13 @@ func (b *Backend) emit(name string, payload any) {
 	// The session is stamped here, under the same lock that hands out the
 	// sequence, so the pair (session, seq) is always consistent: no event can
 	// carry one process's sequence under another process's identity.
-	if b.sessionID == "" {
-		b.sessionID = newSessionID()
-	}
+	// Through the same `sync.Once` as `SessionID()`, so the value a caller reads is the value
+	// stamped here — never a second, independently minted session for the same process.
+	b.sessionOnce.Do(func() {
+		if b.sessionID == "" {
+			b.sessionID = newSessionID()
+		}
+	})
 	ev := protocol.Event{Event: name, Seq: seq, Session: b.sessionID, Payload: payload}
 
 	// A SUBSCRIBER RUNS ON THE DISPATCHER GOROUTINE, which is the only consumer of the queue.

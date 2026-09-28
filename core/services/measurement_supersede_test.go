@@ -1,6 +1,9 @@
 package services
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestALateMeasurementCannotOverwriteANewerOne is the assertion that makes
 // `ProxyMeasurementState.Generation` load-bearing.
@@ -153,29 +156,38 @@ func TestAGroupRunSupersedesAHandTestAndViceVersa(t *testing.T) {
 		t.Fatalf("delay = %d, want the hand test's 10", got.Delay)
 	}
 
-	// A GROUP RUN MUST NOT OVERWRITE A NEWER HAND TEST. This is the direction that actually
+	// A GROUP RUN MUST NOT OVERWRITE A FRESH HAND TEST. This is the direction that actually
 	// matters, and the one the asymmetry broke: the group path wrote unconditionally, so a
 	// scheduled run landing a second after the user pressed "test" replaced their result.
 	//
-	// The group id space and the hand-test space are deliberately ordered with hand tests
-	// ABOVE every group id, so a hand test is never superseded by a run. The price is that a
-	// group run cannot supersede a hand test either — that is the intended trade-off, not an
-	// oversight: a scheduled refresh is not more authoritative than a test the user just
-	// asked for, and the user can clear the result to let group runs back in.
-	if svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
-		Delay: 999, Status: MeasurementSuccess, Generation: 8,
+	// "FRESH" IS THE WHOLE QUALIFIER, and it is load-bearing. A bare generation comparison
+	// makes a group run unable to EVER update a node the user once tested by hand — a frozen
+	// readout that keeps displaying a delay from an old test even after the node has died.
+	// The protection is for a run that was already in flight when the user pressed "test", so
+	// it expires.
+	fresh := time.Now()
+	if !svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 10, Status: MeasurementSuccess, Generation: handGeneration, MeasuredAt: fresh,
 	}) {
-		t.Fatal("a group run overwrote a hand test's NEWER result; the compare was bypassed, " +
-			"so a scheduled refresh silently replaces what the user just measured")
+		t.Fatal("the fresh hand test was rejected on its own slot")
+	}
+	if svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 999, Status: MeasurementSuccess, Generation: 8, MeasuredAt: fresh,
+	}) {
+		t.Fatal("a group run overwrote a HAND TEST THAT WAS SECONDS OLD; the compare was " +
+			"bypassed, so a scheduled refresh silently replaces what the user just measured")
 	}
 	if got, _ := svc.GetMeasurement("node"); got.Delay != 10 {
 		t.Fatalf("delay = %d, want the hand test's 10", got.Delay)
 	}
 
 	// And the reverse order must still protect the newer result: an OLDER group run may not
-	// overwrite a newer hand test.
+	// overwrite a newer hand test. `MeasuredAt` is REQUIRED here — without a timestamp the
+	// hand test is treated as not-provably-fresh and expires at once, which is asserted
+	// separately by `TestAStaleHandTestDoesNotFreezeTheReadout`.
 	if !svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
 		Delay: 5, Status: MeasurementSuccess, Generation: handGeneration + 1,
+		MeasuredAt: time.Now(),
 	}) {
 		t.Fatal("a newer hand test was rejected")
 	}
@@ -187,5 +199,83 @@ func TestAGroupRunSupersedesAHandTestAndViceVersa(t *testing.T) {
 	}
 	if got, _ := svc.GetMeasurement("node"); got.Delay != 5 {
 		t.Fatalf("delay = %d, want the hand test's 5", got.Delay)
+	}
+}
+
+// TestAStaleHandTestDoesNotFreezeTheReadout — the other half, and the finding with real
+// user-visible impact.
+//
+// Because hand-test generations sit above every group-run id, a bare comparison let a group
+// run NEVER update a node the user had once tested by hand. The row kept showing the delay
+// from that test indefinitely — including a `success` for a node that had since died — and one
+// hand test was enough to pin it for the rest of the session.
+//
+// The stated escape hatch did not exist: `ClearMeasurements` has no caller in Go, Swift or the
+// IPC surface (verified). So the expiry is the mechanism, not a convenience.
+func TestAStaleHandTestDoesNotFreezeTheReadout(t *testing.T) {
+	svc := &APIService{}
+
+	const handGeneration = singleTestGenerationFloor + 1
+	stale := time.Now().Add(-2 * handTestAdvantageExpiresAfter)
+	svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 10, Status: MeasurementSuccess, Generation: handGeneration, MeasuredAt: stale,
+	})
+
+	// A group run reporting the node is now unreachable must be able to land. Refusing it is
+	// what leaves a permanently green row for a node that no longer answers.
+	if !svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 0, Status: MeasurementTimeout, Error: "timeout",
+		Generation: 12, MeasuredAt: time.Now(),
+	}) {
+		t.Fatal("a group run could not update a node whose only measurement was a hand test " +
+			"from hours ago. The row keeps showing a stale delay — and a stale success for a " +
+			"node that may be dead — with no way for the user to clear it")
+	}
+	got, _ := svc.GetMeasurement("node")
+	if got.Status != MeasurementTimeout {
+		t.Fatalf("status = %v, want the group run's timeout", got.Status)
+	}
+
+	// AND THE PROTECTION STILL HOLDS WITHIN ITS WINDOW, so this is an expiry and not a
+	// removal of the guard.
+	svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 7, Status: MeasurementSuccess, Generation: handGeneration + 2,
+		MeasuredAt: time.Now(),
+	})
+	if svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 555, Status: MeasurementSuccess, Generation: 13, MeasuredAt: time.Now(),
+	}) {
+		t.Error("the expiry discarded the protection entirely: a group run overwrote a hand " +
+			"test taken moments ago, which is the clobbering the guard exists for")
+	}
+
+	// A result with NO timestamp cannot be shown to be fresh, so it expires immediately
+	// rather than pinning the row forever.
+	svc2 := &APIService{}
+	svc2.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 42, Status: MeasurementSuccess, Generation: handGeneration,
+	})
+	if !svc2.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 3, Status: MeasurementSuccess, Generation: 4, MeasuredAt: time.Now(),
+	}) {
+		t.Error("a hand test with no `MeasuredAt` blocked a later group run forever; an " +
+			"absent timestamp cannot be shown to be fresh, and treating it as fresh is what " +
+			"produces the frozen row")
+	}
+}
+
+// TestTheHandTestGenerationFloorMatchesTheScheduler pins the duplicated constant.
+//
+// The two spaces must stay ordered: if the scheduler lowered its base, group ids and hand-test
+// generations would overlap and the expiry rule would misclassify one as the other.
+func TestTheHandTestGenerationFloorMatchesTheScheduler(t *testing.T) {
+	if singleTestGenerationFloor != uint64(1)<<62 {
+		t.Fatalf("the hand-test generation floor is %d, but the scheduler's base is 1<<62; "+
+			"the two spaces are no longer ordered and a group id can be mistaken for a hand "+
+			"test", singleTestGenerationFloor)
+	}
+	// A realistic group id must sit below it, and a hand test above.
+	if uint64(1_000_000) >= singleTestGenerationFloor {
+		t.Fatal("a group id can reach the hand-test space")
 	}
 }
