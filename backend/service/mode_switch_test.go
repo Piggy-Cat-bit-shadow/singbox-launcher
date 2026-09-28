@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -343,3 +344,89 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// TestDaemonExitStopFailureKeepsRunningTruth is claim K.
+//
+// With "stop the VPN when I quit" configured, the launcher asks the daemon to
+// stop on exit. If that call FAILS, the tunnel is provably still up — and
+// reporting `stopped` there is worse than a cosmetic lie: GracefulExit enters a
+// wait loop whose first check is `!RunningState.IsRunning()`, so the launcher's
+// own eager write would make the loop "confirm" a stop that never happened, and
+// the app would exit reporting success while the tunnel carried traffic.
+//
+// The check is a source-shape assertion, because producing a real failing
+// /admin/stop needs a live daemon. It is narrow and decisive: the failure branch
+// must return false and must not clear the running flag.
+func TestDaemonExitStopFailureKeepsRunningTruth(t *testing.T) {
+	src := stripGoComments(readSource(t, "core/backend_daemon.go"))
+
+	start := contains(src, "func (b *DaemonBackend) OnAppExit()")
+	if !start {
+		t.Fatal("OnAppExit not found in the daemon backend")
+	}
+	idx := indexOf(src, "func (b *DaemonBackend) OnAppExit()")
+	end := indexOf(src[idx:], "\nfunc ")
+	if end < 0 {
+		end = len(src) - idx
+	}
+	body := src[idx : idx+end]
+
+	// Locate the stop-failure branch and check what it does.
+	failIdx := indexOf(body, "stop failed")
+	if failIdx < 0 {
+		t.Fatal("OnAppExit has no stop-failure branch; a failed stop must be handled, " +
+			"not ignored")
+	}
+	// The branch starts at the error handling and ends at the next return.
+	branchEnd := indexOf(body[failIdx:], "return")
+	if branchEnd < 0 {
+		t.Fatal("the stop-failure branch does not return")
+	}
+	branch := body[failIdx : failIdx+branchEnd+len("return false")]
+
+	if contains(branch, "RunningState.Set(false)") {
+		t.Fatal("OnAppExit clears the running flag when the daemon STOP FAILED; the " +
+			"tunnel is still up, and GracefulExit's wait loop would treat its own " +
+			"eager write as confirmation that the VPN is down")
+	}
+	if !contains(branch, "return false") {
+		t.Fatal("OnAppExit must decline to claim a wait on a stop that failed")
+	}
+}
+
+// TestOnAppExitWaitsOnlyOnAConfirmedStop — the positive half: an unimplemented
+// backend or a policy of "leave the core running" must NOT make GracefulExit
+// wait, or the app would hang on exit for a stop that was never requested.
+func TestOnAppExitWaitsOnlyOnAConfirmedStop(t *testing.T) {
+	b := daemonEngineBackend(t, false) // keep the tunnel running on exit
+	daemon, ok := b.ac.Backend().(*core.DaemonBackend)
+	if !ok {
+		t.Fatal("expected the daemon backend")
+	}
+	// With the keep-running policy, OnAppExit must decline immediately.
+	if daemon.OnAppExit() {
+		t.Fatal("OnAppExit asked GracefulExit to wait even though the policy is to " +
+			"leave the core running; the app would wait for a stop nobody requested")
+	}
+}
+
+// TestDaemonStopContextReachesTheFrontend is claim L.
+//
+// The contextual interface covered Start and Restart but not Stop, so a daemon
+// stop had no way to return a reason: the error went to a Fyne dialog, which the
+// headless frontend never sees. A stopped-but-unreported core left the user with
+// a state that never settled and no explanation.
+func TestDaemonStopContextReachesTheFrontend(t *testing.T) {
+	// The interface must include Stop, so a caller can await it and get a reason.
+	type stopContextual interface {
+		StopVPNContext(ctx context.Context) error
+	}
+	var b interface{} = &core.DaemonBackend{}
+	if _, ok := b.(stopContextual); !ok {
+		t.Fatal("the daemon backend has no contextual Stop; a stop failure can only " +
+			"reach the frontend through a Fyne dialog, which headless mode does not have")
+	}
+}
+
+// indexOf is strings.Index, kept local so the assertions above read plainly.
+func indexOf(haystack, needle string) int { return strings.Index(haystack, needle) }

@@ -650,13 +650,53 @@ func (b *Backend) runCoreOp(kind string, timeout time.Duration, fn func(context.
 // returning. `completeStop` is called when the engine that owns the core reports
 // that the core is actually gone — the only event that can honestly end a stop.
 // Nothing else clears the record.
-func (b *Backend) runCoreOpFireAndForget(kind string, fn func()) error {
-	if _, started := b.ops.beginOp(kind); !started {
+func (b *Backend) runCoreOpFireAndForget(kind string, fn func(context.Context) error) error {
+	op, started := b.ops.beginOp(kind)
+	if !started {
 		b.EmitCoreState()
 		return nil
 	}
 	b.EmitCoreState()
-	fn()
+
+	// A stop is NOT awaited on the IPC thread, because it tears down processes
+	// and the TUN device and can take a while. But it is not fire-and-forget
+	// either: the operation must reach a terminal state, and a failure must reach
+	// the frontend.
+	//
+	// The completion arrives from the runtime transition (see completeStop),
+	// which is the only event that can honestly end a stop. The goroutine below
+	// exists to observe the FAILURE, which the transition cannot express.
+	ctx, cancel := context.WithTimeout(context.Background(), coreOpTimeout)
+	if !b.ops.attachCancel(op, cancel) {
+		cancel()
+		return nil
+	}
+
+	go func() {
+		defer cancel()
+		err := fn(ctx)
+		if err == nil {
+			return
+		}
+		// Superseded: the world moved on and this failure describes a state that
+		// no longer exists. Recording it would put an error on screen for an
+		// engine the user has already left.
+		if op.isSuperseded() {
+			debuglog.InfoLog("core op: %s (id=%d) failed after being superseded; not reporting", kind, op.id)
+			return
+		}
+		// The stop did not complete. Settle the operation so the UI leaves
+		// `stopping`, and record the reason so the headless frontend learns why
+		// the tunnel is still up — previously this reached only a Fyne dialog,
+		// and headless mode has none.
+		if settled := b.ops.finishOp(op, err); settled == settleStale {
+			return
+		}
+		debuglog.ErrorLog("core op: %s (id=%d) failed: %v", kind, op.id, err)
+		b.ac.RecordLifecycleError(core.LifecycleErrStopFailed, kind,
+			"the core could not be stopped", err.Error(), true)
+		b.EmitCoreState()
+	}()
 	return nil
 }
 

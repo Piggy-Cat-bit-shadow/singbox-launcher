@@ -116,6 +116,46 @@ func (b *LegacyBackend) RestartVPNContext(ctx context.Context) error {
 	return b.opsOrDefault().restartContext(ctx)
 }
 
+// StopVPNContext implements contextualCoreBackend.
+//
+// Classic's Stop already confirms termination internally (TERM → wait → KILL →
+// verify by executable identity), so the honest contextual statement is "the
+// stop ran to completion and was confirmed". The fire-and-forget StopVPN stays
+// for the GUI; this is the path the IPC handler uses.
+func (b *LegacyBackend) StopVPNContext(ctx context.Context) error {
+	if b.ac == nil || (b.ops == nil && b.ac.ProcessService == nil) {
+		return nil
+	}
+	// The teardown is started UNCONDITIONALLY, even if the context is already
+	// cancelled.
+	//
+	// A stop is not a request that can be declined: the user asked for the tunnel
+	// to come down, and the core's fate must not depend on whether some caller is
+	// still listening. Checking the context first would skip the teardown
+	// entirely and leave a running core behind while telling the caller "you
+	// cancelled" — turning a UI timeout into a live tunnel.
+	//
+	// So: run it, and report the cancellation separately, as what it is.
+	done := make(chan struct{})
+	go func() {
+		b.opsOrDefault().stop()
+		close(done)
+	}()
+	if ctx == nil {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// The teardown must still run to completion — abandoning it halfway
+		// would leave the core in whatever state the half-finished teardown
+		// produced — but the CALLER stops waiting and is told why.
+		return ctx.Err()
+	}
+}
+
 // StopVPN implements CoreBackend via ProcessService.Stop.
 //
 // Тоже асинхронно: Stop ждёт завершения процессов и снятия TUN, а это не

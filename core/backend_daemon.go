@@ -791,6 +791,60 @@ func (b *DaemonBackend) ApplyCurrentConfigForTest(caller string, forced bool) er
 	return b.applyCurrentConfig(caller, forced)
 }
 
+// StopVPNContext stops the daemon core and returns the REAL outcome.
+//
+// The contextual interface covered Start and Restart but not Stop, so a stop had
+// no way to report a reason. Failures went to a Fyne dialog — and the headless
+// frontend has no uiPort, so a failed stop produced a log line, no protocol
+// error, and a state that never settled. The user was left watching a screen
+// with no explanation of why the tunnel was still up.
+//
+// This performs the same work as StopVPN with the same confirmations, and then
+// RETURNS the failure instead of only recording it. StopVPN remains the
+// fire-and-forget wrapper the GUI uses.
+func (b *DaemonBackend) StopVPNContext(ctx context.Context) error {
+	if b == nil || b.admin == nil {
+		return NewStartFailure(StartErrDaemonUnreachable, fmt.Errorf("no daemon client"))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	b.applyMu.Lock()
+	defer b.applyMu.Unlock()
+	ac := b.ac
+
+	if ac != nil {
+		ac.BeginDaemonStop(b)
+	}
+
+	if err := b.admin.Stop(); err != nil {
+		msg := fmt.Errorf("daemon stop: %w", err).Error()
+		if ac != nil {
+			ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", msg, "", true)
+			ac.EndDaemonStop(b, false)
+		}
+		return NewStartFailure(StartErrDaemonApplyFailed, fmt.Errorf("%s", msg))
+	}
+
+	if err := b.awaitDaemonStopped(); err != nil {
+		errMsg := "the daemon accepted the stop but the core is still running"
+		if ac != nil {
+			ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", errMsg, err.Error(), true)
+			ac.EndDaemonStop(b, false)
+		}
+		return NewStartFailure(StartErrDaemonApplyFailed, fmt.Errorf("%s: %w", errMsg, err))
+	}
+
+	// Confirmed gone by the daemon itself.
+	if ac != nil {
+		ac.clearDaemonSystemProxy("VPN stopped")
+		ac.EndDaemonStop(b, true)
+	}
+	b.clashFallback.invalidate()
+	return nil
+}
+
 // SetStopping implements stopStateBackend: records that a stop is in flight so
 // the wire state can report `stopping` instead of `running` while the core is
 // being torn down.

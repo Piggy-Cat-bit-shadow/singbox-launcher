@@ -527,11 +527,17 @@ func (b *Backend) StopCore() error {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
 	debuglog.InfoLog("backend: stop_core requested")
-	// Stop is deliberately NOT awaited: it tears down processes and the TUN
-	// device, which can take a while, and the outcome is reported by the
-	// runtime transition anyway. Only the pending flag and the initial
-	// "stopping" state are published here.
-	return b.runCoreOpFireAndForget("stop", func() { core.StopSingBoxProcess() })
+	// Stop is deliberately NOT awaited on this thread: it tears down processes
+	// and the TUN device, which can take a while. The operation's terminal state
+	// comes from the runtime transition, and a failure is reported through the
+	// contextual stop — which is how a headless frontend learns that the tunnel
+	// is still up instead of seeing a state that never settles.
+	//
+	// The contextual path carries the REASON; the runtime transition carries the
+	// COMPLETION. Neither alone is enough.
+	return b.runCoreOpFireAndForget("stop", func(ctx context.Context) error {
+		return b.ac.StopVPNContext(ctx)
+	})
 }
 
 // Shutdown releases backend resources. The core stop policy is unchanged:

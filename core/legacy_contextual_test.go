@@ -184,3 +184,39 @@ func TestClassicContextualMethodsTolerateAnUnwiredController(t *testing.T) {
 		t.Errorf("RestartVPNContext on an unwired backend = %v, want nil", err)
 	}
 }
+
+// TestClassicStopContextReportsCancellationNotSuccess — the stop itself must run
+// to completion even if the caller stops waiting.
+//
+// Abandoning a half-finished teardown would leave the core in whatever state the
+// interruption produced, so the contextual stop lets the work finish and reports
+// the caller's cancellation instead. "The caller gave up" and "the core stopped"
+// are different statements and must not be conflated.
+func TestClassicStopContextReportsCancellationNotSuccess(t *testing.T) {
+	ac := newTestController()
+	stopFinished := make(chan struct{})
+
+	b := NewLegacyBackend(ac)
+	b.ops = &legacyOps{
+		start:          func(skip bool) {},
+		startContext:   func(ctx context.Context, skip bool) error { return nil },
+		stop:           func() { close(stopFinished) },
+		restart:        func() {},
+		restartContext: func(ctx context.Context) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+
+	err := b.StopVPNContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StopVPNContext = %v with a cancelled context, want context.Canceled", err)
+	}
+	// The teardown must still have been started: the core's fate cannot depend on
+	// whether a caller was still listening.
+	select {
+	case <-stopFinished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop never ran; reporting cancellation must not skip the teardown")
+	}
+}

@@ -652,6 +652,14 @@ type contextualCoreBackend interface {
 	StartVPNContext(ctx context.Context) error
 	// RestartVPNContext перезапускает ядро и возвращает ошибку.
 	RestartVPNContext(ctx context.Context) error
+	// StopVPNContext останавливает ядро и возвращает ошибку.
+	//
+	// Остановка входит в этот интерфейс по той же причине, что и запуск:
+	// причина отказа обязана доехать до фронтенда. Раньше провал остановки
+	// показывался только диалогом Fyne, а headless-фронтенд его не видит —
+	// пользователь оставался с состоянием, которое не сходится, и без
+	// объяснения, почему туннель всё ещё поднят.
+	StopVPNContext(ctx context.Context) error
 }
 
 // StartVPNContext — единая точка запуска ядра с возвратом ошибки.
@@ -684,6 +692,37 @@ func (ac *AppController) StartVPNContext(ctx context.Context, skipRunningCheck .
 		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("ProcessService not initialized"))
 	}
 	return ac.ProcessService.StartContext(ctx, skipRunningCheck...)
+}
+
+// StopVPNContext — единая точка остановки ядра с возвратом ошибки.
+//
+// Возвращает ошибку, если остановка НЕ подтверждена владельцем ядра: для
+// daemon это ответ самого демона, для classic — подтверждённая смерть
+// процесса. nil означает «ядро действительно остановлено», а не «запрос
+// отправлен» — именно это и нужно headless-фронтенду.
+//
+// Движок без contextual-возможности останавливается обычным путём, а nil
+// означает «запрос принят»: отличать это от подтверждённой остановки обязан
+// вызывающий по состоянию рантайма, как и раньше.
+func (ac *AppController) StopVPNContext(ctx context.Context) error {
+	if ac == nil {
+		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("no app controller"))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if b := ac.Backend(); b != nil {
+		if cb, ok := b.(contextualCoreBackend); ok {
+			return cb.StopVPNContext(ctx)
+		}
+		b.StopVPN()
+		return nil
+	}
+	if ac.ProcessService == nil {
+		return NewStartFailure(StartErrSpawnFailed, fmt.Errorf("ProcessService not initialized"))
+	}
+	ac.ProcessService.Stop()
+	return nil
 }
 
 // RestartVPNContext — перезапуск ядра с возвратом ошибки. См. StartVPNContext.
