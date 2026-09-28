@@ -162,6 +162,13 @@ func TestSupersededRunDoesNotEmitProgress(t *testing.T) {
 		t.Fatal("the superseded run never finished")
 	}
 
+	// DELIVERY IS ASYNCHRONOUS. `seen` is filled by a SUBSCRIBER, which runs on the dispatcher
+	// goroutine, so reading it as soon as the run finishes races the dispatcher — and the
+	// assertion below is a negative one ("the superseded run emitted nothing"), which a
+	// not-yet-delivered event satisfies VACUOUSLY. Without this flush the test could pass for
+	// the wrong reason and could also fail intermittently for one.
+	b.FlushEventsForTest()
+
 	mu.Lock()
 	defer mu.Unlock()
 	for _, id := range seen {

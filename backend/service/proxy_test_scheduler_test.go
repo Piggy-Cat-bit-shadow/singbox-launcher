@@ -616,7 +616,11 @@ func TestProxyTestProgressEventIsDeclaredEmittedAndHandled(t *testing.T) {
 			protocol.EventProxyTestProgress)
 	}
 
-	api.SetPingTestAllConcurrency(3)
+	// NOTE: `SetPingTestAllConcurrency` accepts only 1, 5, 10, 20, 50, 100 and coerces
+	// anything else to 20 — so `SetPingTestAllConcurrency(3)` left it at 20 and this test was
+	// never running at the concurrency it named. It is stated rather than silently "fixed",
+	// because the value now reflects what actually runs.
+	api.SetPingTestAllConcurrency(5)
 	defer api.SetPingTestAllConcurrency(20)
 
 	tr := &countingTransport{nodes: nodeNames(4), delayFor: func(string) (int64, error) { return 42, nil }}
@@ -653,6 +657,17 @@ func TestProxyTestProgressEventIsDeclaredEmittedAndHandled(t *testing.T) {
 	if _, err := b.RunGroupTest(context.Background(), "g"); err != nil {
 		t.Fatalf("RunGroupTest: %v", err)
 	}
+	// DELIVERY IS ASYNCHRONOUS, SO THE READ MUST WAIT FOR IT.
+	//
+	// `emit` numbers and enqueues; a single dispatcher goroutine delivers. Reading the counter
+	// as soon as `RunGroupTest` returns therefore races the dispatcher, and this test failed
+	// intermittently with "no progress events were emitted for a group test" (reproduced at
+	// iteration 28 of 200) while the run itself reported total=4, succeeded=4 — the events
+	// existed and had simply not been delivered yet. `FlushEventsForTest` is the exact
+	// synchronisation point: its sentinel cannot be reached before everything emitted before
+	// it has been delivered.
+	b.FlushEventsForTest()
+
 	mu.Lock()
 	defer mu.Unlock()
 	if seen == 0 {
