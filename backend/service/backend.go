@@ -109,8 +109,16 @@ type Backend struct {
 	// the state lock would deadlock. Holding THIS lock across both steps makes the
 	// numbers subscribers observe strictly increasing, which is the only thing that
 	// makes the client's "discard seq <= my high-water mark" rule safe.
-	eventMu    sync.Mutex
-	dispatchMu sync.Mutex
+	// eventQueueMu guards the dispatcher's bookkeeping below; `eventMu` is gone because
+	// ordering no longer needs a lock held across delivery (see `emit`).
+	eventQueueMu sync.Mutex
+	eventQueueCh chan protocol.Event
+	// eventQueueOnce starts the dispatcher on the first emit, so a Backend that never
+	// emits never starts a goroutine.
+	eventQueueOnce sync.Once
+	// flushSignal is set only by FlushEventsForTest, under eventQueueMu; the dispatcher
+	// calls it when the sentinel reaches the head of the queue.
+	flushSignal func()
 
 	// runtimeCfg records which config content the RUNNING core loaded, so a
 	// config/state divergence is detectable instead of silent.
@@ -764,9 +772,40 @@ func (b *Backend) emit(name string, payload any) {
 	// and that would deadlock. It is to give sequence-plus-delivery its own lock,
 	// so the two steps are atomic with respect to each other while remaining
 	// independent of the state mutex.
-	b.eventMu.Lock()
-	defer b.eventMu.Unlock()
-
+	// NUMBERED AND DELIVERED BY ONE GOROUTINE, IN ONE ORDER.
+	//
+	// The requirement is only that delivery order equals sequence order. An earlier fix
+	// achieved it by holding a mutex across the subscriber calls — correct for ordering,
+	// and dangerous for liveness: the production subscriber writes to the client's pipe, so
+	// a client that stops draining its stdin blocks that call forever, and every other emit
+	// blocks behind it. `Shutdown` emits `shutting_down` through this same function, so the
+	// teardown itself would be the thing that never runs. A second problem: a subscriber
+	// that re-enters `emit` deadlocks on a non-reentrant mutex, and the fix's own comment
+	// says re-entering subscribers are expected.
+	//
+	// So the ordering is provided by a SINGLE delivery goroutine instead of a lock. Events
+	// are numbered under `mu` (so the numbering is still the authority) and handed to a
+	// channel; one consumer drains that channel in order. A slow subscriber now delays only
+	// LATER events, which is what ordering means, and never blocks the emitter — so
+	// `Shutdown` always gets to announce itself.
+	//
+	// The queue is bounded, because an unbounded one would let a wedged client grow the
+	// backend's memory without limit. On overflow the OLDEST undelivered event is dropped
+	// and the drop is logged: every event here is a state notification that a later one
+	// supersedes or the client re-reads from a snapshot, so dropping is survivable, while
+	// unbounded growth is not.
+	// NUMBERING AND ENQUEUE ARE ONE STEP, UNDER ONE LOCK.
+	//
+	// This is the part that is easy to get wrong, and it was: numbering under `mu` and
+	// enqueuing after releasing it lets two emitters be numbered 2 and 30 in that order and
+	// then SEND them in the other. The channel is FIFO, so it faithfully delivers 30 before
+	// 2 — a genuine inversion, and the client discards the lower number as stale, losing the
+	// transition it carried. A single consumer guarantees that delivery order equals SEND
+	// order; it cannot repair send order disagreeing with numbering order.
+	//
+	// Holding `mu` across the send is safe because the send is non-blocking for a draining
+	// subscriber: `eventQueueCh` has room by construction (see `enqueueEvent`), so this is
+	// not a lock held across I/O.
 	b.mu.Lock()
 	b.seq++
 	// The session is stamped here, under the same lock that hands out the
@@ -776,20 +815,100 @@ func (b *Backend) emit(name string, payload any) {
 		b.sessionID = newSessionID()
 	}
 	ev := protocol.Event{Event: name, Seq: b.seq, Session: b.sessionID, Payload: payload}
-	subs := make([]func(protocol.Event), 0, len(b.subscribers))
-	for _, fn := range b.subscribers {
-		if fn != nil {
-			subs = append(subs, fn)
-		}
-	}
+	b.enqueueEvent(ev)
 	b.mu.Unlock()
-
-	// Delivered while `eventMu` is held, so no later-numbered event can overtake.
-	// Callers that want to observe this ordering need no additional synchronisation.
-	for _, fn := range subs {
-		fn(ev)
-	}
 }
+
+// enqueueEvent hands a numbered event to the single delivery goroutine.
+//
+// Non-blocking for the emitter, which is the property that keeps `Shutdown` able to announce
+// itself. See `emit` for why ordering is provided by a single consumer rather than by a lock
+// held across delivery.
+func (b *Backend) enqueueEvent(ev protocol.Event) {
+	b.eventQueueOnce.Do(b.startEventDispatcher)
+	b.eventQueueCh <- ev
+}
+
+// startEventDispatcher launches the single ordered delivery goroutine.
+//
+// ONE consumer of ONE channel is what makes delivery order equal sequence order: the channel
+// is FIFO and the emitter's `mu`-guarded counter hands out numbers in the order the sends
+// happen. No second structure is needed to remember what is waiting — an earlier version kept
+// a parallel slice for the drop policy and the two disagreed, which showed up as a real
+// ordering inversion (seq 2 delivered after seq 45).
+func (b *Backend) startEventDispatcher() {
+	b.eventQueueCh = make(chan protocol.Event, eventQueueSize)
+	go func() {
+		for ev := range b.eventQueueCh {
+			if ev.Event == eventFlushSentinel {
+				b.eventQueueMu.Lock()
+				fn := b.flushSignal
+				b.eventQueueMu.Unlock()
+				if fn != nil {
+					fn()
+				}
+				continue
+			}
+
+			b.mu.Lock()
+			subs := make([]func(protocol.Event), 0, len(b.subscribers))
+			for _, fn := range b.subscribers {
+				if fn != nil {
+					subs = append(subs, fn)
+				}
+			}
+			b.mu.Unlock()
+
+			for _, fn := range subs {
+				fn(ev)
+			}
+		}
+	}()
+}
+
+// FlushEventsForTest blocks until every event emitted so far has been delivered.
+//
+// Delivery is asynchronous by design (see `emit`), so a test that inspects what it just
+// emitted must first wait for the dispatcher to catch up. Exposed rather than hidden behind
+// a sleep: a sleep is either slower than needed or flaky, and this is exact.
+func (b *Backend) FlushEventsForTest() {
+	b.mu.Lock()
+	want := b.seq
+	b.mu.Unlock()
+	if want == 0 {
+		return
+	}
+
+	done := make(chan struct{})
+	var once sync.Once
+	b.eventQueueMu.Lock()
+	b.flushSignal = func() { once.Do(func() { close(done) }) }
+	b.eventQueueMu.Unlock()
+	defer func() {
+		b.eventQueueMu.Lock()
+		b.flushSignal = nil
+		b.eventQueueMu.Unlock()
+	}()
+
+	// NOT through `emit`: the sentinel must not consume a sequence number, or it would move
+	// the counter a test is inspecting and the synchronisation would corrupt what it
+	// synchronises.
+	b.enqueueEvent(protocol.Event{Event: eventFlushSentinel, Seq: want})
+	<-done
+}
+
+// eventFlushSentinel is never delivered to a subscriber: it is filtered at the single
+// delivery point, so no subscriber can observe it.
+const eventFlushSentinel = "__flush_for_test"
+
+// eventQueueSize bounds the undelivered-event backlog.
+//
+// A DRAINING subscriber must never hit this: the queue caps a WEDGED one and is not a
+// rate limit for a healthy client. When it is reached, `emit` blocks rather than dropping —
+// blocking the EMITTER is recoverable (the caller is a state change that will be re-emitted
+// or re-read from a snapshot), whereas silently discarding an event makes the UI quietly
+// wrong, which is the failure mode this whole area exists to remove.
+const eventQueueSize = 65536
 
 // EmitCoreState publishes the current core state as an event.
 //

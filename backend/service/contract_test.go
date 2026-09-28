@@ -205,6 +205,8 @@ func TestEventSequenceIsMonotonic(t *testing.T) {
 	b.EmitCoreState()
 	b.EmitCoreState()
 	b.EmitCoreState()
+	// Delivery is asynchronous by design, so wait for the dispatcher before inspecting.
+	b.FlushEventsForTest()
 
 	if len(seen) != 3 {
 		t.Fatalf("got %d events, want 3", len(seen))
@@ -228,6 +230,8 @@ func TestEventShape(t *testing.T) {
 	defer unsub()
 
 	b.EmitCoreState()
+	// Asynchronous delivery: wait before reading what the subscriber captured.
+	b.FlushEventsForTest()
 
 	raw, err := json.Marshal(got)
 	if err != nil {
@@ -255,8 +259,10 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 	unsub := b.Subscribe(func(protocol.Event) { count++ })
 
 	b.EmitCoreState()
+	b.FlushEventsForTest()
 	unsub()
 	b.EmitCoreState()
+	b.FlushEventsForTest()
 
 	if count != 1 {
 		t.Fatalf("received %d events after unsubscribe, want 1", count)
@@ -282,6 +288,7 @@ func TestRunningStateTransitionEmitsCoreState(t *testing.T) {
 	// watchCoreState is what New() calls; with no controller it is a no-op,
 	// so the transition is exercised through the same path the app uses.
 	b.EmitCoreState()
+	b.FlushEventsForTest()
 	if len(got) != 1 {
 		t.Fatalf("got %d events, want 1", len(got))
 	}
@@ -293,6 +300,7 @@ func TestRunningStateTransitionEmitsCoreState(t *testing.T) {
 	// de-duplicates by snapshot_seq, not by payload equality, and suppressing
 	// repeats here would hide a genuine reconnect.
 	b.EmitCoreState()
+	b.FlushEventsForTest()
 	if len(got) != 2 {
 		t.Fatalf("got %d events after the second emit, want 2", len(got))
 	}
@@ -357,6 +365,7 @@ func TestRealRunningStateTransitionReachesSubscribers(t *testing.T) {
 
 	// The transition a crash, an external kill or the supervisor would cause.
 	ac.RunningState.Set(true)
+	b.FlushEventsForTest()
 	if len(got) == 0 {
 		t.Fatal("a real running-state transition did not reach subscribers")
 	}
@@ -368,20 +377,24 @@ func TestRealRunningStateTransitionReachesSubscribers(t *testing.T) {
 	// again — otherwise the frontend would be spammed by every poll.
 	before := len(got)
 	ac.RunningState.Set(true)
+	b.FlushEventsForTest()
 	if len(got) != before {
 		t.Errorf("a no-op Set emitted %d extra event(s)", len(got)-before)
 	}
 
 	// Stopping must emit too, so the menu bar reflects the core going away.
 	ac.RunningState.Set(false)
+	b.FlushEventsForTest()
 	if len(got) <= before {
 		t.Error("the stop transition did not emit")
 	}
 
 	// After Shutdown the subscription is detached.
 	b.Shutdown()
+	b.FlushEventsForTest()
 	after := len(got)
 	ac.RunningState.Set(true)
+	b.FlushEventsForTest()
 	if len(got) != after {
 		t.Errorf("received %d event(s) after Shutdown", len(got)-after)
 	}
@@ -490,6 +503,7 @@ func TestShutdownIsExactlyOnce(t *testing.T) {
 	b.Shutdown()
 	b.Shutdown()
 	b.Shutdown()
+	b.FlushEventsForTest()
 
 	if shuttingDown != 1 {
 		t.Errorf("shutting_down emitted %d times, want exactly 1", shuttingDown)
@@ -996,6 +1010,7 @@ func TestEOFAloneRunsTheSameTeardownAsTheMethod(t *testing.T) {
 	defer unsub()
 
 	b.Shutdown()
+	b.FlushEventsForTest()
 	if shuttingDown != 1 {
 		t.Errorf("EOF-driven Shutdown emitted shutting_down %d times, want 1", shuttingDown)
 	}

@@ -178,6 +178,8 @@ func TestSamplerEmitsRate(t *testing.T) {
 
 	total.Store(3000)
 	sample()
+	// Delivery is asynchronous, so wait for the dispatcher before counting.
+	b.FlushEventsForTest()
 	if len(rates) != 1 {
 		t.Fatalf("got %d rate events, want 1", len(rates))
 	}

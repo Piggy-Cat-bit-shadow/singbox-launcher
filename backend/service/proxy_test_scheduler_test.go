@@ -330,6 +330,9 @@ func TestProgressIsNotReorderedByCompletion(t *testing.T) {
 	if _, err := b.RunGroupTest(context.Background(), "g"); err != nil {
 		t.Fatalf("RunGroupTest: %v", err)
 	}
+	// Delivery is asynchronous, so the collected order is only complete once the
+	// dispatcher has drained. Reading before that makes this a timing assertion.
+	b.FlushEventsForTest()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -572,6 +575,10 @@ func TestClassicAndDaemonShareTheSameScheduling(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunGroupTest: %v", err)
 		}
+		// Delivery is asynchronous, so the frame count is only final once the
+		// dispatcher has drained. Counting before that makes the comparison
+		// depend on timing rather than on scheduling.
+		b.FlushEventsForTest()
 		mu.Lock()
 		defer mu.Unlock()
 		return res.Succeeded, res.Failed, frames
