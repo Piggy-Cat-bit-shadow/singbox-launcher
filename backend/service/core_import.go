@@ -402,6 +402,17 @@ func (b *Backend) validateCoreCandidate(path string) (string, error) {
 // The temp file lives in the destination directory on purpose: rename is only
 // atomic within one filesystem, and the final step is a rename.
 func stageCoreBinary(src, target string) (string, func(), error) {
+	return stageCoreBinaryLimited(src, target, maxCoreFileBytes)
+}
+
+// stageCoreBinaryLimited is `stageCoreBinary` with the limit as a parameter.
+//
+// The limit is 256 MB, so a test cannot produce a file that exceeds it without writing 256 MB
+// to disk. That is why the bound went untested: the previous test copied a 38-byte file,
+// compared the bytes, and would have PASSED with the limiter removed entirely — a test named
+// after a bound that never approached it. Making the limit a parameter lets the same code
+// path be driven at a size a test can afford, so the overflow branch is exercised for real.
+func stageCoreBinaryLimited(src, target string, limit int64) (string, func(), error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", func() {}, &protocol.Error{
@@ -445,7 +456,7 @@ func stageCoreBinary(src, target string) (string, func(), error) {
 	// would be copied and installed SILENTLY TRUNCATED — a corrupt binary that fails in ways
 	// pointing nowhere near the import. Reading the extra byte makes the overflow detectable
 	// and turns it into the error the user can act on.
-	written, err := io.Copy(tmp, io.LimitReader(in, maxCoreFileBytes+1))
+	written, err := io.Copy(tmp, io.LimitReader(in, limit+1))
 	if err != nil {
 		_ = tmp.Close()
 		cleanup()
@@ -453,14 +464,14 @@ func stageCoreBinary(src, target string) (string, func(), error) {
 			Code: "install_failed", Message: "cannot copy the core: " + err.Error(), Recoverable: true,
 		}
 	}
-	if written > maxCoreFileBytes {
+	if written > limit {
 		_ = tmp.Close()
 		cleanup()
 		return "", func() {}, &protocol.Error{
 			Code: "file_too_large",
 			Message: fmt.Sprintf("the selected file grew past the %d MB limit while it was "+
 				"being copied (at least %d MB read). Choose a file that is not still being "+
-				"written.", maxCoreFileBytes>>20, written>>20),
+				"written.", limit>>20, written>>20),
 			Recoverable: false,
 		}
 	}
