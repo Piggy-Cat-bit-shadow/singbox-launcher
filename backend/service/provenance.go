@@ -42,6 +42,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/muhammadmuzzammil1998/jsonc"
+
 	"singbox-launcher/internal/debuglog"
 )
 
@@ -205,7 +207,16 @@ func (b *Backend) markConfigManaged() error {
 // the same configuration. Numbers are compared as json.Number so that 5000 and
 // 5e3 — which decode to the same float but are different text — are still
 // distinguished where it matters, and no precision is lost to float64.
+//
+// Comments are stripped FIRST, through the same jsonc helper the rest of the
+// project uses. This is not a nicety: sing-box configs are JSONC, and every
+// config this launcher has ever written carries the template's `//` comments.
+// Feeding one straight to encoding/json fails with "invalid character '/'", so
+// without this step the comparison could never succeed on a real config and
+// adoption would silently never happen — the feature would look implemented
+// while doing nothing at all.
 func canonicalJSON(raw []byte) ([]byte, error) {
+	raw = jsonc.ToJSON(raw)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
