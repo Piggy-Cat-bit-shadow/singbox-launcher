@@ -678,11 +678,22 @@ concurrent readers stay race-free.
 **A subscriber runs ON the dispatcher goroutine**, which is the queue's only
 consumer, so a subscriber that emits more than the queue's depth would wait for a
 drain that cannot happen until it returns — a permanent self-deadlock. `emit`
-detects this and delivers inline. The detection CANNOT be a shared flag: a boolean
-meaning "a delivery is in progress" is true on the dispatcher and equally true, at
-that moment, on every other goroutine, so concurrent emitters take the inline path
-and jump the queue. The question is about the CALLER, so it reads the caller's
-goroutine identity, captured once at dispatcher start.
+detects this and hands the event to a pending list that the dispatcher drains
+itself. The detection CANNOT be a shared flag: a boolean meaning "a delivery is in
+progress" is true on the dispatcher and equally true, at that moment, on every
+other goroutine, so concurrent emitters take the short path and jump the queue. The
+question is about the CALLER, so it reads the caller's goroutine identity, captured
+once at dispatcher start.
+
+**And the nested event is QUEUED, not delivered inline.** Inline delivery is the
+obvious fix and it is wrong twice, both verified by reverting to it. It is ordered
+only for the subscriber that re-entered: with A registered before B, A emitting
+during seq 1 gives A [1 2] but B [2 1], and B discards 1 as stale — the very
+lost transition the sequence numbers exist to prevent. And it recurses: a subscriber
+reacting to its own event consumes stack per event, so `eventQueueSize` stops
+bounding anything. Appending to a list drained by the dispatcher's own loop keeps
+both properties the queue provides — order, because the nested event waits for the
+current one to reach EVERY subscriber, and a constant stack depth.
 
 `FlushEventsForTest` is the exact synchronisation point for tests: a sentinel that
 carries the identity of the call it releases, registered and enqueued as one atomic

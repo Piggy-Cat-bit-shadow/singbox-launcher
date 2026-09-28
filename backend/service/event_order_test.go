@@ -450,3 +450,124 @@ func TestConcurrentFlushesEachWakeTheirOwnCaller(t *testing.T) {
 			"call's closure is clobbered by the other and its caller waits forever")
 	}
 }
+
+// TestASubscriberEmittingDoesNotReorderForOtherSubscribers — R-B, and the reason inline
+// delivery was wrong.
+//
+// A subscriber runs ON the dispatcher goroutine, so it cannot send to the queue it is the only
+// consumer of: once the buffer fills, that is a permanent self-deadlock. The first fix was to
+// deliver the nested event INLINE, which removes the deadlock and is ordered only for the
+// subscriber that re-entered. Every OTHER subscriber sees the nested event first:
+//
+//	dispatcher delivers seq 5 → subscriber A emits seq 6 → inline delivery runs A again (and
+//	B) with seq 6 → A returns → B is finally called with seq 5.
+//
+// B therefore receives 6 before 5 and discards 5 as stale (`event.seq > appliedSeq`), which is
+// the exact lost-transition failure the single-consumer design and the sequence numbers exist
+// to prevent. This test asserts the property for B, not for A — testing it from the emitting
+// subscriber's point of view is what made the defect invisible.
+func TestASubscriberEmittingDoesNotReorderForOtherSubscribers(t *testing.T) {
+	b := backendWithConfig(t)
+
+	var mu sync.Mutex
+	var bSeen []int64
+	// A is registered FIRST, so it is the one that re-enters.
+	var aSeen []int64
+	b.Subscribe(func(ev protocol.Event) {
+		mu.Lock()
+		aSeen = append(aSeen, ev.Seq)
+		mu.Unlock()
+		if ev.Event == "test.a.first" {
+			b.emit("test.a.nested", nil)
+		}
+	})
+	b.Subscribe(func(ev protocol.Event) {
+		mu.Lock()
+		bSeen = append(bSeen, ev.Seq)
+		mu.Unlock()
+	})
+
+	b.emit("test.a.first", nil)
+	b.FlushEventsForTest()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(aSeen) != 2 || len(bSeen) != 2 {
+		t.Fatalf("each subscriber should see both events: A saw %v, B saw %v", aSeen, bSeen)
+	}
+	// B'S ORDER IS THE ASSERTION. A sees 1,2 either way; B is what inline delivery breaks.
+	if bSeen[0] >= bSeen[1] {
+		t.Fatalf("subscriber B received sequence %d before %d, so a nested event overtook "+
+			"the event that produced it. B discards the lower number as stale and the "+
+			"transition is lost. A saw %v, B saw %v", bSeen[0], bSeen[1], aSeen, bSeen)
+	}
+	if aSeen[0] >= aSeen[1] {
+		t.Fatalf("subscriber A received %v out of order", aSeen)
+	}
+}
+
+// TestASelfTriggeringSubscriberDoesNotRecurseUnboundedly — R-C.
+//
+// Inline delivery made a subscriber that reacts to its own event recurse once per event, with
+// nothing bounding the depth: `eventQueueSize`, the back-pressure bound, stopped bounding
+// anything, and a subscriber with a low trigger threshold exhausted the stack instead of
+// producing events. Deferring nested sends to the dispatcher's own loop makes the depth
+// constant.
+//
+// The bound here is chosen well above any recursion limit so that a recursive implementation
+// fails by STACK OVERFLOW rather than by merely being slow, and the test stops emitting at a
+// fixed count so the work stays bounded.
+func TestASelfTriggeringSubscriberDoesNotRecurseUnboundedly(t *testing.T) {
+	b := backendWithConfig(t)
+
+	const triggers = 20000
+
+	var mu sync.Mutex
+	delivered := 0
+	b.Subscribe(func(ev protocol.Event) {
+		if ev.Event != "test.recur" {
+			return
+		}
+		mu.Lock()
+		delivered++
+		n := delivered
+		mu.Unlock()
+		// Re-emit from INSIDE the subscriber, which is the dispatcher goroutine. Depth is
+		// what is under test, so the trigger must be on this goroutine.
+		if n < triggers {
+			b.emit("test.recur", map[string]any{"n": n})
+		}
+	})
+
+	b.emit("test.recur", map[string]any{"n": 0})
+
+	// Wait for the cascade to finish. `FlushEventsForTest` is the exact synchronisation point:
+	// its sentinel is queued behind everything already emitted, and each nested emit appends
+	// to the same queue.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		mu.Lock()
+		done := delivered >= triggers
+		mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			mu.Lock()
+			got := delivered
+			mu.Unlock()
+			t.Fatalf("the cascade stalled at %d of %d: a recursive implementation would "+
+				"instead overflow the stack, and either way the subscriber's own emissions "+
+				"are not being drained", got, triggers)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	b.FlushEventsForTest()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if delivered != triggers {
+		t.Fatalf("delivered %d events, want exactly %d", delivered, triggers)
+	}
+}

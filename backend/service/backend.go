@@ -132,6 +132,11 @@ type Backend struct {
 	// eventQueueOnce starts the dispatcher on the first emit, so a Backend that never
 	// emits never starts a goroutine.
 	eventQueueOnce sync.Once
+	// pendingDeliveries holds events a SUBSCRIBER emitted while running on the dispatcher
+	// goroutine, under `eventQueueMu`. The dispatcher drains it in order after the current
+	// event has reached every subscriber — see `drainPendingDeliveries` for why this is a list
+	// rather than inline delivery.
+	pendingDeliveries []protocol.Event
 	// flushMu guards flushSignals and flushToken, and NOTHING ELSE, so the dispatcher can
 	// release a waiter without taking the lock an emitter may hold while blocked on a full
 	// queue.
@@ -881,15 +886,35 @@ func (b *Backend) emit(name string, payload any) {
 	// A SUBSCRIBER RUNS ON THE DISPATCHER GOROUTINE, which is the only consumer of the queue.
 	// Sending from there would wait for a drain that cannot happen until the subscriber
 	// returns — a permanent self-deadlock once the buffer fills, and reachable by any
-	// subscriber that reacts to an event with a burst. Delivering inline is safe for ORDER
-	// because this runs to completion before the dispatcher reads its next event.
+	// subscriber that reacts to an event with a burst.
+	//
+	// IT IS APPENDED TO A PENDING LIST, NOT DELIVERED INLINE.
+	//
+	// Inline delivery removes the deadlock and breaks two other things, both verified by
+	// reverting to it:
+	//
+	//   * ORDER, for every subscriber except the one that emitted. Delivery for seq 5 runs
+	//     subscriber A, which emits seq 6; A sees 5 then 6, but B — later in the subscriber
+	//     list — sees 6 and then 5. B discards 5 as stale (`seq > appliedSeq`), which is
+	//     exactly the lost transition this whole design exists to prevent. Inline delivery is
+	//     ordered only for the subscriber that re-entered.
+	//
+	//   * UNBOUNDED RECURSION. A subscriber that reacts to its own event recursed once per
+	//     event with nothing to stop it, so `eventQueueSize` — the back-pressure bound —
+	//     stopped bounding anything, and a self-triggering subscriber overflowed the stack.
+	//
+	// The pending list preserves both guarantees the queue already provides: order, because
+	// everything in it is delivered in sequence order before the dispatcher reads the channel
+	// again; and the bound, because the list is memory rather than a buffer, and a subscriber
+	// that emits without end grows it without bound in either design — what it must not do is
+	// recurse.
 	//
 	// The check is goroutine-scoped. A shared "delivery in progress" flag is also true on
 	// every OTHER goroutine during a slow delivery, which would make concurrent emitters jump
 	// the queue.
 	if b.onDispatcherGoroutine() {
+		b.pendingDeliveries = append(b.pendingDeliveries, ev)
 		b.eventQueueMu.Unlock()
-		b.deliver(ev)
 		return
 	}
 
@@ -968,9 +993,41 @@ func (b *Backend) startEventDispatcher() {
 				}
 				continue
 			}
-			b.deliver(ev)
+			b.drainPendingDeliveries(ev)
 		}
 	}()
+}
+
+// drainPendingDeliveries delivers an event and then everything a subscriber appended while it
+// was being delivered, in sequence order.
+//
+// THE ORDER IS THE POINT. A subscriber that emits gets its event delivered after the current
+// one has reached EVERY subscriber, not just itself — so the later subscribers never see a
+// higher sequence before a lower one, which they would discard as stale.
+//
+// The loop is iterative rather than recursive for the same reason the pending list exists: a
+// subscriber that reacts to its own event must not consume stack proportional to how many
+// times it does so. `pendingDeliveries` is drained to empty, and anything appended while
+// draining the tail is picked up by the same `for` because the slice length is re-read.
+func (b *Backend) drainPendingDeliveries(ev protocol.Event) {
+	b.deliver(ev)
+	for {
+		// Snapshot and clear under the lock, then deliver OUTSIDE it: a subscriber must not
+		// be able to append while `deliver` holds the list, and it must not run under the
+		// queue lock (it may block on a client's pipe).
+		b.eventQueueMu.Lock()
+		if len(b.pendingDeliveries) == 0 {
+			b.eventQueueMu.Unlock()
+			return
+		}
+		batch := b.pendingDeliveries
+		b.pendingDeliveries = nil
+		b.eventQueueMu.Unlock()
+
+		for _, next := range batch {
+			b.deliver(next)
+		}
+	}
 }
 
 // deliver runs the subscribers for one event.
