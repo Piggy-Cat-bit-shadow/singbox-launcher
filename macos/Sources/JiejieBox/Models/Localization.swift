@@ -533,7 +533,7 @@ enum L: CaseIterable {
     case loading
     case restartBackend
     case loadStatus
-    case subscriptionSavedEvenIfFetchFails
+    case subscriptionSavedNotYetFetched
     case protocolVersion
     case backendVersion
     case appVersion
@@ -975,7 +975,7 @@ extension L {
         case .loading: return "Loading…"
         case .restartBackend: return "Restart Backend"
         case .loadStatus: return "Load Status"
-        case .subscriptionSavedEvenIfFetchFails: return "The subscription is saved even if the first fetch fails; you can update it later."
+        case .subscriptionSavedNotYetFetched: return "Saved to the list right away. Nothing is fetched yet — reload the config (or use Update All) to pull its nodes."
         case .protocolVersion: return "Protocol"
         case .backendVersion: return "Backend"
         case .appVersion: return "App"
@@ -1390,7 +1390,7 @@ extension L {
         case .loading: return "正在载入…"
         case .restartBackend: return "重启后端"
         case .loadStatus: return "载入状态"
-        case .subscriptionSavedEvenIfFetchFails: return "即使首次获取失败，订阅也会被保存，之后可以再更新。"
+        case .subscriptionSavedNotYetFetched: return "会立即保存到列表，此时尚未获取任何节点。请重新加载配置（或使用“全部更新”）来拉取其节点。"
         case .protocolVersion: return "协议"
         case .backendVersion: return "后端"
         case .appVersion: return "应用"

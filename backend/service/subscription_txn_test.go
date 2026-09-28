@@ -310,3 +310,31 @@ func lastIndexOf(s, sub string) int {
 		idx += next + 1
 	}
 }
+
+// TestAddSubscriptionMarksConfigStale covers the one build-input edit that had no
+// staleness call.
+//
+// Every OTHER edit that changes what the config should contain — removing a
+// source, changing its URL, toggling `enabled` — marks the config stale and emits
+// an event, which is what makes the UI offer a reload. Adding a source did
+// neither, so a user could add a provider, watch it appear in the list, and have
+// the core keep running the old config with nothing on screen saying that
+// anything remained to be done.
+func TestAddSubscriptionMarksConfigStale(t *testing.T) {
+	b := backendWithConfig(t)
+	loadFixtureState(t, b, subSource("s1", "A", "https://example.invalid/a"))
+
+	// The config is current before the change.
+	if b.ac.StateService != nil {
+		b.ac.StateService.ClearCacheStale()
+	}
+
+	if _, err := b.AddSubscription("B", "https://example.invalid/b"); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+
+	if b.ac.StateService != nil && !b.ac.StateService.IsConfigStale() {
+		t.Error("adding a subscription did not mark the config stale, so the UI " +
+			"never offers the reload that would include its nodes")
+	}
+}

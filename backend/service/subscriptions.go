@@ -239,6 +239,17 @@ func (b *Backend) AddSubscription(name, url string) (protocol.SubscriptionDTO, e
 		return protocol.SubscriptionDTO{}, err
 	}
 
+	// Adding a source changes the BUILD INPUTS exactly as removing one does: the
+	// materialised config no longer matches what the tree would produce, so the
+	// cached config is stale and the user must be offered a reload.
+	//
+	// This call was missing here while RemoveSubscription, UpdateSubscription and
+	// SetSubscriptionEnabled all made it, which made adding a subscription the one
+	// edit that gave no reload prompt — the user added a provider, saw it listed,
+	// and the core kept running the old config with no indication that anything
+	// still needed to happen.
+	b.noteBuildInputsChanged()
+
 	debuglog.InfoLog("backend: subscription %q added (%s)", name, added.ID)
 	return toSubscriptionDTO(added), nil
 }

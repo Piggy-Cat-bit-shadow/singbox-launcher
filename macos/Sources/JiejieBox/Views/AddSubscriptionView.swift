@@ -51,7 +51,7 @@ struct AddSubscriptionView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canAdd)
 
-                    Text(L.subscriptionSavedEvenIfFetchFails.tr(language))
+                    Text(L.subscriptionSavedNotYetFetched.tr(language))
                         .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
