@@ -37,6 +37,8 @@ import (
 	"strings"
 
 	"github.com/muhammadmuzzammil1998/jsonc"
+
+	"singbox-launcher/core/template"
 )
 
 // RefIssueKind classifies a reference problem.
@@ -553,6 +555,12 @@ func checkRuleSetRefs(rule map[string]interface{}, path string, cfg map[string]i
 
 // RepairRouteFinal resets a dangling route.final to a reachable target.
 //
+// declaredGroups is the set of tags the TEMPLATE declared as group outbounds
+// (selector/urltest/chain), whether or not they survived into cfg. It is how the
+// repair knows the original target was a GROUP rather than a plain node: the
+// target is gone, so cfg itself cannot answer that. Pass nil when the declaration
+// is unknown; the repair then behaves as before.
+//
 // This is the ONE reference problem the builder may fix by itself, and only
 // because there is an unambiguously correct answer: a config with no valid
 // catch-all cannot route anything, so leaving it is never better than pointing
@@ -562,7 +570,7 @@ func checkRuleSetRefs(rule map[string]interface{}, path string, cfg map[string]i
 //
 // Returns the tags it changed, or nil when there was nothing to repair. A
 // config that already has a valid (or absent) final is left completely alone.
-func RepairRouteFinal(cfg map[string]interface{}) (repairs []string, ok bool) {
+func RepairRouteFinal(cfg map[string]interface{}, declaredGroups map[string]bool) (repairs []string, ok bool) {
 	route, hasRoute := cfg["route"].(map[string]interface{})
 	if !hasRoute {
 		// No route section at all: nothing to repair, and inventing one would
@@ -592,6 +600,24 @@ func RepairRouteFinal(cfg map[string]interface{}) (repairs []string, ok bool) {
 		// Outbounds exist but none can carry traffic. This IS corruption: a
 		// catch-all that was filtered away. Silently emitting a config with no
 		// usable final would produce a core that starts and routes nothing.
+		return nil, false
+	}
+	// NEVER REPAIR A GROUP INTO A DIRECT OUTBOUND.
+	//
+	// Resetting `route.final` from a vanished GROUP to `direct-out` produces a
+	// config that starts, validates, and silently sends every unmatched
+	// connection straight out — no tunnel, no error, no visible symptom beyond a
+	// warning line. That is a worse outcome than refusing to start, because the
+	// user believes the VPN is on.
+	//
+	// The failure it used to paper over is now fixed at its source: a
+	// `required: true` selector holding its own `addOutbounds` survives an empty
+	// subscription instead of disappearing. So when the original target was a
+	// group and no group survives, the honest answer is to stop and say so.
+	// A group that vanished is the case this guard exists for. A plain node that
+	// vanished may legitimately be replaced by whatever routes, including a
+	// direct outbound, because it was never a routing CHOICE — it was one server.
+	if declaredGroups[final] && !idx.group[replacement] {
 		return nil, false
 	}
 	route["final"] = replacement
@@ -657,4 +683,84 @@ func decodeConfigObject(raw []byte) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("config is not valid JSON: %w", err)
 	}
 	return cfg, nil
+}
+
+// declaredGroupTags returns the tags the TEMPLATE declares as group outbounds.
+//
+// `required: true` marks a group the template promises must exist; a plain
+// selector/urltest declaration marks one the template authored. Both mean "this
+// tag was a routing CHOICE", which is the distinction the repair needs and which
+// the emitted config can no longer supply once the tag has vanished.
+//
+// Reads through the template's own typed accessor rather than re-parsing here, so
+// the legacy `wizard.required: 1` form is honoured by the same code that has
+// always understood it (template.RequiredOutboundTags, which until now had no
+// production caller at all).
+func declaredGroupTags(td *template.TemplateData) map[string]bool {
+	if td == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, ob := range td.GlobalOutbounds() {
+		if ob.Tag == "" {
+			continue
+		}
+		if groupTypes[ob.Type] {
+			out[ob.Tag] = true
+		}
+	}
+	// A required outbound is a promise regardless of its declared type: it is a
+	// tag the config must contain, so replacing it with something else is never
+	// the safe repair.
+	for tag := range td.RequiredOutboundTags() {
+		out[tag] = true
+	}
+	return out
+}
+
+// missingFinalTargetReason explains an unrepairable route.final, naming the tag
+// and listing what the config does offer.
+//
+// Same shape as the core's own message (`default outbound not found: proxy-out`)
+// but with the alternatives the core does not print.
+func missingFinalTargetReason(cfg map[string]interface{}) string {
+	idx := buildRefIndex(cfg)
+	route, _ := cfg["route"].(map[string]interface{})
+	final, _ := route["final"].(string)
+	if final == "" {
+		return "route.final is not set, and no surviving outbound can serve as the catch-all"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "route.final references missing outbound %q, and no surviving GROUP can "+
+		"take its place. Available outbounds:", final)
+	if len(idx.order) == 0 {
+		b.WriteString(" (none)")
+	}
+	for _, tag := range idx.order {
+		b.WriteString("\n- ")
+		b.WriteString(tag)
+	}
+	b.WriteString("\nRefusing to redirect traffic to a direct outbound: that would start " +
+		"the core with the tunnel silently disabled.")
+	return b.String()
+}
+
+// DecodeConfigForReport parses a config so a CALLER can describe a failure in the
+// user's terms — the list of tags that do exist — without re-implementing the
+// jsonc tolerance and the route/outbound shape.
+//
+// Exported because the daemon delivery path needs exactly this and must not carry
+// its own copy of the parsing rules: two parsers that disagree would show the user
+// a tag list that does not match the validator's verdict.
+func DecodeConfigForReport(raw []byte) (map[string]interface{}, error) {
+	return decodeConfigObject(raw)
+}
+
+// OutboundTags returns the outbound tags of a decoded config in DECLARATION
+// order, so a report reads in the same order as the file.
+func OutboundTags(cfg map[string]interface{}) []string {
+	idx := buildRefIndex(cfg)
+	// idx.order already holds every declared tag exactly once, in declaration
+	// order; no further filtering belongs here.
+	return idx.order
 }

@@ -333,6 +333,16 @@ func computeOutboundValidity(
 		if !info.isLocal {
 			totalCount += globalOutboundExposeCredit(info, outboundsInfo, exposeCandidates)
 		}
+		// Constants — addOutbounds naming NO declared outbound — are always real:
+		// the core resolves `direct-out` and friends without a declaration, so
+		// they count even with zero nodes. This is what keeps a `required`
+		// selector with `addOutbounds: ["direct-out"]` alive when the
+		// subscription is empty.
+		//
+		// The count is deliberately the outbound's OWN declared constants. Never
+		// a substitute chosen here: pointing the group at something else (or
+		// inventing a member) would silently change where the user's traffic
+		// goes, which is a worse failure than refusing to start.
 		for _, addTag := range info.config.AddOutbounds {
 			if addInfo, exists := outboundsInfo[addTag]; exists {
 				if addInfo.outboundCount > 0 {
@@ -502,4 +512,40 @@ func replaceGroupEmptyWarning(ps ProxySource, index int) (EmissionWarning, bool)
 		Code:        codeReplaceGroupEmpty,
 		Params:      params,
 	}, true
+}
+
+// hasSelfSufficientRequiredOutbound reports whether any declared outbound is both
+// `required: true` and carries its own constant fallback.
+//
+// Such an outbound is constructible with ZERO nodes, which is the only reason the
+// zero-node guard may fall through to the generation passes instead of refusing.
+// Both halves are necessary:
+//
+//   - without `required`, an empty selector must still be dropped (emitting one
+//     makes sing-box reject the whole config);
+//   - without a constant addOutbound, there is nothing to put in it, so the
+//     outbound would be emitted empty — the same rejection, only later.
+//
+// A constant here means an addOutbounds entry that names NO declared outbound, so
+// the core resolves it itself (`direct-out`, `block-out`, …). A reference to
+// another selector proves nothing: that selector may be empty too.
+func hasSelfSufficientRequiredOutbound(parserConfig *ParserConfig) bool {
+	if parserConfig == nil {
+		return false
+	}
+	declared := make(map[string]bool, len(parserConfig.ParserConfig.Outbounds))
+	for _, ob := range parserConfig.ParserConfig.Outbounds {
+		declared[ob.Tag] = true
+	}
+	for _, ob := range parserConfig.ParserConfig.Outbounds {
+		if !ob.Required {
+			continue
+		}
+		for _, add := range ob.AddOutbounds {
+			if !declared[add] {
+				return true // resolves without a declaration: a real constant
+			}
+		}
+	}
+	return false
 }

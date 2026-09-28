@@ -472,6 +472,27 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		return NewStartFailure(StartErrConfigRebuildFailed, err)
 	}
 
+	// THE LAST GATE BEFORE LAUNCH, on the CLASSIC path.
+	//
+	// The rebuild above validates what IT produces, but it can decline to run:
+	// `rebuildConfigBeforeStart` returns nil when config.json is not managed by
+	// us or when state.json is absent, and then the file on disk is used as-is.
+	// That file may have been written by an older build, or edited by hand, or
+	// left over from a state that no longer exists — and the core would be
+	// launched on it and die immediately.
+	//
+	// CLASSIC MODE DOES NOT REPAIR. A hand-written config is the user's own work,
+	// and silently rewriting it to suit us would be worse than refusing: the
+	// launcher does not own those bytes. So this path validates and reports, and
+	// the repair stays on the generated-config path where we DO own the output.
+	if gateErr := ac.validateConfigBeforeLaunch(); gateErr != nil {
+		debuglog.ErrorLog("startSingBox: config reference validation failed, sing-box not started: %v", gateErr)
+		ac.classic.setPhase(startGen, ClassicFailed)
+		ac.RecordConfigError(LifecycleErrConfigRebuild, "start",
+			"config.json has dangling references, so the core was not started", gateErr.Error())
+		return gateErr
+	}
+
 	// SPEC 139 §4: на Windows TUN без прав администратора не стартует —
 	// вместо ядра диалог (перезапуск с правами или режим прокси). Сюда
 	// приходят все входы: кнопка, трей, -start, Debug API, авто-рестарт.

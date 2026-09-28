@@ -24,6 +24,7 @@ import (
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
 
+	"singbox-launcher/core/build"
 	"singbox-launcher/core/events"
 )
 
@@ -512,6 +513,27 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 		// the user's business — the core did not start.
 		return false, NewStartFailure(StartErrConfigRebuildFailed,
 			fmt.Errorf("daemon apply: cannot read config.json: %w", err))
+	}
+
+	// THE LAST GATE BEFORE THE IRREVERSIBLE STEP.
+	//
+	// Everything above this line is local, recoverable work. What follows hands
+	// the config to a privileged daemon that will START A CORE with it — and a
+	// core given a config it cannot use dies immediately with a message the user
+	// never sees, because the failure surfaces as "sing-box exited".
+	//
+	// The builder validates what IT produces, but the builder is not the only
+	// way a config reaches this point: the pre-start rebuild may be SKIPPED
+	// (config not managed by us, or state.json absent), in which case whatever is
+	// already on disk is delivered unchanged and unchecked. It can also have been
+	// written by an older build. The incident's config was reference-broken, and
+	// nothing between the file and the daemon looked at it.
+	//
+	// The SAME gate the classic engine uses, so the two cannot drift.
+	if gateErr := ac.validateConfigBeforeLaunch(); gateErr != nil {
+		debuglog.ErrorLog("daemon.%s: refusing to apply an invalid config: %v", caller, gateErr)
+		b.refreshUI()
+		return false, gateErr
 	}
 
 	// Pre-flight: убеждаемся, что демон жив и его сертификат совпадает с
@@ -1774,3 +1796,86 @@ func (t *daemonProxyTransport) DelayContext(ctx context.Context, proxyName strin
 
 // Убедимся на компиляции, что транспорт реализует интерфейс.
 var _ services.ProxyTransport = (*daemonProxyTransport)(nil)
+
+// describeReferenceFailure renders a reference failure the way a user needs it:
+// the offending path, the tag that is missing, and what the config DOES offer.
+//
+// The core's own message is `default outbound not found: proxy-out`, which names
+// the problem and nothing else — the user cannot tell whether a subscription
+// failed, a node was filtered, or a group was removed. Listing the available tags
+// makes the next step obvious without reading a log.
+//
+// Kept here rather than in core/build because it is a PRESENTATION decision about
+// a delivery failure; the validator's own Error() stays terse and structural for
+// logs and tests.
+func describeReferenceFailure(raw []byte, report build.RefReport) string {
+	var b strings.Builder
+	b.WriteString("Configuration is invalid, so it was not sent to the daemon.\n")
+	for _, issue := range report.Issues {
+		b.WriteString("\n")
+		b.WriteString(issue.String())
+	}
+	// The available tags, when one of the problems was a missing outbound: this is
+	// what turns "something is missing" into "point it at one of these".
+	var missing []string
+	for _, issue := range report.Issues {
+		if issue.Kind == build.RefMissingTarget && issue.Tag != "" {
+			missing = append(missing, issue.Tag)
+		}
+	}
+	if len(missing) > 0 {
+		if cfg, err := build.DecodeConfigForReport(raw); err == nil {
+			if tags := build.OutboundTags(cfg); len(tags) > 0 {
+				b.WriteString("\n\nAvailable outbounds:")
+				for _, tag := range tags {
+					b.WriteString("\n- ")
+					b.WriteString(tag)
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+// validateConfigBeforeLaunch is the shared pre-launch gate: it re-checks the
+// config that is ABOUT TO BE USED, from the file, with the canonical validator.
+//
+// Shared on purpose. The classic and daemon engines reach the core by different
+// routes, but "the config on disk is reference-sound" is one question with one
+// answer, and two implementations of it would drift — the incident happened
+// because exactly one path validated and the others did not.
+//
+// It reports a StartFailure so the reason and its remedy cross IPC, and it names
+// the missing tag and the available alternatives, because the core's own message
+// (`default outbound not found: proxy-out`) is unactionable on its own.
+//
+// A missing config.json is NOT a failure here: on a first run there may be
+// nothing to validate yet, and the engine's own start path reports that
+// separately. Only an unreadable or reference-broken config stops the launch.
+func (ac *AppController) validateConfigBeforeLaunch() error {
+	if ac == nil || ac.FileService == nil {
+		return nil
+	}
+	path := ac.FileService.ConfigPath
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to validate; the start path reports missing config
+		}
+		return NewStartFailure(StartErrConfigCheckFailed,
+			fmt.Errorf("cannot read config.json to validate it: %w", err))
+	}
+	report, err := build.ValidateConfigBytes(raw)
+	if err != nil {
+		return NewStartFailure(StartErrConfigCheckFailed,
+			fmt.Errorf("config.json cannot be parsed, so the core was not started: %w", err))
+	}
+	if !report.OK() {
+		return NewStartFailure(StartErrConfigCheckFailed,
+			errors.New(describeReferenceFailure(raw, report)))
+	}
+	return nil
+}

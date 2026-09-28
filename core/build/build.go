@@ -231,7 +231,13 @@ func BuildConfig(ctx BuildContext) (Result, error) {
 	// It runs AFTER the graph has settled, so the tag set it validates against
 	// is the final one — that is what makes "filter a node, fix the references"
 	// a single transaction instead of an emit-then-patch race.
-	if err := finalizeReferences(&b, &res, ctx.ForPreview); err != nil {
+	// The TEMPLATE's own outbound declarations, so the repair can tell a vanished
+	// GROUP from a vanished single node. The target is gone from cfg by the time
+	// the repair runs, so cfg alone cannot answer that — and the answer decides
+	// whether substituting a direct outbound is a safe repair or a silent change
+	// of the user's routing. See RepairRouteFinal.
+	declaredGroups := declaredGroupTags(ctx.Template)
+	if err := finalizeReferences(&b, &res, ctx.ForPreview, declaredGroups); err != nil {
 		return Result{}, err
 	}
 
@@ -247,7 +253,7 @@ func BuildConfig(ctx BuildContext) (Result, error) {
 // "succeeds" while producing an unroutable config is exactly how
 // `default outbound not found` reached a running system, where it surfaced as a
 // start failure with no connection to its cause.
-func finalizeReferences(b *strings.Builder, res *Result, forPreview bool) error {
+func finalizeReferences(b *strings.Builder, res *Result, forPreview bool, declaredGroups map[string]bool) error {
 	cfg, err := decodeConfigObject([]byte(b.String()))
 	if err != nil {
 		return fmt.Errorf("reference integrity: assembled config: %w", err)
@@ -269,7 +275,7 @@ func finalizeReferences(b *strings.Builder, res *Result, forPreview bool) error 
 
 	// The one safe automatic repair. Refused (ok=false) when there is no
 	// surviving target, which is reported as a build error below.
-	if repairs, ok := RepairRouteFinal(cfg); len(repairs) > 0 {
+	if repairs, ok := RepairRouteFinal(cfg, declaredGroups); len(repairs) > 0 {
 		for _, r := range repairs {
 			debuglog.WarnLog("build: reference repair: %s", r)
 			res.Validation.Warnings = append(res.Validation.Warnings, "reference repair: "+r)
@@ -284,9 +290,11 @@ func finalizeReferences(b *strings.Builder, res *Result, forPreview bool) error 
 		b.Reset()
 		b.Write(out)
 	} else if !ok {
+		// Name the tag and the alternatives. "Build failed" sends the user
+		// hunting; the point of the gate is to say what is wrong and what is
+		// available, which is also what the core would have said on startup.
 		return &ErrInvalidInputs{
-			Reason: "route.final points at an outbound that no longer exists, and no " +
-				"surviving outbound can take its place",
+			Reason: missingFinalTargetReason(cfg),
 		}
 	}
 

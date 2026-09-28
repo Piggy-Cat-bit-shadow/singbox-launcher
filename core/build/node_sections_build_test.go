@@ -152,10 +152,23 @@ func buildNodeSectionsConfig(t *testing.T, tc nodeSectionsScenario) []byte {
 	st := &state.State{Vars: []state.SettingVar{{Name: "clash_secret", Value: "test-secret"}}}
 
 	cache := &ParsedCache{}
+	// The template declares `proxy-out` with `wizard.required: 1` and points
+	// `route.final` at it, so a config WITHOUT it is not a state the generator can
+	// produce any more: a required selector holding its own `addOutbounds` is
+	// emitted even with no nodes. Modelling the cache by hand has to respect that,
+	// or this fixture tests a configuration the app can no longer build — and it
+	// is precisely the configuration that reached a user as
+	// `default outbound not found: proxy-out`.
+	// ONLY the required selector: `direct-out` and the other template outbounds
+	// are declared by the template itself, and re-declaring one here would make
+	// the tag ambiguous — which the reference validator correctly refused.
+	cache.Outbounds = []json.RawMessage{
+		json.RawMessage(`{"type":"selector","tag":"proxy-out","outbounds":["direct-out","auto-proxy-out"]}`),
+	}
 	if tc.finalTag != "" {
-		cache.Outbounds = []json.RawMessage{
-			json.RawMessage(`{"type":"trojan","tag":"` + tc.finalTag + `","server":"1.2.3.4","server_port":443,"password":"p"}`),
-		}
+		cache.Outbounds = append(cache.Outbounds,
+			json.RawMessage(`{"type":"trojan","tag":"`+tc.finalTag+`","server":"1.2.3.4","server_port":443,"password":"p"}`),
+		)
 		if tc.withSections {
 			cache.NodeSections = []NodeSectionSet{{
 				FinalTag: tc.finalTag,

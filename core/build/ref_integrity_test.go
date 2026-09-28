@@ -2,8 +2,12 @@ package build
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"singbox-launcher/core/template"
 )
 
 // decodeCfg parses a config literal for reference tests.
@@ -56,7 +60,7 @@ func TestRepairRouteFinalPicksSurvivingGroup(t *testing.T) {
       "route": {"final": "proxy-out", "rules": []}
     }`)
 
-	repairs, ok := RepairRouteFinal(cfg)
+	repairs, ok := RepairRouteFinal(cfg, nil)
 	if !ok {
 		t.Fatal("repair must succeed when a group survives")
 	}
@@ -85,7 +89,7 @@ func TestRepairRouteFinalIsDeterministic(t *testing.T) {
 	first := ""
 	for i := 0; i < 30; i++ {
 		cfg := decodeCfg(t, fixture)
-		if _, ok := RepairRouteFinal(cfg); !ok {
+		if _, ok := RepairRouteFinal(cfg, nil); !ok {
 			t.Fatal("repair failed")
 		}
 		got := cfg["route"].(map[string]interface{})["final"].(string)
@@ -113,7 +117,7 @@ func TestRepairRouteFinalFallsBackToDirect(t *testing.T) {
       ],
       "route": {"final": "proxy-out", "rules": []}
     }`)
-	if _, ok := RepairRouteFinal(cfg); !ok {
+	if _, ok := RepairRouteFinal(cfg, nil); !ok {
 		t.Fatal("repair must succeed via direct fallback")
 	}
 	if got := cfg["route"].(map[string]interface{})["final"]; got != "direct-out" {
@@ -128,7 +132,7 @@ func TestRepairRouteFinalRefusesWhenNothingCanCarryTraffic(t *testing.T) {
       "outbounds": [{"type": "shadowsocks", "tag": "node-a"}],
       "route": {"final": "proxy-out", "rules": []}
     }`)
-	if _, ok := RepairRouteFinal(cfg); ok {
+	if _, ok := RepairRouteFinal(cfg, nil); ok {
 		t.Fatal("a config with no traffic-capable outbound must not be reported as repairable")
 	}
 }
@@ -143,7 +147,7 @@ func TestRouteFinalUntouchedWhenValid(t *testing.T) {
       ],
       "route": {"final": "grp", "rules": []}
     }`)
-	repairs, ok := RepairRouteFinal(cfg)
+	repairs, ok := RepairRouteFinal(cfg, nil)
 	if !ok || len(repairs) != 0 {
 		t.Fatalf("a valid final must not be repaired, got %v ok=%v", repairs, ok)
 	}
@@ -159,7 +163,7 @@ func TestRouteFinalAbsentIsNotRepaired(t *testing.T) {
       "outbounds": [{"type": "direct", "tag": "direct-out"}],
       "route": {"rules": []}
     }`)
-	repairs, ok := RepairRouteFinal(cfg)
+	repairs, ok := RepairRouteFinal(cfg, nil)
 	if !ok || len(repairs) != 0 {
 		t.Fatalf("absent final must be left alone, got %v", repairs)
 	}
@@ -481,5 +485,109 @@ func TestReportListsEveryIssue(t *testing.T) {
 		if !strings.Contains(rep.Error(), want) {
 			t.Errorf("report must include %q, got: %s", want, rep.Error())
 		}
+	}
+}
+
+// TestRepairRefusesToRedirectAGroupToDirect is the regression for the incident's
+// second half.
+//
+// When the template declared the vanished `route.final` target as a GROUP, the
+// repair used to fall back to `direct-out`. That config STARTS, VALIDATES, and
+// silently sends every unmatched connection straight out — no tunnel, no error,
+// and no symptom beyond a warning line. A user who believes the VPN is on is
+// worse off than one who is told it cannot start.
+//
+// The declaration is what distinguishes this from the legitimate fallback in
+// TestRepairRouteFinalFallsBackToDirect: there, nothing says the vanished tag was
+// a routing CHOICE rather than a single server.
+func TestRepairRefusesToRedirectAGroupToDirect(t *testing.T) {
+	cfg := decodeCfg(t, `{
+      "outbounds": [
+        {"type": "direct", "tag": "direct-out"},
+        {"type": "block", "tag": "block-out"}
+      ],
+      "route": {"final": "proxy-out", "rules": []}
+    }`)
+	// The template said proxy-out was a required group. It is gone, and no group
+	// survives to take its place.
+	declared := map[string]bool{"proxy-out": true}
+
+	repairs, ok := RepairRouteFinal(cfg, declared)
+	if ok {
+		t.Fatalf("repair must REFUSE rather than redirect traffic to a direct "+
+			"outbound; got repairs=%v final=%v", repairs,
+			cfg["route"].(map[string]interface{})["final"])
+	}
+	if got := cfg["route"].(map[string]interface{})["final"]; got != "proxy-out" {
+		t.Errorf("a refused repair must not modify the config, got final=%v", got)
+	}
+}
+
+// TestRepairStillRedirectsANonGroupNode pins that the refusal is scoped to
+// GROUPS. A vanished plain node was one server, not a routing choice, so letting
+// the catch-all fall to whatever routes is still the right repair.
+func TestRepairStillRedirectsANonGroupNode(t *testing.T) {
+	cfg := decodeCfg(t, `{
+      "outbounds": [
+        {"type": "direct", "tag": "direct-out"},
+        {"type": "selector", "tag": "grp", "outbounds": ["direct-out"]}
+      ],
+      "route": {"final": "node-gone", "rules": []}
+    }`)
+	declared := map[string]bool{"node-gone": true} // declared, but NOT as a group
+
+	repairs, ok := RepairRouteFinal(cfg, declared)
+	if !ok {
+		t.Fatal("a vanished non-group node must still be repairable")
+	}
+	if len(repairs) != 1 {
+		t.Fatalf("expected one repair record, got %v", repairs)
+	}
+	if got := cfg["route"].(map[string]interface{})["final"]; got != "grp" {
+		t.Fatalf("expected the surviving group, got %v", got)
+	}
+}
+
+// TestRepairPrefersASurvivingGroupOverTheDeclarationCheck — when a group DOES
+// survive, the repair proceeds even though the original was a group.
+func TestRepairPrefersASurvivingGroupOverTheDeclarationCheck(t *testing.T) {
+	cfg := decodeCfg(t, `{
+      "outbounds": [
+        {"type": "direct", "tag": "direct-out"},
+        {"type": "selector", "tag": "🌍 国外流量", "outbounds": ["direct-out"]}
+      ],
+      "route": {"final": "proxy-out", "rules": []}
+    }`)
+	repairs, ok := RepairRouteFinal(cfg, map[string]bool{"proxy-out": true})
+	if !ok || len(repairs) != 1 {
+		t.Fatalf("a surviving group must still be used, got ok=%v repairs=%v", ok, repairs)
+	}
+	if got := cfg["route"].(map[string]interface{})["final"]; got != "🌍 国外流量" {
+		t.Fatalf("expected the surviving group, got %v", got)
+	}
+}
+
+// TestDeclaredGroupTagsReadsRequiredGroups proves the build can actually obtain
+// the declaration it now relies on, from the SHIPPING template.
+//
+// The accessor (template.RequiredOutboundTags) existed but had NO production
+// caller, so `required: true` was parsed, carried around, and consulted by
+// nothing. This pins that the wiring is real and reads the real file.
+func TestDeclaredGroupTagsReadsRequiredGroups(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "bin", "wizard_template.json"))
+	if err != nil {
+		t.Fatalf("read shipping template: %v", err)
+	}
+	td, err := template.ParseTemplateData(raw)
+	if err != nil {
+		t.Fatalf("parse shipping template: %v", err)
+	}
+	groups := declaredGroupTags(td)
+	if len(groups) == 0 {
+		t.Fatal("no declared groups found; the shipping template declares proxy-out " +
+			"as required, so this must not be empty")
+	}
+	if !groups["proxy-out"] {
+		t.Errorf("proxy-out is declared required=true but was not reported; got %v", groups)
 	}
 }

@@ -1107,7 +1107,25 @@ func GenerateOutboundsFromParserConfig(
 		if len(coreSkips.list) > 0 {
 			return diag, fmt.Errorf("no usable nodes: %s", coreSkips.list[0].Summary())
 		}
-		return diag, fmt.Errorf("no nodes parsed from any source")
+		// EXCEPTION: a `required: true` outbound that declares its own
+		// constants is still constructible with no nodes at all.
+		//
+		// `addOutbounds: ["direct-out"]` is the template author's own statement
+		// of what this group contains when there is nothing to put in it, and
+		// `required: true` says the outbound must exist regardless. Aborting here
+		// meant the promise could not be kept even though everything needed to
+		// keep it was declared: `proxy-out` vanished, and `route.final` — which
+		// points at it — was left dangling. That is the incident.
+		//
+		// Falling through to the passes is therefore correct ONLY when at least
+		// one such outbound exists. With none, the old refusal stands: an empty
+		// config with nothing to route is a genuinely unusable state, and
+		// reporting it is better than emitting one the core will reject.
+		if !hasSelfSufficientRequiredOutbound(parserConfig) {
+			return diag, fmt.Errorf("no nodes parsed from any source")
+		}
+		debuglog.InfoLog("outbounds: no nodes parsed, but the template declares a required " +
+			"outbound with its own addOutbounds — generating it from constants alone")
 	}
 
 	// SPEC 110: источники-цепочки становятся узлами здесь — их позиции
