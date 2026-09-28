@@ -107,6 +107,22 @@ type AppController struct {
 	// a process — see core/classic_runtime.go.
 	classic classicRuntime
 
+	// buildMu serializes config builds.
+	//
+	// A rebuild is a read-modify-write on ONE file (config.json): it reads the
+	// state, renders a config, writes a candidate and promotes it. Two rebuilds
+	// running at once therefore interleave — the loser's candidate can be
+	// promoted after the winner's, leaving on disk a config built from a state
+	// snapshot that is already out of date. A build triggered by a settings
+	// change must not race the build a Start performs, and the daemon applies
+	// whatever is on disk.
+	//
+	// This is a real mutex rather than a "busy" flag: the second caller WAITS for
+	// a correct config instead of being refused one. Refusing would make a
+	// perfectly reasonable sequence — change a setting, press Start — fail
+	// because the two happened to overlap.
+	buildMu sync.Mutex
+
 	// lifecycleErr is the single record of the last runtime failure. Every
 	// layer that notices a lifecycle problem writes here, and coreState()
 	// reads here, so the frontend has one authoritative source instead of

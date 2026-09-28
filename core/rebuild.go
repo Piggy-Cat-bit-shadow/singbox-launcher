@@ -103,6 +103,15 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 	if ac == nil || ac.StateService == nil {
 		return nil
 	}
+	// Serialized against every other build. See AppController.buildMu: a rebuild
+	// is a read-modify-write on config.json, and two overlapping builds can
+	// promote a config rendered from a stale state snapshot.
+	//
+	// Taken BEFORE any other launcher lock and never held while one is acquired,
+	// so it cannot invert with CmdMutex.
+	ac.buildMu.Lock()
+	defer ac.buildMu.Unlock()
+
 	if ac.FileService == nil {
 		return fmt.Errorf("FileService not initialized")
 	}
@@ -273,6 +282,14 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 	if !configValid {
 		checkErr := outcome.CheckErr
 		debuglog.ErrorLog("RebuildConfigIfDirty: sing-box check failed: %v", checkErr)
+		// Recorded on the controller, not only on the Fyne UI port: the
+		// headless backend has no uiPort, so a config the core REJECTED used to
+		// leave the SwiftUI app showing "connected" while config.json on disk
+		// was still the previous one. This is the failure the user most needs to
+		// see, because it silently keeps them on the old config.
+		ac.RecordConfigError(LifecycleErrConfigCheck, "rebuild",
+			"sing-box rejected the newly built config",
+			fmt.Sprintf("%v", checkErr))
 		if ac.uiPort != nil {
 			ac.uiPort.ShowError(locale.T("Config validation failed"), // Текст переписан вместе с §5А: «Connect won't work until
 				// this is fixed» стало бы прямой неправдой — config.json НЕ
@@ -293,6 +310,10 @@ func (ac *AppController) RebuildConfigIfDirty(forced ...bool) error {
 		// config.json не заменён: ConfigStale остаётся, чтобы следующий
 		// rebuild перепроверил. Без return — поток продолжается, как и раньше.
 	} else {
+		// A clean round clears a previously recorded config failure: the
+		// condition it described is gone, and leaving it would make the UI warn
+		// about a config that no longer exists.
+		ac.ClearLifecycleError()
 		// Имя собственного TUN могло смениться этой пересборкой. Реестр
 		// netiface обязан догнать её сразу: по нему пикер аплинков прячет наш
 		// TUN, а всё прочее туннельное — теперь законный выбор (SPEC 113-F).

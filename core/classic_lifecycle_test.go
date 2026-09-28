@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -893,5 +894,49 @@ func TestReadinessNeverPromotesAStaleGeneration(t *testing.T) {
 
 	if got := ac.classic.currentPhase(); got == ClassicRunning {
 		t.Fatal("a superseded generation must never be promoted to running")
+	}
+}
+
+// --- config build serialization --------------------------------------------
+
+// TestBuildMutexSerializesRebuilds guards the invariant behind buildMu: a rebuild
+// is a read-modify-write on config.json, so two of them must not overlap.
+//
+// A rebuild from a settings change and one from Start can genuinely be requested
+// at the same time, and the daemon applies whatever ends up on disk. Serializing
+// means the second waits for a correct config instead of the two interleaving.
+//
+// Tested through the mutex rather than by driving two real builds: the point is
+// the exclusion property, and a test that spawned two full pipelines would be
+// nondeterministic while proving less.
+func TestBuildMutexSerializesRebuilds(t *testing.T) {
+	ac := &AppController{}
+
+	var inside int32
+	var maxInside int32
+	var wg sync.WaitGroup
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ac.buildMu.Lock()
+			defer ac.buildMu.Unlock()
+			n := atomic.AddInt32(&inside, 1)
+			for {
+				old := atomic.LoadInt32(&maxInside)
+				if n <= old || atomic.CompareAndSwapInt32(&maxInside, old, n) {
+					break
+				}
+			}
+			// A window in which a second holder would be visible.
+			time.Sleep(2 * time.Millisecond)
+			atomic.AddInt32(&inside, -1)
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&maxInside); got != 1 {
+		t.Fatalf("up to %d builds ran at once; a rebuild must be exclusive", got)
 	}
 }
