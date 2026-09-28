@@ -594,7 +594,15 @@ final class AppModel {
         appliedSeq = 0
         pendingEvents.removeAll()
         awaitingBaseline = false
-        await client.shutdown()
+        do {
+            try await client.shutdown()
+        } catch {
+            // The previous helper would not stop. Surface it instead of starting a
+            // replacement over a live one: two helpers would own the same state,
+            // config and core.
+            connection = .failed(error.localizedDescription)
+            return
+        }
         connection = .idle
     }
 

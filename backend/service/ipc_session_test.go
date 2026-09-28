@@ -447,3 +447,158 @@ func settleGoroutines() {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Swift-side invariants
+//
+// There is no XCTest in this toolchain (verified: neither XCTest nor the Swift
+// Testing macro plugin links, so `swift test` cannot build). The Go suite does run,
+// so the client's invariants are enforced by reading its source. These are not
+// substitutes for behavioural tests — they are the only executable check available
+// for a language whose test runner does not exist here, and each states the exact
+// failure it prevents.
+// ---------------------------------------------------------------------------
+
+func readSwift(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "macos", "Sources", "JiejieBox", rel))
+	if err != nil {
+		t.Skipf("Swift sources not present: %v", err)
+	}
+	return string(b)
+}
+
+// TestSwiftScopesSequenceToSession is claim 1 on the client side, and it is the
+// consumer half of the session protocol.
+//
+// The backend restart blackout is a CLIENT bug: the helper's counter restarts at 1
+// while the client's high-water mark persists, so every event from the new helper is
+// discarded as stale. Supplying a session on the wire is necessary but not
+// sufficient — the client must actually reset on it, and must drop events that
+// belong to a session it is not following.
+func TestSwiftScopesSequenceToSession(t *testing.T) {
+	app := readSwift(t, "App/AppModel.swift")
+
+	if !contains(app, "appliedSession") {
+		t.Fatal("AppModel tracks no backend session, so a restarted helper's events " +
+			"all compare as stale and the UI stops updating")
+	}
+	if !contains(app, "appliedSession = snapshot.session") {
+		t.Error("the snapshot does not adopt its session; without this the " +
+			"high-water mark cannot be re-baselined")
+	}
+	if !contains(app, "appliedSeq = 0") {
+		t.Error("the sequence is never reset, so a new session inherits the old " +
+			"one's high-water mark — the exact blackout")
+	}
+	// A late event from a replaced backend must be DROPPED, not compared.
+	if !contains(app, "event.session == session") {
+		t.Error("events are not filtered by session, so a dead backend's late frame " +
+			"can overwrite the live backend's state")
+	}
+	// And the reset must happen on stop, not only in start(): a crash-recovery
+	// path may never call stop().
+	if !contains(app, "appliedSession = nil") {
+		t.Error("stop() does not clear the session, so a restart through a path " +
+			"that skips the snapshot leaves stale state")
+	}
+}
+
+// TestSwiftBuffersEventsUntilTheBaseline — claim 2, client side.
+//
+// An event that wins the race against the snapshot must not be applied before it:
+// the snapshot was composed at an EARLIER sequence and would overwrite the newer
+// state, and the already-consumed event never comes again.
+func TestSwiftBuffersEventsUntilTheBaseline(t *testing.T) {
+	app := readSwift(t, "App/AppModel.swift")
+
+	if !contains(app, "pendingEvents") || !contains(app, "awaitingBaseline") {
+		t.Fatal("there is no bootstrap barrier: events arriving before the snapshot " +
+			"are applied immediately and then overwritten by the older snapshot")
+	}
+	if !contains(app, "applyBaseline") {
+		t.Fatal("no baseline step exists; the snapshot's fields must be installed " +
+			"before buffered events are replayed, never after")
+	}
+	// The replay must be filtered against the snapshot's sequence, or events the
+	// snapshot already includes would be applied twice.
+	if !contains(app, "$0.seq < $1.seq") {
+		t.Error("buffered events are not replayed in sequence order")
+	}
+}
+
+// TestSwiftHelperGenerationGuardsTermination is claims 8 and 10, client side.
+//
+// The termination handler of an old helper runs asynchronously, after the app has
+// moved on. Without a generation check it judges the old process's exit by the NEW
+// process's intent and then clears the new process's handles — reporting a healthy
+// backend as crashed and closing its event stream.
+func TestSwiftHelperGenerationGuardsTermination(t *testing.T) {
+	client := readSwift(t, "Services/BackendClient.swift")
+
+	if !contains(client, "helperGeneration") || !contains(client, "activeGeneration") {
+		t.Fatal("the client has no helper generation, so a restart races the old " +
+			"helper's termination handler against the new helper's state")
+	}
+	// The generation must be CAPTURED at handler creation, not read when it runs.
+	if !contains(client, "handleTermination(code, generation: generation)") {
+		t.Error("the termination handler does not capture its own generation; " +
+			"reading the current one when it runs is the bug")
+	}
+	if !contains(client, "guard generation == activeGeneration") {
+		t.Error("handleTermination does not check the generation, so a superseded " +
+			"helper's exit can tear down the live one")
+	}
+	// Claim 10: EOF on the protocol stream with the process still alive is a
+	// connection failure, not something to ignore.
+	if contains(client, "guard process == nil else { return }\n        handleTermination(0)") {
+		t.Error("handleReadEnded ignores EOF while the process is alive, leaving the " +
+			"client in `ready` with a dead channel")
+	}
+	if !contains(client, "channel closed while the helper is still running") {
+		t.Error("a dead IPC channel with a live process is not treated as a failure")
+	}
+}
+
+// TestSwiftShutdownConfirmsExitBeforeRelease — claim 9.
+//
+// `shutdown` terminated the helper, slept a fixed interval, and released ownership
+// without ever checking whether it had exited. `restart()` could then start a second
+// helper over a live first one, and both would own the same state, config, core and
+// daemon channel.
+func TestSwiftShutdownConfirmsExitBeforeRelease(t *testing.T) {
+	client := readSwift(t, "Services/BackendClient.swift")
+
+	if !contains(client, "waitForExit") {
+		t.Fatal("shutdown does not confirm the helper's exit, so a restart can start " +
+			"a second helper while the first still owns the state and the core")
+	}
+	if !contains(client, "func shutdown() async throws") {
+		t.Error("shutdown cannot report failure, so a caller cannot learn that the " +
+			"old helper survived — it will start a replacement regardless")
+	}
+	if !contains(client, "terminationFailed") {
+		t.Error("there is no error for a helper that refused to exit")
+	}
+	// The signal escalation must exist, and each step must confirm.
+	if !contains(client, "proc.interrupt()") {
+		t.Error("shutdown has only one termination signal; a helper ignoring SIGTERM " +
+			"would be reported as stopped while it runs")
+	}
+}
+
+// TestSwiftStopSurfacesTerminationFailure — the caller half of claim 9.
+//
+// A shutdown that throws is worthless if the caller ignores it: `stop()` must not
+// report a clean idle state and let `restart()` proceed.
+func TestSwiftStopSurfacesTerminationFailure(t *testing.T) {
+	app := readSwift(t, "App/AppModel.swift")
+
+	if !contains(app, "try await client.shutdown()") {
+		t.Fatal("stop() ignores a shutdown failure, so a surviving helper is " +
+			"reported as a clean stop and a second one is started")
+	}
+	if !contains(app, "catch") {
+		t.Error("the shutdown failure is not caught")
+	}
+}

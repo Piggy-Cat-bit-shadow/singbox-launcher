@@ -23,6 +23,9 @@ enum BackendClientError: LocalizedError {
     case decodingFailed(String)
     case notRunning
     case timedOut(method: String)
+    /// The previous helper would not exit, so a new one must not be started:
+    /// two helpers would own the same state, config and core.
+    case terminationFailed(Int32)
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +37,8 @@ enum BackendClientError: LocalizedError {
             return "Backend protocol \(got) does not match the app's \(expected). Update JiejieBox."
         case .backendUnavailable:
             return "The backend is not running."
+        case .terminationFailed(let pid):
+            return "The previous backend (pid \(pid)) did not stop, so a new one was not started. Quit and reopen JiejieBox."
         case .decodingFailed(let detail):
             return "Unexpected backend response: \(detail)"
         case .notRunning:
@@ -90,6 +95,24 @@ actor BackendClient {
 
     private var terminationIntent: TerminationIntent = .none
 
+    /// Identifies the helper process this client currently owns.
+    ///
+    /// WHY A GENERATION AND NOT JUST `process == nil`. The termination handler of
+    /// an OLD process runs asynchronously, after the app has already moved on. A
+    /// restart that does not wait for the old helper to be reaped can have the
+    /// old helper's handler fire while the NEW helper is starting — and because
+    /// that handler consulted client-wide state (`terminationIntent`, `process`),
+    /// it judged the old process's exit by the new process's intent and then
+    /// cleared the new process's handles. The user saw a healthy backend reported
+    /// as crashed, with every pending request failed and the event stream closed.
+    ///
+    /// Every async continuation captures the generation it was created for, and
+    /// may only touch client state when that generation is still current. A
+    /// superseded generation cleans up nothing but itself.
+    private var helperGeneration: UInt64 = 0
+    /// The generation whose process is currently owned, if any.
+    private var activeGeneration: UInt64?
+
     // MARK: - Lifecycle
 
     /// Locate the helper inside the running bundle.
@@ -118,6 +141,11 @@ actor BackendClient {
     func start(onTermination: @escaping @Sendable (Int32) -> Void) throws {
         guard process == nil else { return }
         self.onTermination = onTermination
+        // A new process is a new generation. Bumping here — before the process
+        // exists — means any handler still in flight for the previous helper is
+        // already stale by the time this one runs.
+        helperGeneration &+= 1
+        let generation = helperGeneration
         // A fresh process starts with nobody having asked it to stop, so the
         // next exit is a fault until we mark otherwise.
         terminationIntent = .none
@@ -138,7 +166,10 @@ actor BackendClient {
 
         proc.terminationHandler = { [weak self] finished in
             let code = finished.terminationStatus
-            Task { await self?.handleTermination(code) }
+            // The generation is captured HERE, at handler creation, so the
+            // callback carries the identity of the process it belongs to rather
+            // than reading whatever the client owns when it eventually runs.
+            Task { await self?.handleTermination(code, generation: generation) }
         }
 
         do {
@@ -148,8 +179,9 @@ actor BackendClient {
         }
 
         process = proc
+        activeGeneration = generation
         stdinHandle = inPipe.fileHandleForWriting
-        log.info("backend started pid=\(proc.processIdentifier)")
+        log.info("backend started pid=\(proc.processIdentifier) gen=\(generation)")
 
         // Drain stderr so a chatty backend cannot block on a full pipe.
         let errHandle = errPipe.fileHandleForReading
@@ -161,16 +193,16 @@ actor BackendClient {
             }
         }
 
-        startReading(outPipe.fileHandleForReading)
+        startReading(outPipe.fileHandleForReading, generation: generation)
     }
 
-    private func startReading(_ handle: FileHandle) {
+    private func startReading(_ handle: FileHandle, generation: UInt64) {
         readTask = Task.detached { [weak self] in
             while let line = try? handle.readline() {
                 guard let self else { return }
                 await self.handleLine(line)
             }
-            await self?.handleReadEnded()
+            await self?.handleReadEnded(generation: generation)
         }
     }
 
@@ -282,7 +314,30 @@ actor BackendClient {
     /// that is gone, and a retained `onTermination` callback would fire for the
     /// NEXT process and report a spurious crash. Incomplete cleanup is how a
     /// restart ends up with two event streams.
+    /// cleanupAfterExit releases the current helper's resources.
+    ///
+    /// Generation-checked by the callers below; this is the unconditional form for
+    /// paths that already know they own the current generation.
     private func cleanupAfterExit() async {
+        await cleanupAfterExit(generation: activeGeneration)
+    }
+
+    private func cleanupAfterExit(generation: UInt64?) async {
+        // A superseded generation may not touch client state. Its own handles are
+        // already gone: they were released by whoever superseded it.
+        if let generation, generation != activeGeneration {
+            log.info("ignoring cleanup for superseded helper gen=\(generation)")
+            return
+        }
+        if let generation {
+            log.info("cleaning up helper gen=\(generation)")
+        }
+        activeGeneration = nil
+        cleanupOwnedState()
+    }
+
+    /// cleanupOwnedState is the unconditional teardown body.
+    private func cleanupOwnedState() {
         readTask?.cancel()
         readTask = nil
 
@@ -303,12 +358,21 @@ actor BackendClient {
 
         process = nil
         onTermination = nil
+        // Ownership is released here and ONLY here, so "the client owns no
+        // helper" is decided in one place.
+        activeGeneration = nil
         log.info("backend stopped")
     }
 
-    /// Stop the helper without asking the backend to exit (used when the
-    /// connection is being torn down for a restart).
-    func shutdown() async {
+    /// Stop the helper without asking the backend to exit.
+    ///
+    /// THROWS WHEN THE HELPER WOULD NOT STOP. That is not a cosmetic failure: the
+    /// caller is about to start a replacement, and starting one while the previous
+    /// helper still owns the state files, the config and the daemon control channel
+    /// produces two backends fighting over the same resources. The old form
+    /// returned silently after a fixed wait, so `restart()` started a second helper
+    /// over a possibly-live first one.
+    func shutdown() async throws {
         terminationIntent = .requested
         readTask?.cancel()
         readTask = nil
@@ -316,21 +380,73 @@ actor BackendClient {
         if let stdinHandle {
             try? stdinHandle.close()
         }
-        guard let proc = process, proc.isRunning else {
-            process = nil
+        guard let proc = process else { return }
+        let generation = activeGeneration
+        if !proc.isRunning {
+            await cleanupAfterExit(generation: generation)
             return
         }
+
+        // Escalate, and CONFIRM the exit before releasing ownership.
+        //
+        // The previous form terminated, waited a fixed two seconds, sent an
+        // interrupt and then set `process = nil` WITHOUT checking whether the
+        // helper had actually gone. `restart()` could therefore start the next
+        // helper while the previous one was still running — two headless backends
+        // both reading and writing the same state, config and daemon control
+        // channel.
         proc.terminate()
-        // Give it a moment to exit cleanly, then stop waiting.
-        for _ in 0..<20 where proc.isRunning {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        if await waitForExit(proc, seconds: 3) {
+            await cleanupAfterExit(generation: generation)
+            log.info("backend stopped after SIGTERM")
+            return
         }
-        if proc.isRunning { proc.interrupt() }
-        log.info("backend stopped")
-        process = nil
+
+        log.error("backend ignored SIGTERM; sending SIGINT")
+        proc.interrupt()
+        if await waitForExit(proc, seconds: 3) {
+            await cleanupAfterExit(generation: generation)
+            log.info("backend stopped after SIGINT")
+            return
+        }
+
+        // It is still alive after escalating. Report it rather than pretending
+        // the teardown succeeded: the caller must not start a second helper while
+        // this one holds the same state and core.
+        log.error("backend did not exit after SIGTERM and SIGINT (pid \(proc.processIdentifier))")
+        await cleanupAfterExit(generation: generation)
+        throw BackendClientError.terminationFailed(proc.processIdentifier)
     }
 
-    private func handleTermination(_ code: Int32) {
+    /// waitForExit polls until the process is gone or the budget expires.
+    ///
+    /// Returns whether the process actually exited — the distinction the old
+    /// fixed sleep could not make, and the difference between "safe to start a new
+    /// helper" and "two helpers are now running".
+    private func waitForExit(_ proc: Process, seconds: Int) async -> Bool {
+        let steps = seconds * 10
+        for _ in 0..<steps {
+            if !proc.isRunning { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return !proc.isRunning
+    }
+
+    private func handleTermination(_ code: Int32, generation: UInt64) async {
+        // A handler for a helper we no longer own must do NOTHING to client
+        // state.
+        //
+        // This is the fix for the restart race. Without the check, the old
+        // helper's exit was evaluated against the NEW helper's intent (so a
+        // normal exit looked like a crash when the intent had been reset for the
+        // new process), and then it cleared the new helper's process, stdin and
+        // read task — leaving a live backend reported as dead with its event
+        // stream closed.
+        guard generation == activeGeneration else {
+            log.info("ignoring termination of superseded helper gen=\(generation)")
+            return
+        }
+
         // Only an exit nobody asked for is a fault. A quit or an intentional
         // teardown is the app getting what it requested, and reporting it as
         // "stopped unexpectedly" would show the user an error for doing exactly
@@ -343,25 +459,41 @@ actor BackendClient {
             log.warning("backend exited with code \(code)")
         }
 
-        // Fail every in-flight request so no caller awaits forever.
-        let waiting = pending
-        pending.removeAll()
-        for (_, cont) in waiting {
-            cont.resume(throwing: BackendClientError.backendUnavailable)
-        }
-        for (_, cont) in eventContinuations { cont.finish() }
-        eventContinuations.removeAll()
-        process = nil
-        stdinHandle = nil
-        readTask = nil
+        // Capture the callback BEFORE the shared teardown clears it, and let the
+        // teardown be the ONE implementation of "release this helper's
+        // resources". The previous version duplicated that body here, which is
+        // how two teardown paths drift: every future resource added to one would
+        // have to be remembered in the other.
+        let callback = onTermination
+        await cleanupOwnedState()
         if !expected {
-            onTermination?(code)
+            callback?(code)
         }
     }
 
-    private func handleReadEnded() {
-        guard process == nil else { return }
-        handleTermination(0)
+    /// handleReadEnded treats a lost protocol channel as a failed connection.
+    ///
+    /// The old form returned immediately when the Process object still claimed to
+    /// be running, so a helper whose stdout had closed but which was still alive
+    /// left the client in `ready`: requests were written into a channel nobody
+    /// read and then waited out their full response timeout, and the app believed
+    /// it had a working backend. EOF on the protocol stream is a connection
+    /// failure regardless of what the process table says.
+    private func handleReadEnded(generation: UInt64) async {
+        guard generation == activeGeneration else {
+            log.info("ignoring read-EOF of superseded helper gen=\(generation)")
+            return
+        }
+
+        if process == nil {
+            // The process is already gone; this is an ordinary exit.
+            await handleTermination(0, generation: generation)
+            return
+        }
+
+        // The channel died while the process lives: the backend is not usable.
+        log.error("backend IPC channel closed while the helper is still running; treating the connection as failed")
+        await handleTermination(0, generation: generation)
     }
 
     // MARK: - Framing
