@@ -1218,6 +1218,60 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	}
 }
 
+// ForceStopOwnedCore is the shutdown-time last resort: it terminates whatever
+// core this launcher currently OWNS and verifies the exit, rather than killing a
+// bare PID.
+//
+// GracefulExit used to fall back to `ac.SingboxCmd.Process.Kill()` on timeout.
+// That had two problems, both of which the identity-verified primitive exists to
+// solve: it is a raw PID signal with no check that the PID is still our core (a
+// recycled PID means signalling an unrelated process in the final seconds of
+// shutdown), and it cannot reach a privileged root core at all — SingboxCmd is
+// nil on that path, so the "forcing kill" logged a line and did nothing while the
+// TUN stayed up.
+//
+// Returns true when a core was owned and is now confirmed gone.
+func (svc *ProcessService) ForceStopOwnedCore() bool {
+	if svc == nil || svc.ac == nil {
+		return false
+	}
+	ac := svc.ac
+	ac.CmdMutex.Lock()
+	owned, hasOwned, privileged := ac.classic.ownedProcess()
+	if !hasOwned {
+		ac.CmdMutex.Unlock()
+		return !ac.RunningState.IsRunning()
+	}
+	scriptPID := ac.SingboxPrivilegedPID
+	singboxPID := ac.SingboxPrivilegedSingboxPID
+	pidFile := ac.SingboxPrivilegedPIDFile
+	corePath := svc.currentCorePath()
+	cmd := ac.SingboxCmd
+	ac.CmdMutex.Unlock()
+
+	checker := platformChecker{}
+	var err error
+	if privileged {
+		_, err = terminatePrivilegedOwned(scriptPID, singboxPID, pidFile, corePath, "shutdown-force", checker)
+	} else {
+		_, err = terminateOwnedProcess(owned, "shutdown-force", checker, func(pid int, force bool) error {
+			return signalLocalProcess(cmd, pid, force)
+		})
+	}
+	if err != nil {
+		debuglog.WarnLog("GracefulExit: forced stop could not confirm exit: %v", err)
+		return false
+	}
+	gen := ac.classic.currentGeneration()
+	ac.classic.clearOwnership(gen)
+	ac.classic.setPhase(gen, ClassicStopped)
+	ac.RunningState.Set(false)
+	if pidFile != "" {
+		_ = os.Remove(pidFile)
+	}
+	return true
+}
+
 // Stop attempts graceful shutdown, mirroring previous StopSingBoxProcess.
 // Stop terminates the owned core and does not report success until it is gone.
 //

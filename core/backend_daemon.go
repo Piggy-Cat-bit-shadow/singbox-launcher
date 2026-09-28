@@ -35,6 +35,15 @@ type DaemonBackend struct {
 	ac    *AppController
 	admin *lxdclient.Client
 
+	// stopping is true from the moment a stop is accepted until the daemon
+	// confirms the core is gone. Guarded internally; see SetStopping.
+	stopping atomic.Bool
+
+	// closed is set by Close() to retire this engine's epoch. Every async
+	// callback must consult isActive(), which now requires !closed, so nothing
+	// from a retired backend can write state after the handover.
+	closed atomic.Bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -260,7 +269,10 @@ func (b *DaemonBackend) diagnoseReachError(err error) string {
 // Мёртвый backend (вытеснен setBackend) не должен трогать общее состояние
 // (RunningState, UI): его стримы/apply могли пережить Close.
 func (b *DaemonBackend) isActive() bool {
-	return b.ac.Backend() == CoreBackend(b)
+	// !closed is not redundant with the pointer check: during setBackend the
+	// outgoing backend is Closed while ac.backend still points at it, so the
+	// pointer comparison alone reports a dying engine as live.
+	return !b.closed.Load() && b.ac.Backend() == CoreBackend(b)
 }
 
 // Mode implements CoreBackend.
@@ -333,7 +345,18 @@ func (b *DaemonBackend) RestartVPNContext(ctx context.Context) error {
 // пересборку, Start — обычный dirty-путь. 422 с именем узла выключает
 // узел и повторяет apply в этом же заходе (потолок daemonRejectStartCap).
 func (b *DaemonBackend) applyCurrentConfig(caller string, forced bool) error {
-	return b.applyCurrentConfigContext(context.Background(), caller, forced)
+	// b.ctx, NOT context.Background(): this path is reached from the status
+	// supervisor on a core FATAL, i.e. from a goroutine nobody owns. With a
+	// Background parent, Close() could not cancel it, so after a daemon→classic
+	// switch an abandoned backend could still push a config to the daemon the
+	// user just left — and, worse, retryCoreReject would silently disable user
+	// nodes on the way. Falling back to Background only when b.ctx is nil keeps
+	// the "unconfigured backend" case working.
+	parent := b.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	return b.applyCurrentConfigContext(parent, caller, forced)
 }
 
 // applyCurrentConfigContext is applyCurrentConfig with cancellation.
@@ -560,12 +583,41 @@ func (b *DaemonBackend) retryAfterCoreFatal(msg string) {
 	b.applyCurrentConfig("core-reject-fatal", true)
 }
 
+// daemonStopTimeout bounds how long a stop waits for the daemon to confirm the
+// core is gone. Generous for a service that has to tear down a TUN device.
+const daemonStopTimeout = 20 * time.Second
+
+// daemonStopPollInterval is how often the confirmation is re-read.
+const daemonStopPollInterval = 150 * time.Millisecond
+
 // StopVPN implements CoreBackend: ядро гаснет, демон и канал остаются жить.
+//
+// CONFIRMED STOP, not "a command was accepted". `/admin/stop` is an ordinary
+// POST that returns 200 as soon as the daemon has ACCEPTED the request; it says
+// nothing about whether the core actually exited. The old code treated that 200
+// as proof, cleared RunningState and dropped the Clash fallback verification
+// immediately — so a daemon whose core survived (still applying, wedged, or
+// restarting itself) was reported to the user as stopped while the tunnel was
+// still carrying traffic. That is precisely the lie the Classic path stopped
+// telling, and the two engines must not disagree about what "stopped" means.
+//
+// The daemon is the authority here: its own /admin/status is polled until it
+// reports the core is no longer up. Only then does the launcher publish stopped.
+// On timeout the state is NOT faked: the failure is recorded, RunningState keeps
+// saying "running", and the user is told the VPN may still be up — because it
+// may well be.
 func (b *DaemonBackend) StopVPN() {
 	go func() {
 		b.applyMu.Lock()
 		defer b.applyMu.Unlock()
 		ac := b.ac
+
+		// Publish "stopping" before the work starts, so the UI shows progress
+		// instead of a still-"connected" screen during the teardown.
+		if ac != nil {
+			ac.BeginDaemonStop()
+		}
+
 		if err := b.admin.Stop(); err != nil {
 			debuglog.ErrorLog("daemon.StopVPN: %v", err)
 			// Recorded before the UI branch. A stop that FAILED is not a cosmetic
@@ -573,19 +625,107 @@ func (b *DaemonBackend) StopVPN() {
 			// than left believing it is down. The headless backend has no uiPort,
 			// so the Fyne dialog alone reached nobody.
 			msg := fmt.Errorf("daemon stop: %w", err).Error()
-			ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", msg, "", true)
-			if ac.hasUI() {
-				b.ac.uiPort.ShowError(locale.T("Error"), msg)
+			if ac != nil {
+				ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", msg, "", true)
+				ac.EndDaemonStop(false)
+				if ac.hasUI() {
+					b.ac.uiPort.ShowError(locale.T("Error"), msg)
+				}
 			}
 			return
 		}
-		ac.clearDaemonSystemProxy("VPN stopped")
-		ac.RunningState.Set(false)
+
+		if err := b.awaitDaemonStopped(); err != nil {
+			// Accepted but NOT confirmed. Saying "stopped" here is the original
+			// bug, so the launcher says the opposite: the tunnel may still be up.
+			debuglog.ErrorLog("daemon.StopVPN: stop not confirmed: %v", err)
+			if ac != nil {
+				ac.RecordLifecycleError(LifecycleErrStopFailed, "stop",
+					"the daemon accepted the stop but the core is still running",
+					err.Error(), true)
+				ac.EndDaemonStop(false)
+				if ac.hasUI() {
+					ac.uiPort.ShowError(locale.T("Error"), locale.T(stopPrivilegedFailedText)+": "+err.Error())
+				}
+			}
+			return
+		}
+
+		// Confirmed gone by the daemon itself.
+		if ac != nil {
+			ac.clearDaemonSystemProxy("VPN stopped")
+			ac.EndDaemonStop(true)
+		}
 		// The core is down, so its Clash API listener is gone with it. Dropping
 		// verification (not the configuration) means the next use re-proves the
 		// endpoint instead of trusting a socket that no longer exists.
 		b.clashFallback.invalidate()
 	}()
+}
+
+// SetStopping implements stopStateBackend: records that a stop is in flight so
+// the wire state can report `stopping` instead of `running` while the core is
+// being torn down.
+func (b *DaemonBackend) SetStopping(stopping bool) {
+	if b == nil {
+		return
+	}
+	b.stopping.Store(stopping)
+}
+
+// Stopping reports whether a stop is in flight.
+func (b *DaemonBackend) Stopping() bool {
+	return b != nil && b.stopping.Load()
+}
+
+// awaitDaemonStopped polls the daemon until it confirms the core is no longer up.
+//
+// Reads the daemon's own status rather than any local flag: the whole point is
+// that the launcher must not be the source of truth for whether the VPN is down.
+// A daemon that cannot be reached is NOT treated as "stopped" — unknown is not
+// evidence of success, and reporting it as such would recreate the lie in the
+// disconnected case.
+func (b *DaemonBackend) awaitDaemonStopped() error {
+	if b.admin == nil {
+		return fmt.Errorf("no daemon client")
+	}
+	parent := b.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	deadline := time.Now().Add(daemonStopTimeout)
+	var lastErr error
+	for {
+		ctx, cancel := context.WithTimeout(parent, daemonProbeTimeout)
+		info, err := b.admin.StatusCtx(ctx)
+		cancel()
+		if err != nil {
+			lastErr = err
+		} else {
+			switch strings.ToLower(strings.TrimSpace(info.Status)) {
+			case "idle", "":
+				return nil
+			case "fatal":
+				// A core that died on its own is not running either; the FATAL
+				// path owns explaining why, but the stop itself is satisfied.
+				return nil
+			default:
+				// started / starting / stopping: work still in progress.
+				lastErr = nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("the daemon did not confirm the stop within %s (%v)", daemonStopTimeout, lastErr)
+			}
+			return fmt.Errorf("the daemon did not confirm the stop within %s", daemonStopTimeout)
+		}
+		select {
+		case <-time.After(daemonStopPollInterval):
+		case <-parent.Done():
+			return parent.Err()
+		}
+	}
 }
 
 // OnAppExit implements CoreBackend: по умолчанию выход из лаунчера оставляет
@@ -651,10 +791,26 @@ func (b *DaemonBackend) OnAppExit() bool {
 		return false
 	}
 	if err := b.admin.Stop(); err != nil {
+		// The tunnel is provably still up. Reporting stopped here would be the
+		// same lie StopVPN was fixed to stop telling — and worse, returning true
+		// makes GracefulExit enter its wait loop, whose first check is
+		// !RunningState.IsRunning(): our own eager write would satisfy it, so the
+		// loop would "confirm" a stop that never happened.
 		debuglog.WarnLog("daemon.OnAppExit: stop failed: %v", err)
-	} else {
-		b.ac.clearDaemonSystemProxy("VPN stopped on exit")
+		b.ac.RecordLifecycleError(LifecycleErrStopFailed, "stop",
+			"the VPN could not be stopped on exit", err.Error(), true)
+		return false
 	}
+	// Confirmed against the daemon itself, exactly as a user-initiated stop is.
+	// A wedged core must not be reported as down just because the app is closing.
+	if err := b.awaitDaemonStopped(); err != nil {
+		debuglog.WarnLog("daemon.OnAppExit: stop not confirmed: %v", err)
+		b.ac.RecordLifecycleError(LifecycleErrStopFailed, "stop",
+			"the daemon accepted the stop on exit but the core is still running",
+			err.Error(), true)
+		return false
+	}
+	b.ac.clearDaemonSystemProxy("VPN stopped on exit")
 	b.ac.RunningState.Set(false)
 	return true
 }
@@ -678,6 +834,16 @@ func (b *DaemonBackend) appliedProxyServer() string {
 // без паники: Close вызывается из путей смены движка и выхода, где ронять
 // процесс из-за nil-поля нельзя — это утащило бы за собой и живое ядро.
 func (b *DaemonBackend) Close() {
+	// Invalidate callbacks BEFORE anything else, and before the caller publishes
+	// the replacement backend.
+	//
+	// isActive() is a pointer comparison against ac.Backend(), and setBackend
+	// runs prev.Close() while ac.backend still points at prev — so for the whole
+	// duration of this function a stale backend still looks active, and a status
+	// frame decoded just before Close could publish RunningState after the new
+	// backend went live. A daemon engine has no generation counter; this flag is
+	// what gives it the equivalent "my epoch is over" test.
+	b.closed.Store(true)
 	if b.cancel != nil {
 		b.cancel()
 	}
@@ -702,9 +868,12 @@ func (b *DaemonBackend) Close() {
 // refreshUI дёргает статус-виджеты после операций, которые могли не дать
 // перехода RunningState (Set дедуплицирует no-op вызовы).
 func (b *DaemonBackend) refreshUI() {
-	{
-		b.ac.ui().UpdateCoreStatus()
+	// Guarded like every sibling UI call in this file (StopVPN, StartVPNContext):
+	// the headless backend has no uiPort, and ac.ui() dereferences it.
+	if b.ac == nil || !b.ac.hasUI() {
+		return
 	}
+	b.ac.ui().UpdateCoreStatus()
 }
 
 // grpcConn лениво создаёт единственное gRPC-соединение (grpc.NewClient сам

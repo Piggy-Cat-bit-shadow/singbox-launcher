@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"singbox-launcher/backend/protocol"
@@ -64,6 +65,11 @@ type coreOpState struct {
 	// finished. Without it, a failure and a never-attempted start look identical
 	// from the outside, which is exactly why the user saw a bare "Start" button.
 	lastErr *core.StartFailure
+	// stopping is set while a stop has been accepted but not yet confirmed by
+	// the engine that owns the core. It exists because the daemon engine has no
+	// classic phase, so without it the wire state had no way to say "a stop is
+	// in progress" and reported `running` for the whole teardown.
+	stopping atomic.Bool
 }
 
 // beginOp records a start/stop request as in flight.
@@ -169,15 +175,33 @@ func (b *Backend) coreLifecycleState() string {
 		}
 	}
 
+	// An operation accepted but not yet settled outranks the running flag.
+	//
+	// This is the "stopping" case, and it is not cosmetic: while a stop is in
+	// flight the core is usually STILL ALIVE, so RunningState is legitimately
+	// true. Reporting "running" then would tell the UI there is nothing in
+	// progress, and the user would watch a screen that never acknowledges the
+	// stop they just requested. The daemon path additionally marks the stop
+	// explicitly, because its engine has no classic phase to carry it.
+	if b.ops.stopping.Load() || b.daemonStopping() {
+		return protocol.CoreStateStopping
+	}
+
 	kind, lastErr := b.ops.snapshot()
+	switch kind {
+	case "stop":
+		// Same reasoning as above, for the generic operation record.
+		return protocol.CoreStateStopping
+	case "start", "restart":
+		if b.ac != nil && b.ac.RunningState != nil && b.ac.RunningState.IsRunning() {
+			// The start already committed and the core is up: a lingering
+			// bookkeeping entry must not hide a working VPN behind "starting".
+			return protocol.CoreStateRunning
+		}
+		return protocol.CoreStateStarting
+	}
 	if b.ac != nil && b.ac.RunningState != nil && b.ac.RunningState.IsRunning() {
 		return protocol.CoreStateRunning
-	}
-	switch kind {
-	case "start", "restart":
-		return protocol.CoreStateStarting
-	case "stop":
-		return protocol.CoreStateStopping
 	}
 	if lastErr != nil {
 		return protocol.CoreStateError
@@ -186,6 +210,19 @@ func (b *Backend) coreLifecycleState() string {
 		return protocol.CoreStateError
 	}
 	return protocol.CoreStateStopped
+}
+
+// daemonStopping reports whether the daemon engine has an unconfirmed stop in
+// flight. The daemon has no classic phase, so this is its only way to say
+// "stopping" on the wire.
+func (b *Backend) daemonStopping() bool {
+	if b == nil || b.ac == nil {
+		return false
+	}
+	if s, ok := b.ac.Backend().(interface{ Stopping() bool }); ok {
+		return s.Stopping()
+	}
+	return false
 }
 
 // classicPhase reads the classic runtime phase, if the runtime is available.

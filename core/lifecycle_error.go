@@ -197,6 +197,50 @@ func (ac *AppController) RecordLifecycleError(code LifecycleErrorCode, operation
 	ac.publishLifecycleChange()
 }
 
+// BeginDaemonStop publishes "a stop has been accepted but is not yet confirmed".
+//
+// The daemon engine has no classic phase, so this is the only place the stop can
+// be recorded. Without it the wire state reported `running` for the whole
+// teardown — the core is genuinely still alive at that point, so nothing else in
+// the state derivation could tell that a stop was in progress.
+//
+// It deliberately does NOT touch RunningState: the core is still up, and
+// claiming otherwise before the daemon confirms it is the exact lie this seam
+// exists to prevent.
+func (ac *AppController) BeginDaemonStop() {
+	if ac == nil {
+		return
+	}
+	if b, ok := ac.Backend().(stopStateBackend); ok {
+		b.SetStopping(true)
+	}
+	ac.publishLifecycleChange()
+}
+
+// EndDaemonStop settles a daemon stop. confirmed=false keeps the "not stopped"
+// truth: the failure has already been recorded, and the state must continue to
+// show a running core rather than a stopped one.
+func (ac *AppController) EndDaemonStop(confirmed bool) {
+	if ac == nil {
+		return
+	}
+	if b, ok := ac.Backend().(stopStateBackend); ok {
+		b.SetStopping(false)
+	}
+	if confirmed {
+		// The daemon itself said the core is gone, so "stopped" is now an earned
+		// statement rather than an assumption. This is the only place the daemon
+		// path is allowed to clear the running flag.
+		ac.RunningState.Set(false)
+	} else {
+		// The core may still be up. Re-assert the running truth so a stale
+		// "stopped" cannot leak to the UI, and let the recorded error carry the
+		// explanation.
+		ac.RunningState.Set(true)
+	}
+	ac.publishLifecycleChange()
+}
+
 // EmitCoreStateChange nudges listeners that the core's state changed.
 //
 // Exported for paths that change the running state WITHOUT going through

@@ -486,12 +486,16 @@ func (ac *AppController) gracefulExit() {
 			}
 			select {
 			case <-timeout:
-				debuglog.WarnLog("GracefulExit: Timeout waiting for sing-box to stop. Forcing kill.")
-				ac.CmdMutex.Lock()
-				if ac.SingboxCmd != nil && ac.SingboxCmd.Process != nil {
-					_ = ac.SingboxCmd.Process.Kill()
+				// Identity-verified force stop, not a bare Process.Kill(): the raw
+				// signal could hit a recycled PID, and it could not reach a
+				// privileged root core at all (SingboxCmd is nil there), so the
+				// old code logged "Forcing kill" and left the TUN up.
+				debuglog.WarnLog("GracefulExit: Timeout waiting for sing-box to stop. Forcing verified stop.")
+				if ac.ProcessService != nil {
+					if !ac.ProcessService.ForceStopOwnedCore() {
+						debuglog.ErrorLog("GracefulExit: the core could not be confirmed stopped before exit")
+					}
 				}
-				ac.CmdMutex.Unlock()
 				break waitLoop
 			case <-ticker.C:
 				// Check state on each tick - continue loop to re-check IsRunning()
