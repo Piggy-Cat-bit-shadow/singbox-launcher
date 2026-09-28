@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"singbox-launcher/internal/swiftlogic"
 )
 
 // TestAsyncCompletionsNeverUseUnconditionalGoBack covers dimension 11 (no wrong
@@ -25,7 +27,7 @@ import (
 // Checking the split mechanically is the point: four call sites were fixed by
 // hand, and a fifth added later would reintroduce the defect silently.
 func TestAsyncCompletionsNeverUseUnconditionalGoBack(t *testing.T) {
-	root, err := filepath.Abs("../..")
+	root, err := swiftlogic.RepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,7 @@ func TestAsyncCompletionsNeverUseUnconditionalGoBack(t *testing.T) {
 // owner at all: it cannot know whether the user is still on the screen, because it
 // is not reacting to the user's action.
 func TestOnChangeDoesNotNavigate(t *testing.T) {
-	root, err := filepath.Abs("../..")
+	root, err := swiftlogic.RepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}

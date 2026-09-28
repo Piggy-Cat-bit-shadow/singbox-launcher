@@ -51,8 +51,23 @@ var Sources = []string{
 	"macos/Sources/JiejieBox/App/DraftStore.swift",
 }
 
-// repoRoot locates the checkout from this package's own path, so the harness
-// works regardless of the test's working directory.
+// RepoRoot locates the checkout from THIS FILE's own path, so it works
+// regardless of the process's working directory.
+//
+// Not derived from the CWD: a `go test` run sets the working directory to the
+// package, but a compiled `.test` binary run by hand does not, and a check that
+// silently resolves to the wrong directory would either fail confusingly or — far
+// worse for a guard — find no files and pass.
+func RepoRoot() (string, error) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", fmt.Errorf("cannot determine the location of swiftlogic.go")
+	}
+	// <root>/internal/swiftlogic/swiftlogic.go -> <root>
+	return filepath.Dir(filepath.Dir(filepath.Dir(file))), nil
+}
+
+// repoRoot is the internal spelling used by the compiler helpers.
 func repoRoot() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {

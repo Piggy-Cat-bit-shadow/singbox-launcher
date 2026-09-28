@@ -6,12 +6,14 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"singbox-launcher/internal/swiftlogic"
 )
 
 // repoFile reads a file from the checkout.
 func repoFile(t *testing.T, rel string) string {
 	t.Helper()
-	root, err := filepath.Abs("../..")
+	root, err := swiftlogic.RepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}

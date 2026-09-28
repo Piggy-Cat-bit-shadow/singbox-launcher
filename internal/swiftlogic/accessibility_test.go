@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"singbox-launcher/internal/swiftlogic"
 )
 
 // TestIconOnlyButtonsCarryAnAccessibleName covers dimension 15 for the controls
@@ -21,7 +23,7 @@ import (
 // explicit `accessibilityLabel`. Checked across every view, so a new icon button
 // cannot quietly ship without one.
 func TestIconOnlyButtonsCarryAnAccessibleName(t *testing.T) {
-	root, err := filepath.Abs("../..")
+	root, err := swiftlogic.RepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
