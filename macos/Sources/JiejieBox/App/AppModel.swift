@@ -443,6 +443,38 @@ final class AppModel {
     private var pendingEvents: [BackendEvent] = []
     /// True while `pendingEvents` is awaiting its baseline.
     private var awaitingBaseline = false
+
+    /// Reloads the reducer deferred, so the event stream is never blocked by them.
+    ///
+    /// THE STREAM MUST NOT WAIT FOR A ROUND-TRIP. Events were consumed with
+    /// `for await event in stream { await self?.apply(event) }`, and `apply`
+    /// performed `/proxies`, `/groups`, `/subscriptions` and daemon-status
+    /// requests inline. Awaiting the loop body means the stream advances only as
+    /// fast as the slowest request: a `traffic_rate` tick arriving during a slow
+    /// `/proxies` is not delivered until it returns, so the speed display freezes
+    /// and every queued event lands in a burst afterwards. The events that report
+    /// LIVENESS queue behind the same request, so a wedged call also delays
+    /// learning that the backend is shutting down.
+    ///
+    /// The fix is to record WHAT needs reloading and let the stream continue, so
+    /// this is a set rather than a queue: ten `subscriptions_changed` events mean
+    /// one reload, not ten.
+    private var pendingReloads: Set<PendingReload> = []
+    /// The task performing the deferred reloads, if one is running.
+    ///
+    /// One at a time, deliberately. Overlapping reloads of the same resource can
+    /// land out of order, and the older response would then overwrite the newer
+    /// one — the exact staleness the sequence filter exists to prevent, arriving
+    /// through a different door.
+    private var reloadTask: Task<Void, Never>?
+
+    /// What the reducer can ask for without blocking the stream.
+    enum PendingReload: Hashable {
+        case groups
+        case proxies(group: String)
+        case subscriptions
+        case daemonStatus
+    }
     /// The in-flight bootstrap, if any.
     ///
     /// A second caller awaits the SAME task rather than starting a second
@@ -518,13 +550,17 @@ final class AppModel {
             let stream = await client.events()
             eventTask = Task<Void, Never> { [weak self] in
                 for await event in stream {
-                    await self?.apply(event)
+                    // NOT awaited: awaiting the reducer here would let any slow
+                    // request inside it back-pressure the whole stream. `apply`
+                    // returns as soon as it has applied the payload and recorded
+                    // what to reload; the reload itself runs on `reloadTask`.
+                    self?.apply(event)
                 }
             }
 
             let snapshot = try await client.snapshot()
             // Snapshot FIRST, then the events that raced it — never the reverse.
-            await applyBaseline(snapshot)
+            applyBaseline(snapshot)
 
             // The token that proves this bootstrap was not superseded or
             // cancelled while it ran.
@@ -1654,7 +1690,7 @@ final class AppModel {
     /// then the buffered events are filtered against its sequence and replayed.
     /// Applying a buffered event before the snapshot is what allowed a stale
     /// snapshot to overwrite a newer event.
-    private func applyBaseline(_ snapshot: AppSnapshot) async {
+    private func applyBaseline(_ snapshot: AppSnapshot) {
         // Buffer anything that arrives between here and the drain below.
         awaitingBaseline = true
         apply(snapshot)
@@ -1666,11 +1702,18 @@ final class AppModel {
         // delivered in order by the client, but sorting makes the replay
         // independent of that assumption rather than relying on it.
         for event in buffered.sorted(by: { $0.seq < $1.seq }) {
-            await apply(event)
+            apply(event)
         }
+        // The replay may have asked for reloads; run them once, coalesced.
+        drainPendingReloads()
     }
 
-    private func apply(_ event: BackendEvent) async {
+    /// Applies one event. DELIBERATELY NOT `async`.
+    ///
+    /// A non-async reducer cannot await a network round-trip, which is what keeps the event
+    /// stream moving. Anything that needs a request is recorded in `pendingReloads` and
+    /// performed by `drainPendingReloads()`.
+    private func apply(_ event: BackendEvent) {
         // An event from a session we are not following is DROPPED, not merged.
         //
         // This is the other half of the session rule. A late frame from a
@@ -1712,7 +1755,7 @@ final class AppModel {
                 // produced a failure on every core start — noise that looked
                 // like a defect in the app rather than a limit of the engine.
                 if status.state == .running && !wasRunning && proxiesSupported {
-                    await loadGroups()
+                    requestReload(.groups)
                 }
             }
         case BackendEventName.trafficRate:
@@ -1740,18 +1783,18 @@ final class AppModel {
             // the stale name in place and the list empty. loadGroups() re-picks
             // a valid group, then loads its nodes.
             if !selectedGroup.isEmpty || !groups.isEmpty {
-                await loadGroups()
+                requestReload(.groups)
             }
         case BackendEventName.proxySelectionChanged:
             if !selectedGroup.isEmpty {
-                await loadProxies(group: selectedGroup)
+                requestReload(.proxies(group: selectedGroup))
             }
         case BackendEventName.subscriptionsChanged:
             // Sources were edited, or a refresh changed their node counts and
             // status. Re-read so the Subscriptions screen and Home's count do
             // not keep showing a stale list. The query emits nothing, so this
             // cannot feed back on itself.
-            await loadSubscriptions()
+            requestReload(.subscriptions)
         case BackendEventName.daemonChanged:
             // The daemon's setup state changed underneath us (installed,
             // started, paired, removed). Without this the Daemon screen would
@@ -1759,7 +1802,7 @@ final class AppModel {
             // for a previous state would linger as if still valid — the user
             // would be told to run an invite command the service no longer
             // needs.
-            await loadDaemonStatus()
+            requestReload(.daemonStatus)
             // A command is only valid for the state that produced it: once the
             // daemon reports ready, a prepared install or invite command is
             // stale and would send the user to run something already done.
@@ -1778,6 +1821,65 @@ final class AppModel {
             }
         default:
             break
+        }
+    }
+
+    /// Records that a resource needs reloading, and starts the drain if idle.
+    ///
+    /// A SET, so repeated events collapse into one reload. Ten subscription changes during a
+    /// refresh are one fetch of the list, not ten.
+    private func requestReload(_ what: PendingReload) {
+        pendingReloads.insert(what)
+        drainPendingReloads()
+    }
+
+    /// Performs the pending reloads on a task, so the caller never waits.
+    ///
+    /// One task at a time: overlapping reloads of the same resource can land out of order,
+    /// and the older response would overwrite the newer one.
+    private func drainPendingReloads() {
+        guard reloadTask == nil, !pendingReloads.isEmpty else { return }
+        reloadTask = Task<Void, Never> { [weak self] in
+            await self?.runPendingReloads()
+        }
+    }
+
+    /// Runs the coalesced reloads, then clears the task so the next one can start.
+    ///
+    /// The set is copied and cleared BEFORE the requests run, so work requested while they
+    /// are in flight is not lost — it lands in a fresh set and is picked up by the next
+    /// drain rather than being silently dropped by a clear at the end.
+    private func runPendingReloads() async {
+        while !pendingReloads.isEmpty {
+            let batch = pendingReloads
+            pendingReloads.removeAll()
+
+            // GROUPS BEFORE PROXIES. A rebuild can rename or remove selector groups, and
+            // loading nodes for a group that no longer exists fails, leaving the stale name
+            // in place and the list empty.
+            if batch.contains(.groups) {
+                await loadGroups()
+            }
+            for case let .proxies(group) in batch {
+                // Skip a group selection that a later event has already replaced: only the
+                // most recent request is worth a round-trip.
+                if group == selectedGroup {
+                    await loadProxies(group: group)
+                }
+            }
+            if batch.contains(.subscriptions) {
+                await loadSubscriptions()
+            }
+            if batch.contains(.daemonStatus) {
+                await loadDaemonStatus()
+            }
+        }
+        reloadTask = nil
+
+        // A request that arrived between the loop's last check and the task ending would
+        // otherwise sit in the set with nothing to run it.
+        if !pendingReloads.isEmpty {
+            drainPendingReloads()
         }
     }
 }
