@@ -8,10 +8,16 @@ import (
 	"io"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/internal/debuglog"
 )
+
+// ipcDrainTimeout bounds how long Serve waits for in-flight replies when it is
+// asked to finish. Short: the request that triggers a finish is the one that most
+// needs the loop to stop promptly.
+const ipcDrainTimeout = 3 * time.Second
 
 // Server speaks the JiejieBox JSON IPC protocol over a pair of streams.
 //
@@ -32,12 +38,51 @@ type Server struct {
 	// its own once teardown has been requested.
 	stopOnce sync.Once
 	stopCh   chan struct{}
+
+	// writeFailed closes when the output stream is broken. A client that can no
+	// longer be written to is a client that can no longer be served, and the
+	// backend must not keep running as if someone were listening.
+	writeOnce   sync.Once
+	writeFailed chan struct{}
+	// connCtx is cancelled when the connection fails, so in-flight work is
+	// abandoned instead of continuing to compute replies nobody will read.
+	connCtx    context.Context
+	connCancel context.CancelFunc
+
+	// inflight tracks running requests so shutdown can wait for the ones that
+	// are still producing replies, without blocking the read loop meanwhile.
+	inflight sync.WaitGroup
 }
 
 // NewServer wires a backend to its output stream.
 func NewServer(b *Backend, out io.Writer) *Server {
 	enc := json.NewEncoder(out)
-	return &Server{backend: b, out: out, enc: enc, stopCh: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Server{
+		backend: b, out: out, enc: enc,
+		stopCh:      make(chan struct{}),
+		writeFailed: make(chan struct{}),
+		connCtx:     ctx, connCancel: cancel,
+	}
+}
+
+// ConnContext is cancelled when this connection can no longer serve its client.
+//
+// Long handlers take it so that a client that has gone away does not leave the
+// backend computing a reply for nobody.
+func (s *Server) ConnContext() context.Context { return s.connCtx }
+
+// failConnection records that the client is unreachable.
+//
+// Called from the writer, where a failed encode is the only evidence that the
+// pipe is gone. It cancels in-flight work and asks the read loop to finish.
+func (s *Server) failConnection(reason string) {
+	s.writeOnce.Do(func() {
+		debuglog.WarnLog("backend ipc: connection failed (%s); tearing down", reason)
+		s.connCancel()
+		close(s.writeFailed)
+		s.requestStop()
+	})
 }
 
 // requestStop tells the read loop to finish.
@@ -64,7 +109,15 @@ func (s *Server) write(v any) {
 	defer s.mu.Unlock()
 	// json.Encoder.Encode appends the newline that delimits the frame.
 	if err := s.enc.Encode(v); err != nil {
-		debuglog.WarnLog("backend ipc: write failed: %v", err)
+		// A write failure is not a log line: it is the discovery that the client
+		// is gone. Previously the backend kept its subscriber attached,
+		// generating traffic and lifecycle events into a pipe nobody read, and a
+		// Classic core kept running with no frontend to stop it. The connection
+		// is now treated as failed, which cancels in-flight work and asks the
+		// read loop to finish so the normal EOF teardown runs.
+		s.mu.Unlock()
+		s.failConnection(err.Error())
+		s.mu.Lock()
 	}
 }
 
@@ -105,16 +158,24 @@ func (s *Server) Serve(in io.Reader) {
 	for {
 		var line []byte
 		select {
+		case <-s.writeFailed:
+			// The client is unreachable. Stop reading: nothing we parse can be
+			// answered, and finishing here lets the caller's teardown run.
+			debuglog.WarnLog("backend ipc: stopping the read loop after a write failure")
+			s.drain()
+			return
 		case <-s.stopCh:
 			if err := sc.Err(); err != nil {
 				debuglog.WarnLog("backend ipc: read failed: %v", err)
 			}
+			s.drain()
 			return
 		case next, ok := <-lines:
 			if !ok {
 				if err := sc.Err(); err != nil {
 					debuglog.WarnLog("backend ipc: read failed: %v", err)
 				}
+				s.drain()
 				return
 			}
 			line = next
@@ -134,12 +195,60 @@ func (s *Server) Serve(in io.Reader) {
 			}})
 			continue
 		}
-		resp := s.handle(req)
-		// A zero ID means the handler already wrote its own response (the
-		// shutdown ACK). Every other path sets the ID from the request.
-		if resp.ID != "" {
-			s.write(resp)
-		}
+		// DISPATCH MUST NOT BLOCK THE READ LOOP.
+		//
+		// This call used to run inline, which serialised every IPC method: while
+		// `start_core` waited on a config build, a password prompt or a daemon
+		// apply, the server did not read the next line at all. A `stop_core` the
+		// user then sent sat unread in the pipe, so "stop cancels start" was not
+		// a lifecycle bug to fix — the command never reached the controller. The
+		// same wait blocked shutdown, mode switches and group tests.
+		//
+		// The loop now hands each request to its own goroutine and returns to
+		// reading immediately. Ordering is preserved where it matters and
+		// nowhere else: methods that mutate one domain serialise inside that
+		// domain (the lifecycle controller for core operations, the apply mutex
+		// for the daemon, the subscription lock for state.json), and a request
+		// that wants to interrupt another is exactly the request that must NOT
+		// queue behind it. Responses carry their request id, so out-of-order
+		// replies are already expressible by the protocol.
+		s.inflight.Add(1)
+		go func(req protocol.Request) {
+			defer s.inflight.Done()
+			resp := s.handle(req)
+			// A zero ID means the handler already wrote its own response (the
+			// shutdown ACK). Every other path sets the ID from the request.
+			if resp.ID != "" {
+				s.write(resp)
+			}
+		}(req)
+	}
+}
+
+// drain waits for requests that were already dispatched to finish writing.
+//
+// Returning from Serve with handlers still running would let a caller observe an
+// incomplete response stream — the shutdown path in particular writes its ACK from
+// a handler, and a Serve that returned first would race that write. Waiting here
+// keeps the previous guarantee ("when Serve returns, every accepted request has
+// been answered") while still letting the loop dispatch concurrently, which is the
+// property the read loop needed.
+//
+// Requests that have NOT yet been read are simply never dispatched: the loop stops
+// reading the moment it is asked to finish, so a client cannot have a reply
+// outstanding for a line the server never took.
+func (s *Server) drain() {
+	done := make(chan struct{})
+	go func() {
+		s.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(ipcDrainTimeout):
+		// A handler is wedged. Losing the reply is better than hanging the exit,
+		// which is the whole reason the loop is allowed to finish early.
+		debuglog.WarnLog("backend ipc: giving up on in-flight replies after %s", ipcDrainTimeout)
 	}
 }
 

@@ -412,7 +412,37 @@ final class AppModel {
     private var eventTask: Task<Void, Never>?
     /// Highest event sequence applied; events older than the snapshot are
     /// discarded so a late frame cannot roll the UI back.
+    ///
+    /// ONLY MEANINGFUL TOGETHER WITH `appliedSession`. The backend's sequence
+    /// restarts at 1 in every new process, so carrying this value across a
+    /// helper restart silently discards everything the new helper sends: its
+    /// events all compare as "older than what I already applied". The UI then
+    /// stops updating core state, traffic, selections and subscriptions until
+    /// the new helper has emitted more events than the previous one ever did.
     private var appliedSeq: Int64 = 0
+    /// The backend session `appliedSeq` belongs to.
+    ///
+    /// `nil` before the first snapshot. A sequence number is only comparable
+    /// against events from the SAME session, so a change of session resets the
+    /// high-water mark rather than being compared against it.
+    private var appliedSession: String?
+    /// Events that arrived before a snapshot established the baseline.
+    ///
+    /// THE BOOTSTRAP RACE, and why buffering is the only correct answer. The
+    /// stream is opened before the snapshot is requested, so an event can arrive
+    /// while the snapshot is still in flight. Applying it immediately and then
+    /// applying the snapshot on top is a rollback: the snapshot was composed at
+    /// an earlier sequence number and describes the OLDER state, so the newer
+    /// event is overwritten by stale data — and because that event has already
+    /// been consumed, it never arrives again. The UI stays wrong until the next
+    /// unrelated event.
+    ///
+    /// So events are held until a snapshot supplies the baseline, then the ones
+    /// the snapshot already covers are discarded and the rest are replayed in
+    /// order. Nothing is applied twice and nothing is lost.
+    private var pendingEvents: [BackendEvent] = []
+    /// True while `pendingEvents` is awaiting its baseline.
+    private var awaitingBaseline = false
     /// The in-flight bootstrap, if any.
     ///
     /// A second caller awaits the SAME task rather than starting a second
@@ -481,6 +511,10 @@ final class AppModel {
             // stream is finished first, so an event can never be delivered to
             // two consumers after a restart.
             eventTask?.cancel()
+            // Events may arrive from here on, before any baseline exists. They
+            // are buffered by `apply` and replayed after the snapshot lands.
+            awaitingBaseline = true
+            pendingEvents.removeAll()
             let stream = await client.events()
             eventTask = Task<Void, Never> { [weak self] in
                 for await event in stream {
@@ -489,7 +523,8 @@ final class AppModel {
             }
 
             let snapshot = try await client.snapshot()
-            apply(snapshot)
+            // Snapshot FIRST, then the events that raced it — never the reverse.
+            await applyBaseline(snapshot)
 
             // The token that proves this bootstrap was not superseded or
             // cancelled while it ran.
@@ -548,6 +583,17 @@ final class AppModel {
     func stop() async {
         eventTask?.cancel()
         eventTask = nil
+        // Drop the session and everything buffered against it. The helper that
+        // produced that sequence is going away, and its numbers mean nothing to
+        // whatever helper starts next.
+        //
+        // Clearing here is a correctness requirement, not tidiness: a buffer
+        // left populated would be replayed against the NEXT session's snapshot
+        // and would apply a dead process's view of the world.
+        appliedSession = nil
+        appliedSeq = 0
+        pendingEvents.removeAll()
+        awaitingBaseline = false
         await client.shutdown()
         connection = .idle
     }
@@ -1529,14 +1575,77 @@ final class AppModel {
     // MARK: - Applying backend state
 
     private func apply(_ snapshot: AppSnapshot) {
+        // A snapshot from a DIFFERENT backend session re-baselines everything.
+        //
+        // This is the fix for the restarted-helper blackout. `appliedSeq` is a
+        // high-water mark for one process's counter; when a new helper starts,
+        // its counter is back at 1, and comparing 1 against the old process's
+        // mark of (say) 137 discards the new helper's first 137 events.
+        //
+        // Resetting here rather than only in `start()` also covers the paths
+        // that never call `stop()` first: a crash the supervisor recovers from,
+        // a manual restart of the helper, and the initial connect.
+        if appliedSession != snapshot.session {
+            appliedSession = snapshot.session
+            appliedSeq = 0
+            // A new session invalidates any events buffered against the old
+            // one: they describe a process that has been replaced.
+            pendingEvents.removeAll()
+        }
+
         handshake = snapshot.handshake
         core = snapshot.core
         settings = snapshot.settings
         proxySummary = snapshot.proxy
+        // The snapshot reports the sequence it was taken at, so adopting it
+        // raises the mark to that point. Events at or below it are already
+        // reflected in the fields above.
         appliedSeq = max(appliedSeq, snapshot.snapshot_seq)
     }
 
+    /// Establishes the baseline from a snapshot, then drains the events that
+    /// raced it.
+    ///
+    /// The order is the whole point: the snapshot's fields are installed FIRST,
+    /// then the buffered events are filtered against its sequence and replayed.
+    /// Applying a buffered event before the snapshot is what allowed a stale
+    /// snapshot to overwrite a newer event.
+    private func applyBaseline(_ snapshot: AppSnapshot) async {
+        // Buffer anything that arrives between here and the drain below.
+        awaitingBaseline = true
+        apply(snapshot)
+        let buffered = pendingEvents
+        pendingEvents.removeAll()
+        awaitingBaseline = false
+
+        // Replay in sequence order. The buffer is append-ordered, and events are
+        // delivered in order by the client, but sorting makes the replay
+        // independent of that assumption rather than relying on it.
+        for event in buffered.sorted(by: { $0.seq < $1.seq }) {
+            await apply(event)
+        }
+    }
+
     private func apply(_ event: BackendEvent) async {
+        // An event from a session we are not following is DROPPED, not merged.
+        //
+        // This is the other half of the session rule. A late frame from a
+        // backend that has already been replaced carries sequence numbers from
+        // that dead process's counter; comparing them against the current
+        // session's mark would let a dead helper's view of the world overwrite
+        // the live one — and because the numbers look plausible, nothing would
+        // catch it. `appliedSession == nil` means no baseline yet, and an event
+        // before the baseline is exactly the case the sequence cannot resolve.
+        guard let session = appliedSession, event.session == session else {
+            // No baseline yet: hold the event rather than applying it against a
+            // baseline that does not exist. Applying it now would let the
+            // snapshot that is still in flight — composed at an EARLIER
+            // sequence — overwrite it, and the event would never come again.
+            if awaitingBaseline && appliedSession == nil {
+                pendingEvents.append(event)
+            }
+            return
+        }
         // Drop anything the snapshot already covers.
         guard event.seq > appliedSeq else { return }
         appliedSeq = event.seq

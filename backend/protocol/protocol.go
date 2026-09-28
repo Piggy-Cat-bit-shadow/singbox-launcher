@@ -134,7 +134,23 @@ type Event struct {
 	// Seq is a monotonic sequence number, starting at 1 for each backend
 	// process. It lets the client detect gaps or reordering and discard an
 	// event older than the snapshot it already applied.
+	//
+	// SEQ IS ONLY MEANINGFUL WITHIN ITS SESSION. It restarts at 1 whenever the
+	// backend process does, so comparing a new process's `seq` against a high-water
+	// mark remembered from the previous one discards everything the new backend
+	// sends until it has emitted more events than the old one ever did. A client
+	// MUST scope its high-water mark to Session and reset it when Session changes.
 	Seq int64 `json:"seq"`
+	// Session identifies the backend PROCESS that emitted this event.
+	//
+	// It exists to make `seq` interpretable. Two different processes both count
+	// from 1, so without this a client cannot distinguish a fresh event from a
+	// late one belonging to a backend that has already been replaced — and both
+	// mistakes are real: dropping the new backend's events (the counter looks
+	// stale) or applying a dead backend's event (the counter looks current).
+	//
+	// Generated once per process; never reused or persisted.
+	Session string `json:"session"`
 	// Payload carries the event-specific body.
 	Payload any `json:"payload,omitempty"`
 }
@@ -248,7 +264,17 @@ type AppSnapshot struct {
 	// SnapshotSeq is the event sequence at the moment the snapshot was
 	// taken. Events with a lower Seq are already reflected here and must be
 	// discarded by the client.
+	//
+	// Like Event.Seq, this is only comparable against events from the SAME
+	// Session.
 	SnapshotSeq int64 `json:"snapshot_seq"`
+	// Session identifies the backend process that produced this snapshot.
+	//
+	// A client adopting a snapshot MUST adopt this session too: the snapshot is
+	// the baseline for one process's stream, and carrying a previous process's
+	// sequence across the boundary is precisely what makes a restarted backend
+	// appear silent.
+	Session string `json:"session"`
 	// Handshake repeats the version/capability block for convenience.
 	Handshake HandshakeResult `json:"handshake"`
 	// Core is the runtime state of the sing-box core.

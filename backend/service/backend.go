@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"singbox-launcher/backend/protocol"
 	"singbox-launcher/core"
 	"singbox-launcher/core/events"
@@ -45,7 +48,25 @@ type Backend struct {
 	mu sync.Mutex
 	// seq is the monotonic event sequence. It lets the frontend discard an
 	// event that predates the snapshot it already applied.
+	//
+	// It restarts at 1 for every backend process, which is why it is only ever
+	// interpreted together with sessionID.
 	seq int64
+	// runCtx is the parent of every background operation's context, cancelled
+	// once when the backend shuts down. See runContext.
+	runCtxOnce sync.Once
+	runCtx     context.Context
+	runCancel  context.CancelFunc
+	// sessionID identifies THIS backend process. It is generated once at
+	// construction and is never persisted or reused.
+	//
+	// It exists because `seq` is a per-process counter: without a session, a
+	// client that remembers a high-water mark across a helper restart discards
+	// every event the new backend sends (the counter looks stale) or applies a
+	// dead backend's late event (the counter looks current). Both are real
+	// bugs, and they have opposite fixes, so the ambiguity must be removed
+	// rather than guessed at.
+	sessionID string
 	// subscribers receive every emitted event. The IPC layer registers one
 	// writer; tests register their own.
 	subscribers []func(protocol.Event)
@@ -78,6 +99,33 @@ func (b *Backend) shutdownSignal() chan struct{} {
 	return b.shutdownStarted
 }
 
+// runContext returns a context that is cancelled when the backend shuts down.
+//
+// Every long-running background operation derives from this ONE context instead of
+// building its own watcher over the shutdown channel. The previous shape created a
+// context plus a "watch for shutdown and cancel" goroutine PER OPERATION, and
+// returned only the context — so the watcher goroutine could not be released until
+// the whole backend exited. A user who ran 200 latency tests accumulated 200 idle
+// goroutines, each parked on a channel that would not close for hours.
+//
+// Deriving from a shared parent removes the need for a watcher entirely: the
+// cancellation propagates through the context tree, so there is nothing to leak.
+func (b *Backend) runContext() context.Context {
+	b.runCtxOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		b.runCtx = ctx
+		b.runCancel = cancel
+		// The shutdown channel still exists for callers that select on it
+		// directly; this bridge is created ONCE for the whole backend rather than
+		// once per operation.
+		go func() {
+			<-b.shutdownSignal()
+			cancel()
+		}()
+	})
+	return b.runCtx
+}
+
 // Traffic returns the process-wide speed sampler.
 func (b *Backend) Traffic() *TrafficSampler {
 	b.trafficOnce.Do(func() { b.traffic = NewTrafficSampler(b) })
@@ -93,7 +141,7 @@ func New(layout paths.Layout) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &Backend{ac: ac}
+	b := &Backend{ac: ac, sessionID: newSessionID()}
 	b.installOwnershipPolicy()
 	b.watchCoreState()
 	// Let the runtime settle any operation still in flight as the app exits. The
@@ -179,6 +227,18 @@ func (b *Backend) watchCoreState() {
 		// the current one — a crash leaves no stop operation to settle, and the
 		// crash path keeps its own decision about restarting.
 		if !running {
+			// An in-flight latency test is measuring through a transport that no
+			// longer exists. Cancel it here rather than letting it run out its
+			// per-node timeouts against a dead socket: the results would be
+			// meaningless, and the work would keep the process busy during Quit.
+			//
+			// This is the wiring `CancelActive` documented but never had. The
+			// method existed with a comment claiming it was called on core stop,
+			// engine switch and shutdown, and grep found zero callers — so a core
+			// killed externally, a daemon FATAL, a mode switch and a backend
+			// shutdown all left the test running.
+			b.groupTests.CancelActive()
+
 			// The REASON travels with the transition, because "the flag went
 			// false" cannot distinguish a user stop from a restart's teardown —
 			// and the two require opposite responses.
@@ -243,11 +303,53 @@ func (b *Backend) Snapshot() protocol.AppSnapshot {
 
 	return protocol.AppSnapshot{
 		SnapshotSeq: seq,
+		Session:     b.SessionID(),
 		Handshake:   b.Handshake(),
 		Core:        b.coreState(),
 		Settings:    b.settingsState(),
 		Proxy:       b.proxySummary(),
 	}
+}
+
+// newSessionID mints an identifier for one backend process.
+//
+// Random rather than derived from the pid: a pid is recycled by the OS, and a
+// frontend that reconnects to a NEW process that happens to have the OLD
+// process's pid would then accept the previous session's sequence numbers —
+// reintroducing exactly the confusion the session exists to remove.
+func newSessionID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// A session id must still be unique even if the entropy source fails.
+		// The clock plus the pid is weaker, but it is strictly better than an
+		// empty string, which would make every process look like the same
+		// session and silently disable the defence.
+		debuglog.WarnLog("backend: cannot read random session id: %v", err)
+		return fmt.Sprintf("fallback-%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+// SessionID reports the identifier of this backend process.
+//
+// Stable for the lifetime of the process and different in every new one, so a
+// client can tell "the backend I am talking to" from "a backend that has been
+// replaced". A client MUST reset its event high-water mark when this changes.
+func (b *Backend) SessionID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Minted on first use rather than only in New, so that EVERY construction
+	// path has a session. A zero-value Backend (built directly by a test, or by
+	// any future caller) would otherwise report an empty session, and an empty
+	// session compares equal to another empty session — which silently disables
+	// the very defence this field provides.
+	//
+	// Still stable for the process's lifetime: it is written once, under the
+	// same lock every reader takes.
+	if b.sessionID == "" {
+		b.sessionID = newSessionID()
+	}
+	return b.sessionID
 }
 
 // proxySummary projects the current selection for the home screen.
@@ -536,7 +638,13 @@ func (b *Backend) Subscribe(fn func(protocol.Event)) func() {
 func (b *Backend) emit(name string, payload any) {
 	b.mu.Lock()
 	b.seq++
-	ev := protocol.Event{Event: name, Seq: b.seq, Payload: payload}
+	// The session is stamped here, under the same lock that hands out the
+	// sequence, so the pair (session, seq) is always consistent: no event can
+	// carry one process's sequence under another process's identity.
+	if b.sessionID == "" {
+		b.sessionID = newSessionID()
+	}
+	ev := protocol.Event{Event: name, Seq: b.seq, Session: b.sessionID, Payload: payload}
 	subs := make([]func(protocol.Event), 0, len(b.subscribers))
 	for _, fn := range b.subscribers {
 		if fn != nil {
@@ -617,6 +725,15 @@ func (b *Backend) Shutdown() {
 		}
 		started := time.Now()
 		debuglog.InfoLog("backend: shutdown requested")
+
+		// A latency test must not hold up the exit. Cancel it BEFORE the teardown
+		// begins, so its workers stop probing rather than being waited on.
+		//
+		// This belongs here rather than relying on the core-stop event above: the
+		// daemon backend can leave the core RUNNING across an app exit, so no
+		// "core stopped" transition is guaranteed to arrive — and the test would
+		// then outlive the shutdown that was supposed to cancel it.
+		b.groupTests.CancelActive()
 
 		if b.cancelCoreWatch != nil {
 			b.cancelCoreWatch()
@@ -722,6 +839,12 @@ func (b *Backend) SetCoreMode(mode string) error {
 			}
 		}
 	}
+
+	// A latency test is measuring through the engine that is about to be
+	// replaced. Cancel it BEFORE the switch so its workers stop probing a
+	// transport that is being torn down; left running, they would report
+	// latencies for an engine that no longer exists.
+	b.groupTests.CancelActive()
 
 	if err := b.ac.SwitchBackendMode(core.BackendMode(mode)); err != nil {
 		// The switch was refused (busy engine, unreachable daemon, …). Roll the

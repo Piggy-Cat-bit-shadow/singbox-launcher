@@ -760,6 +760,13 @@ struct SettingsState: Decodable {
 
 struct AppSnapshot: Decodable {
     let snapshot_seq: Int64
+    /// The backend process this snapshot came from.
+    ///
+    /// `snapshot_seq` is a per-process counter, so it is only comparable against
+    /// events carrying the SAME session. Adopting this alongside the sequence is
+    /// what lets a restarted helper be recognised as a new stream rather than
+    /// mistaken for a stale one.
+    let session: String
     let handshake: HandshakeResult
     let core: CoreStatus
     let settings: SettingsState
@@ -797,16 +804,19 @@ struct ProxySummary: Decodable {
 struct BackendEvent {
     let event: String
     let seq: Int64
+    /// The backend process that emitted this event. See `AppSnapshot.session`.
+    let session: String
     let payload: Data
 }
 
 extension BackendEvent: Decodable {
-    private enum CodingKeys: String, CodingKey { case event, seq, payload }
+    private enum CodingKeys: String, CodingKey { case event, seq, session, payload }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         event = try c.decode(String.self, forKey: .event)
         seq = try c.decode(Int64.self, forKey: .seq)
+        session = try c.decode(String.self, forKey: .session)
         // Round-trip the payload back to bytes; type is decided by the caller.
         if let value = try? c.decode(JSONValue.self, forKey: .payload) {
             payload = (try? JSONEncoder().encode(value)) ?? Data()

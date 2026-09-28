@@ -136,6 +136,8 @@ type groupTestManager struct {
 	mu     sync.Mutex
 	nextID uint64
 	active *proxyTestRun
+	// cancelHook observes cancellations in tests; nil in production.
+	cancelHook func()
 }
 
 // begin supersedes any active run and registers a new one.
@@ -196,15 +198,25 @@ func (m *groupTestManager) ActiveRunID() uint64 {
 
 // CancelActive cancels the active group test, if any.
 //
-// Called when the core stops, the engine mode switches, or the backend shuts
-// down: continuing to probe 20 nodes against a dead transport would keep the
-// process busy during Quit and could report results for an engine that is gone.
+// Called when the core stops (the transport is gone), when the engine mode
+// switches (the transport is about to be replaced) and when the backend shuts
+// down. Continuing to probe nodes against a dead or replaced transport would keep
+// the process busy during Quit and could report results for an engine that is no
+// longer running.
+//
+// WIRED, and the distinction matters: for a while this method's comment described
+// a design that did not exist, and it had no callers at all. See the tests that
+// drive a REAL cancellation trigger rather than calling it directly.
 func (m *groupTestManager) CancelActive() {
 	m.mu.Lock()
 	run := m.active
+	hook := m.cancelHook
 	m.mu.Unlock()
 	if run != nil {
 		run.cancel()
+	}
+	if hook != nil {
+		hook()
 	}
 }
 
@@ -550,15 +562,28 @@ func (b *Backend) RunGroupTest(ctx context.Context, group string) (ProxyGroupTes
 
 // testContext is the parent context for group tests: cancelled when the backend
 // shuts down, so Quit is never held up by a stuck measurement.
+//
+// It derives from the backend's SHARED run context rather than building its own.
+// The previous implementation created a fresh context plus a fresh "watch for
+// shutdown and cancel it" goroutine on EVERY call, and returned only the context:
+// the watcher had nothing to release it until the whole backend exited, so each
+// test leaked a goroutine for the lifetime of the process. Two hundred latency
+// tests meant two hundred parked goroutines.
+//
+// Sharing the parent removes the watcher entirely — cancellation propagates
+// through the context tree, so there is nothing left to leak.
 func (b *Backend) testContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := b.shutdownSignal()
-	go func() {
-		select {
-		case <-done:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
+	return b.runContext()
+}
+
+// setHookForTest records a callback invoked whenever the active run is cancelled.
+//
+// It exists so the WIRING can be tested: the defect was not that cancellation did
+// not work, but that nothing ever asked for it. A test that called CancelActive
+// itself would pass with every call site deleted, so the hook lets a test trigger a
+// cancellation through its real cause and observe it from here.
+func (m *groupTestManager) setHookForTest(fn func()) {
+	m.mu.Lock()
+	m.cancelHook = fn
+	m.mu.Unlock()
 }

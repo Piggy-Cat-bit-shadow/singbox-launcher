@@ -50,3 +50,18 @@ func (ac *AppController) SetBackendForTest(b CoreBackend) {
 	}
 	ac.setBackend(b)
 }
+
+// LegacyBackendForTest exposes the live classic backend so an IPC-layer test can
+// install process-level overrides on the SAME object the production call chain
+// reaches.
+//
+// Returning the backend rather than replacing it is deliberate: the test must
+// exercise the real StartVPNContext → LegacyBackend → operation-record path, and
+// only substitute the process step at the bottom.
+func (ac *AppController) LegacyBackendForTest() (*LegacyBackend, bool) {
+	if ac == nil {
+		return nil, false
+	}
+	b, ok := ac.Backend().(*LegacyBackend)
+	return b, ok
+}
