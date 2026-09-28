@@ -136,3 +136,87 @@ func TestLogOffsetsDoNotAccumulate(t *testing.T) {
 			"pruned and a long session leaks memory", size)
 	}
 }
+
+// --- W: staleness is decided by content, not by a clock ---------------------
+
+// TestFastStateEditStillMarksConfigStale is claim W.
+//
+// The staleness check compared mtimes with a ONE-SECOND tolerance. A config built
+// and then changed 500 ms later has a newer state than config but a difference
+// under a second, so the launcher reported "not stale" and never offered the
+// rebuild. Hand edits and fast wizard saves land exactly in that window.
+//
+// A content digest has no such window: identical bytes are identical, and any
+// change to them is visible immediately however fast it was made.
+func TestFastStateEditStillMarksConfigStale(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	original := []byte(`{"route":{"final":"proxy-out"}}`)
+	if err := os.WriteFile(configPath, original, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := writeBuildRevision(configPath, original); err != nil {
+		t.Fatalf("writeBuildRevision: %v", err)
+	}
+
+	// Unchanged content is not stale, whatever the timestamps say.
+	if stale, known := ConfigIsStaleVersusRecorded(configPath); !known || stale {
+		t.Fatalf("an untouched config reported stale=%v known=%v", stale, known)
+	}
+
+	// A change made IMMEDIATELY — far inside the old one-second tolerance — must
+	// still be visible.
+	edited := []byte(`{"route":{"final":"direct"}}`)
+	if err := os.WriteFile(configPath, edited, 0o644); err != nil {
+		t.Fatalf("edit config: %v", err)
+	}
+
+	stale, known := ConfigIsStaleVersusRecorded(configPath)
+	if !known {
+		t.Fatal("no revision was recorded, so the check fell back to mtime and the " +
+			"fast edit would be missed")
+	}
+	if !stale {
+		t.Fatal("a config edited immediately after the build was reported FRESH; the " +
+			"launcher would never offer the rebuild and the core would keep running " +
+			"the old config")
+	}
+}
+
+// TestStalenessIsUnknownWithoutARevisionMarker — an install predating the marker
+// must fall back to the legacy check rather than claim freshness it cannot know.
+func TestStalenessIsUnknownWithoutARevisionMarker(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, known := ConfigIsStaleVersusRecorded(configPath); known {
+		t.Fatal("a config with no recorded revision reported a KNOWN verdict; there is " +
+			"nothing to compare against, so the caller must use the legacy fallback")
+	}
+}
+
+// TestRevisionMarkerIsStableAcrossRereads — the digest must depend only on the
+// content, or every rebuild would look like a change.
+func TestRevisionMarkerIsStableAcrossRereads(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.json")
+	b := filepath.Join(dir, "b.json")
+	content := []byte(`{"outbounds":[]}`)
+
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		if err := writeBuildRevision(p, content); err != nil {
+			t.Fatalf("writeBuildRevision %s: %v", p, err)
+		}
+	}
+
+	if ra, rb := configRevision(a), configRevision(b); ra != rb {
+		t.Fatalf("identical content produced different revisions: %s vs %s", ra, rb)
+	}
+	if stale, known := ConfigIsStaleVersusRecorded(a); !known || stale {
+		t.Fatalf("a freshly recorded config reported stale=%v known=%v", stale, known)
+	}
+}

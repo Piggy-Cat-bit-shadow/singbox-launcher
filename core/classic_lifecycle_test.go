@@ -1092,7 +1092,7 @@ func TestPrivilegedExitDoesNotCrashWhenSupersededDuringRestart(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		(&ProcessService{ac: ac}).onPrivilegedScriptExited()
+		(&ProcessService{ac: ac}).onPrivilegedScriptExited(ac.classic.currentGeneration())
 		close(done)
 	}()
 
@@ -1158,5 +1158,76 @@ func TestNoDeferredUnlockWhereTheLockIsReleasedMidBody(t *testing.T) {
 			t.Errorf("%s no longer releases the mutex by hand; this test is now "+
 				"checking the wrong shape and should be revisited", fn)
 		}
+	}
+}
+
+// --- P: a generation's exit must be applied to THAT generation --------------
+
+// TestPrivilegedWrapperExitDoesNotImplyCoreExit is claim P, in its real form.
+//
+// The handler used to read the CURRENT generation and then check `isCurrent` on
+// that same value — a tautology, true by construction, so the guard could never
+// fire. The caller knew which generation's wrapper had exited and threw that
+// knowledge away at the call boundary, so the handler then cleared ownership and
+// phase for whichever generation happened to be current.
+//
+// The generation is now a parameter, so the two facts can actually disagree.
+func TestPrivilegedWrapperExitDoesNotImplyCoreExit(t *testing.T) {
+	ac := newTestController()
+
+	// A generation that owns the runtime, and a later one that does not own the
+	// exiting wrapper.
+	oldGen := ac.classic.currentGeneration()
+	ac.classic.setPhase(oldGen, ClassicRunning)
+
+	// The NEW generation is the current one, and privileged mode is set — so a
+	// handler that reads the current generation instead of using its argument
+	// will find everything "current" and happily apply the exit.
+	newGen := ac.classic.renewGeneration()
+	ac.classic.setPhase(newGen, ClassicRunning)
+	ac.SingboxPrivilegedMode = true
+
+	// The OLD wrapper exits now.
+	svc := &ProcessService{ac: ac}
+	svc.onPrivilegedScriptExited(oldGen)
+
+	if got := ac.ClassicPhase(); got != ClassicRunning {
+		t.Fatalf("a stale generation's exit moved the live runtime to %q; a process "+
+			"that died in a world the user already left must not report on the "+
+			"world that replaced it", got)
+	}
+	if !ac.SingboxPrivilegedMode {
+		t.Fatal("a stale generation's exit cleared the LIVE generation's privileged " +
+			"mode; the running root core is now unowned, so nothing can stop it")
+	}
+}
+
+// TestPrivilegedExitOfTheCurrentGenerationStillApplies — the guard must not
+// become an unconditional refusal, or a real exit would never be handled.
+//
+// Driven through the user-stop branch because that is the one that returns
+// without attempting a restart: a restart would launch a real start, which is a
+// different concern and would make this test depend on the whole start pipeline
+// instead of on the generation check it is about.
+func TestPrivilegedExitOfTheCurrentGenerationStillApplies(t *testing.T) {
+	ac := newTestController()
+	ac.SingboxPrivilegedMode = true
+	ac.StoppedByUser = true
+
+	gen := ac.classic.currentGeneration()
+	ac.classic.setPhase(gen, ClassicRunning)
+
+	svc := &ProcessService{ac: ac}
+	svc.onPrivilegedScriptExited(gen)
+
+	if got := ac.ClassicPhase(); got != ClassicStopped {
+		t.Fatalf("the CURRENT generation's exit was ignored; the runtime would stay "+
+			"reported as running after its process died (phase %q)", got)
+	}
+	if ac.SingboxPrivilegedMode {
+		t.Fatal("privileged mode was left set after the owned process exited")
+	}
+	if ac.RunningState.IsRunning() {
+		t.Fatal("the runtime still reports running after the owned process exited")
 	}
 }

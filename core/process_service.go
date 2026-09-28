@@ -994,7 +994,7 @@ func (svc *ProcessService) startSingBoxPrivileged(gen uint64) error {
 				g, ac.classic.currentGeneration())
 			return
 		}
-		svc.onPrivilegedScriptExited()
+		svc.onPrivilegedScriptExited(g)
 	}(pids.Script, gen)
 
 	go ac.delayedAutoLoadProxies(gen)
@@ -1040,16 +1040,31 @@ func (ac *AppController) contextDone() <-chan struct{} {
 
 // onPrivilegedScriptExited is called when the privileged script process exits (Wait4 returned).
 // The script waits on sing-box, so when the script exits, sing-box has exited too.
-func (svc *ProcessService) onPrivilegedScriptExited() {
+// onPrivilegedScriptExited applies the exit of the wrapper process that owned
+// generation `gen`.
+//
+// THE GENERATION IS A PARAMETER, NOT A LOOKUP. The previous version read
+// `currentGeneration()` and then checked `isCurrent()` on that same value — a
+// tautology that is true by construction, so the guard could never fire. The
+// caller's knowledge (which generation's process actually exited) was discarded at
+// the call boundary, and the function then wrote ownership and phase for whatever
+// generation happened to be current.
+//
+// The consequence is the one the check was written to prevent: a wrapper belonging
+// to a generation the user has already left — engine switched to the daemon, or
+// restarted — would be reported as the live one, clearing a runtime it does not
+// own or triggering a restart for a world that is gone.
+func (svc *ProcessService) onPrivilegedScriptExited(gen uint64) {
 	ac := svc.ac
-	// This runs from the waiter goroutine, which outlives the runtime that
-	// created it. The caller already checks the generation before invoking this;
-	// the check is repeated here because this function also has a direct call
-	// site in the privileged exit path, and a state write without it would let a
-	// dead generation clear a live one's ownership.
-	gen := ac.classic.currentGeneration()
+	if ac == nil {
+		return
+	}
+	// This function still has a direct call site in the privileged exit path, so
+	// the check lives here as well as in the waiter goroutine: a state write
+	// without it would let a dead generation clear a live one's ownership.
 	if !ac.classic.isCurrent(gen) {
-		debuglog.InfoLog("onPrivilegedScriptExited: stale generation %d, ignoring", gen)
+		debuglog.InfoLog("onPrivilegedScriptExited: stale generation %d, ignoring (current=%d)",
+			gen, ac.classic.currentGeneration())
 		return
 	}
 	// NO deferred Unlock in this function.
@@ -2479,7 +2494,7 @@ func (svc *ProcessService) superviseLatePrivilegedStart(gen uint64, corePath str
 		if !svc.ac.classic.isCurrent(g) {
 			return
 		}
-		svc.onPrivilegedScriptExited()
+		svc.onPrivilegedScriptExited(g)
 	}(res.Script, gen)
 	svc.ac.EmitCoreStateChange()
 }

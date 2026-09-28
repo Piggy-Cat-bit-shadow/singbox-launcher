@@ -42,6 +42,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"crypto/sha256"
+	"encoding/hex"
 	"singbox-launcher/core/config"
 	"singbox-launcher/core/corereject"
 	"singbox-launcher/core/events"
@@ -232,6 +234,69 @@ func promoteCandidate(candidate, configPath string) error {
 	return nil
 }
 
+// buildRevisionPath is where the digest of the last promoted config lives.
+//
+// A sibling of config.json rather than a field inside state.json, because the two
+// files are written by different subsystems and a reader that has one must not
+// need to parse the other's schema.
+func buildRevisionPath(configPath string) string {
+	return configPath + ".rev"
+}
+
+// writeBuildRevision records the digest of the config bytes that were promoted.
+func writeBuildRevision(configPath string, data []byte) error {
+	sum := sha256.Sum256(data)
+	return os.WriteFile(buildRevisionPath(configPath),
+		[]byte(hex.EncodeToString(sum[:])), platform.DefaultFileMode)
+}
+
+// readBuildRevision returns the recorded digest, or "" when none was recorded.
+//
+// An empty result is NOT "unchanged": it means this install predates the marker,
+// and the caller must fall back to the older check rather than assume freshness.
+func readBuildRevision(configPath string) string {
+	b, err := os.ReadFile(buildRevisionPath(configPath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// configRevision returns the digest of the config currently on disk, or "" when it
+// cannot be read.
+//
+// Reading the CONTENT rather than trusting the marker is what closes the gap the
+// marker alone would leave: a config edited by hand, or by an older launcher, has
+// no matching marker, and comparing recorded-against-recorded would call that
+// pair equal while the bytes on disk had changed.
+func configRevision(configPath string) string {
+	b, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// ConfigIsStaleVersusRecorded reports whether config.json differs from the config
+// the last build promoted.
+//
+// Returns (stale, known). `known` is false when no revision was ever recorded, so
+// the caller can fall back to the legacy mtime comparison instead of guessing.
+func ConfigIsStaleVersusRecorded(configPath string) (stale bool, known bool) {
+	recorded := readBuildRevision(configPath)
+	if recorded == "" {
+		return false, false
+	}
+	current := configRevision(configPath)
+	if current == "" {
+		// The config is unreadable: that is a problem for the caller to report,
+		// not a freshness verdict.
+		return false, false
+	}
+	return recorded != current, true
+}
+
 // removeCandidate — уборка за собой, best-effort.
 func removeCandidate(path string) {
 	if path == "" {
@@ -342,6 +407,21 @@ func (l *coreRejectLoop) run(first buildRound, rebuild func() (buildRound, error
 			if err := promoteCandidate(candidate, l.configPath); err != nil {
 				removeCandidate(candidate)
 				return out, err
+			}
+			// Record a CONTENT identity for the bytes just promoted.
+			//
+			// This is what makes "is the config stale?" answerable. The old check
+			// compared mtimes with a one-second tolerance, so a config edited
+			// 500 ms after it was built looked fresh — the launcher never offered
+			// the rebuild, and nothing else could notice, because mtime carries no
+			// information about WHAT was written.
+			//
+			// Best-effort: a failure to write the marker must not fail a build that
+			// already succeeded. A missing revision degrades the staleness check to
+			// the legacy mtime comparison, which is exactly the behaviour before
+			// this marker existed.
+			if err := writeBuildRevision(l.configPath, round.ConfigJSON); err != nil {
+				debuglog.WarnLog("coreRejectLoop: config written but its revision marker was not: %v", err)
 			}
 			out.Promoted = true
 			return out, nil

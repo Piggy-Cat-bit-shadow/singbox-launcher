@@ -417,9 +417,25 @@ func (b *Backend) stateNewerThanConfig() bool {
 		return false
 	}
 
-	// A one-second tolerance absorbs the same-instant write ordering when a
-	// rebuild saves state and config back to back.
-	return stateInfo.ModTime().Sub(configInfo.ModTime()) > time.Second
+	// MOTIME IS NOT A CONSISTENCY SOURCE, and the one-second tolerance made the
+	// check miss real edits: a config built and then modified 500 ms later has a
+	// NEWER state than config, but the difference is under a second, so the
+	// launcher reported "not stale" and never offered the rebuild.
+	//
+	// The tolerance existed to absorb same-instant write ordering during a
+	// rebuild. That is a DISPLAY concern, and the durable answer is a content
+	// identity rather than a clock: if the recorded build revision differs from
+	// the state on disk, the config is out of date no matter how close the two
+	// timestamps are.
+	//
+	// mtime remains as a LEGACY fallback for installs that predate the revision
+	// marker, where no revision has been recorded yet. It is deliberately
+	// conservative there: a strict inequality with no tolerance, because a false
+	// "stale" only offers a rebuild, while a false "fresh" hides one.
+	if stale, known := core.ConfigIsStaleVersusRecorded(b.ac.FileService.ConfigPath); known {
+		return stale
+	}
+	return stateInfo.ModTime().After(configInfo.ModTime())
 }
 
 // configExists reports whether config.json is present.
