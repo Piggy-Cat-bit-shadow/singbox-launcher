@@ -220,8 +220,96 @@ func BuildConfig(ctx BuildContext) (Result, error) {
 	b.WriteString(strings.Join(sections, ",\n"))
 	b.WriteString("\n}\n")
 
+	// Step 4: REFERENCE INTEGRITY, on the assembled document.
+	//
+	// This runs on the whole config rather than inside each section builder
+	// because the broken reference that started this (route.final pointing at a
+	// filtered-out outbound) is only visible once outbounds, route and DNS are
+	// in one object. Checking per section would have to re-derive the outbound
+	// tag set in three places and would drift from it.
+	//
+	// It runs AFTER the graph has settled, so the tag set it validates against
+	// is the final one — that is what makes "filter a node, fix the references"
+	// a single transaction instead of an emit-then-patch race.
+	if err := finalizeReferences(&b, &res, ctx.ForPreview); err != nil {
+		return Result{}, err
+	}
+
 	res.ConfigJSON = []byte(b.String())
 	return res, nil
+}
+
+// finalizeReferences validates and, where unambiguous, repairs the tag
+// references of the assembled config.
+//
+// On an unrepairable problem it returns an error, so BuildConfig FAILS rather
+// than returning a config the core will reject. That is deliberate: a build that
+// "succeeds" while producing an unroutable config is exactly how
+// `default outbound not found` reached a running system, where it surfaced as a
+// start failure with no connection to its cause.
+func finalizeReferences(b *strings.Builder, res *Result, forPreview bool) error {
+	cfg, err := decodeConfigObject([]byte(b.String()))
+	if err != nil {
+		return fmt.Errorf("reference integrity: assembled config: %w", err)
+	}
+
+	// PREVIEW is advisory, not activatable: it renders whatever the current
+	// draft state would produce, including node tags that the user has not saved
+	// into an outbound list yet, and its whole purpose is to show that draft.
+	// Enforcing activation-grade integrity there would make the preview refuse to
+	// render the very edits it exists to display.
+	//
+	// The same reasoning already governs CleanDanglingOutboundsInRouteRules,
+	// which is likewise skipped for preview. Activation paths (Save, Update,
+	// pre-start rebuild) are NOT preview and get the full check, so a dangling
+	// reference can never be written to disk from here.
+	if forPreview {
+		return nil
+	}
+
+	// The one safe automatic repair. Refused (ok=false) when there is no
+	// surviving target, which is reported as a build error below.
+	if repairs, ok := RepairRouteFinal(cfg); len(repairs) > 0 {
+		for _, r := range repairs {
+			debuglog.WarnLog("build: reference repair: %s", r)
+			res.Validation.Warnings = append(res.Validation.Warnings, "reference repair: "+r)
+		}
+		// Re-render from the repaired object so the emitted bytes match what was
+		// validated; reusing the pre-repair string would emit a config that was
+		// never checked.
+		out, err := marshalConfigObject(cfg)
+		if err != nil {
+			return fmt.Errorf("reference integrity: re-render after repair: %w", err)
+		}
+		b.Reset()
+		b.Write(out)
+	} else if !ok {
+		return &ErrInvalidInputs{
+			Reason: "route.final points at an outbound that no longer exists, and no " +
+				"surviving outbound can take its place",
+		}
+	}
+
+	report := ValidateConfigReferences(cfg)
+	if !report.OK() {
+		// Every issue, not just the first: a user fixing a config needs the whole
+		// list, and a build log with one error per attempt is unusable.
+		return &ErrInvalidInputs{
+			Reason: "config has dangling references: " + report.Error(),
+		}
+	}
+	return nil
+}
+
+// marshalConfigObject renders the top-level config object with the same
+// formatting the section-based writer uses, so a repaired config is
+// byte-comparable with an unrepaired one.
+func marshalConfigObject(cfg map[string]interface{}) ([]byte, error) {
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // effectiveConfig возвращает эффективные секции и их порядок. При неудаче
