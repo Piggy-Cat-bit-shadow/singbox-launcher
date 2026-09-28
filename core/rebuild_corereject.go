@@ -313,13 +313,12 @@ func buildRevisionPath(configPath string) string {
 // mtime comparison — a self-inflicted degradation, in the same transaction as the
 // config, avoidable by using the same discipline the config already uses.
 func writeBuildRevision(configPath string, data []byte) error {
-	sum := sha256.Sum256(data)
 	path := buildRevisionPath(configPath)
 	// Through the shared atomic writer, like the config it describes. This marker's whole
 	// job is to be TRUSTWORTHY about the config's content, so a marker that can be left
 	// half-written — or blended with a concurrent writer's — defeats its own purpose: a
 	// torn digest matches nothing and reports the config as unverifiable.
-	return atomicfile.Write(path, []byte(hex.EncodeToString(sum[:])), platform.DefaultFileMode)
+	return atomicfile.Write(path, []byte(configContentDigest(data)), platform.DefaultFileMode)
 }
 
 // readBuildRevision returns the recorded digest, or "" when none was recorded.
@@ -346,7 +345,18 @@ func configRevision(configPath string) string {
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(b)
+	return configContentDigest(b)
+}
+
+// configContentDigest is THE identity of a config's bytes.
+//
+// There were three implementations of "hash this config" — one here, one in
+// `backend/service`, and one inline in the provenance marker — which is exactly the drift
+// that makes a comparison report divergence where there is none: two digests of the same
+// bytes disagree about nothing observable, and the only way to find out is to compare them.
+// One function, so agreement is by construction.
+func configContentDigest(data []byte) string {
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
 
