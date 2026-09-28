@@ -462,13 +462,29 @@ func (b *Backend) executeGroupTest(
 		// Store BEFORE emitting: the event tells the UI to re-read, so a
 		// measurement that arrived but was not yet stored would make the row
 		// flicker back to "unknown".
-		b.ac.APIService.SetMeasurement(outcome.Node.Name, coreservices.ProxyMeasurementState{
+		//
+		// THROUGH THE SUPERSESSION GUARD, LIKE EVERY OTHER MEASUREMENT.
+		//
+		// This used `SetMeasurement`, which writes unconditionally, while the single-test path
+		// used `RecordMeasurementIfNewer`. The asymmetry defeated the guard in both
+		// directions: a group result always overwrote a hand test's result — the exact
+		// clobbering the guard exists to prevent — and a hand test's own generation
+		// (`singleTestGenerationBase+n`, far above any group id) could never be superseded by
+		// a later group run, so a stale hand result outlived every refresh of it.
+		//
+		// A group id is a small counter and a single test's is above the base, so the ordering
+		// between the two spaces is total and the same comparison is correct for both. The
+		// outcome is logged when discarded rather than silently dropped.
+		if !b.ac.APIService.RecordMeasurementIfNewer(outcome.Node.Name, coreservices.ProxyMeasurementState{
 			Delay:      outcome.Delay,
 			Status:     outcome.Status,
 			Error:      outcome.Error,
 			MeasuredAt: outcome.MeasuredAt,
 			Generation: run.id,
-		})
+		}) {
+			debuglog.InfoLog("group test: discarding the result for %q from run %d — a newer "+
+				"measurement already holds that slot", outcome.Node.Name, run.id)
+		}
 
 		b.emit(protocol.EventProxyTestProgress, ProxyGroupTestProgress{
 			RunID: run.id, Group: run.group, Phase: ProxyTestPhaseResult,

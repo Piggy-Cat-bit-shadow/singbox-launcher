@@ -112,3 +112,80 @@ func TestUnnumberedMeasurementsDoNotSupersedeEachOther(t *testing.T) {
 		t.Fatalf("delay = %d, want 50", got.Delay)
 	}
 }
+
+// TestAGroupRunSupersedesAHAndTestAndViceVersa — the two generation spaces must be ORDERED
+// against each other, not just internally.
+//
+// Hand tests and group runs draw from separate ranges, and the group path used to write
+// through `SetMeasurement` — which does not compare at all — while the hand path used
+// `RecordMeasurementIfNewer`. The asymmetry broke the guard in BOTH directions:
+//
+//   - a group result always overwrote a hand test's fresher result, which is precisely the
+//     clobbering the guard exists to prevent;
+//   - and a hand test's generation sits far ABOVE every group id, so no later group run could
+//     ever supersede it: one hand test pinned a node's displayed latency against every
+//     subsequent refresh of it.
+//
+// Both writes go through the same comparison now, and this test drives it as one sequence
+// rather than testing each space alone — which is what let the asymmetry survive.
+func TestAGroupRunSupersedesAHandTestAndViceVersa(t *testing.T) {
+	svc := &APIService{}
+
+	// A group run reports first: a small generation.
+	if !svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 100, Status: MeasurementSuccess, Generation: 7,
+	}) {
+		t.Fatal("the first measurement was rejected on an empty slot")
+	}
+
+	// A hand test, from the single-test space, well above every group id. The base is
+	// declared in `backend/service`'s scheduler; the VALUE is duplicated here because this
+	// package is what must keep the two spaces ordered, and a test that imported the
+	// constant could not notice it being lowered to something a group id could reach.
+	const handGeneration = (1 << 62) + 1
+	if !svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 10, Status: MeasurementSuccess, Generation: handGeneration,
+	}) {
+		t.Fatal("a hand test could not supersede a group result, so the user's own test " +
+			"would be discarded as a late reply from the run it replaced")
+	}
+	if got, _ := svc.GetMeasurement("node"); got.Delay != 10 {
+		t.Fatalf("delay = %d, want the hand test's 10", got.Delay)
+	}
+
+	// A GROUP RUN MUST NOT OVERWRITE A NEWER HAND TEST. This is the direction that actually
+	// matters, and the one the asymmetry broke: the group path wrote unconditionally, so a
+	// scheduled run landing a second after the user pressed "test" replaced their result.
+	//
+	// The group id space and the hand-test space are deliberately ordered with hand tests
+	// ABOVE every group id, so a hand test is never superseded by a run. The price is that a
+	// group run cannot supersede a hand test either — that is the intended trade-off, not an
+	// oversight: a scheduled refresh is not more authoritative than a test the user just
+	// asked for, and the user can clear the result to let group runs back in.
+	if svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 999, Status: MeasurementSuccess, Generation: 8,
+	}) {
+		t.Fatal("a group run overwrote a hand test's NEWER result; the compare was bypassed, " +
+			"so a scheduled refresh silently replaces what the user just measured")
+	}
+	if got, _ := svc.GetMeasurement("node"); got.Delay != 10 {
+		t.Fatalf("delay = %d, want the hand test's 10", got.Delay)
+	}
+
+	// And the reverse order must still protect the newer result: an OLDER group run may not
+	// overwrite a newer hand test.
+	if !svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 5, Status: MeasurementSuccess, Generation: handGeneration + 1,
+	}) {
+		t.Fatal("a newer hand test was rejected")
+	}
+	if svc.RecordMeasurementIfNewer("node", ProxyMeasurementState{
+		Delay: 999, Status: MeasurementSuccess, Generation: 9,
+	}) {
+		t.Fatal("a group run numbered 9 overwrote a hand test numbered far above it; the two " +
+			"spaces are not ordered against each other")
+	}
+	if got, _ := svc.GetMeasurement("node"); got.Delay != 5 {
+		t.Fatalf("delay = %d, want the hand test's 5", got.Delay)
+	}
+}
