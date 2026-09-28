@@ -472,45 +472,14 @@ func (b *Backend) coreErrorInfo() (code, message string) {
 	return string(lastErr.Code), lastErr.Detail
 }
 
-// preconditionRefusal describes a start that was declined because a business
-// precondition was not met, in a form the headless frontend can act on.
-//
-// WHY THIS EXISTS. `core.ErrStartAborted` used to mean "a precondition declined
-// the start, and it has already explained itself" — and the explanation was
-// always a Fyne dialog. That is true on the GUI path and false on the IPC path:
-// with no `uiPort`, a missing privileged copy, a foreign core already running,
-// or absent Linux capabilities produced NO dialog and then `ErrStartAborted`,
-// which this layer deliberately suppressed. The user pressed Start, nothing
-// happened, and nothing said why. "Aborted" was being read as "already
-// explained" when on this path it meant "explained to nobody".
-//
-// So a precondition now carries its own reason, its stable code, and whether
-// anything was actually shown to a human. Silent means "nobody has been told",
-// and the refusal must travel to the frontend as a real error.
-type preconditionRefusal struct {
-	// Code is the stable token the frontend localizes.
-	Code core.StartErrorCode
-	// Message is the human-readable reason.
-	Message string
-	// Recoverable reports whether acting on the reason can make a retry work.
-	Recoverable bool
-	// Silent is true when the precondition did NOT show anything to the user,
-	// because there was no UI to show it in. Only a silent refusal is escalated
-	// to the frontend; one that already showed a dialog would otherwise produce
-	// a second, contradictory message.
-	Silent bool
-}
-
-// Error lets a refusal travel as an ordinary error.
-func (r *preconditionRefusal) Error() string { return r.Message }
+// preconditionRefusal re-exports core's refusal type under the name this file
+// uses, so the mapping lives in one place and the type itself is defined next to
+// the error taxonomy it belongs to.
+type preconditionRefusal = core.PreconditionRefusal
 
 // asPreconditionRefusal extracts a structured refusal, if the error carries one.
 func asPreconditionRefusal(err error) (*preconditionRefusal, bool) {
-	var r *preconditionRefusal
-	if errors.As(err, &r) {
-		return r, true
-	}
-	return nil, false
+	return core.AsPreconditionRefusal(err)
 }
 
 // asStartFailure and isStartAborted keep core's error taxonomy out of this

@@ -15,6 +15,7 @@ import (
 	"singbox-launcher/api"
 	"singbox-launcher/core/services"
 	"singbox-launcher/internal/debuglog"
+	"sort"
 )
 
 // Daemon-local Clash API fallback.
@@ -198,6 +199,37 @@ func (f *daemonClashFallback) transportIfReady() (services.ClashTransport, bool)
 // no fingerprint is available. The strongest achievable statement is the
 // conjunction below, which is why every term is required.
 func (f *daemonClashFallback) verify(ctx context.Context, expectedGroups []string) bool {
+	// HasSecret is derived from the CONFIGURED fallback, not asserted by the
+	// caller: the token in the config is what the request will actually carry, so
+	// it is the only honest source for "is there an auth proof".
+	return f.verifyWithProof(ctx, identityProof{
+		Groups:    expectedGroups,
+		HasSecret: f.hasSecret(),
+	})
+}
+
+// identityProof is what the launcher knows about the config it sent, and
+// therefore what it can demand of an endpoint claiming to be its core.
+//
+// It exists because "the group names match" is a WEAK claim: group names are
+// common (Proxy, AI, Auto), so a foreign Clash-compatible core on the same
+// loopback port can satisfy it by accident. With a high-entropy per-build secret
+// the auth check carries the proof; but the secret can legitimately be EMPTY, and
+// then nothing did.
+type identityProof struct {
+	// Groups are the selector/urltest tags of the config we sent.
+	Groups []string
+	// Members maps each group to its member set, so the comparison is about
+	// CONTENT rather than a name that can coincide.
+	Members map[string][]string
+	// HasSecret reports whether the request carried a non-empty token. When it
+	// did, the auth check is a real proof and the structural checks are a
+	// corroboration; when it did not, structure is the ONLY proof there is.
+	HasSecret bool
+}
+
+// verifyWithProof performs the identity check against a full proof.
+func (f *daemonClashFallback) verifyWithProof(ctx context.Context, proof identityProof) bool {
 	f.mu.Lock()
 	cfg, readiness := f.cfg, f.readiness
 	prober := f.probe
@@ -210,7 +242,7 @@ func (f *daemonClashFallback) verify(ctx context.Context, expectedGroups []strin
 		prober = defaultFallbackProber()
 	}
 
-	ok := prober.checkIdentity(ctx, cfg, expectedGroups)
+	ok := prober.checkIdentityProof(ctx, cfg, proof)
 	if !ok {
 		// Verification failure is NOT a permanent verdict: the listener may
 		// simply not be up yet. Readiness drops to unverified so the next use
@@ -241,20 +273,109 @@ type clashProxiesResponse struct {
 	} `json:"proxies"`
 }
 
-// checkIdentity performs one verification request.
+// checkIdentity performs one verification request against group names only.
+//
+// Kept because it is the shape the existing tests exercise, and it delegates so
+// there is exactly one implementation of the checks.
 func (p *fallbackProber) checkIdentity(ctx context.Context, cfg DaemonClashFallbackConfig, expectedGroups []string) bool {
+	// HasSecret comes from the config being checked, because THAT is what the
+	// request will carry — the caller does not get to assert it separately.
+	return p.checkIdentityProof(ctx, cfg, identityProof{
+		Groups:    expectedGroups,
+		HasSecret: cfg.Token != "",
+	})
+}
+
+// checkIdentityProof performs one verification request.
+//
+// FAIL CLOSED. The previous version accepted an endpoint whenever every expected
+// group name was present — and when `expectedGroups` was EMPTY, the loop checked
+// nothing at all and the function returned true. Any Clash-shaped API answering on
+// that loopback port with a matching (or absent) token therefore passed identity
+// verification, and with an empty secret there was no auth proof either. An empty
+// proof is not a satisfied proof.
+func (p *fallbackProber) checkIdentityProof(ctx context.Context, cfg DaemonClashFallbackConfig, proof identityProof) bool {
 	proxies, err := p.fetchProxies(ctx, cfg)
 	if err != nil {
 		debuglog.InfoLog("daemon: local Clash API fallback not confirmed: %v", err)
 		return false
 	}
-	// Expected selector groups must be present. This is what separates "the
-	// daemon's core" from "some other Clash-compatible API on the same port":
-	// the groups come from the config WE sent, so a mismatch means the running
-	// core is not running that config.
-	for _, g := range expectedGroups {
+
+	// An empty proof cannot establish identity, whatever else succeeded.
+	//
+	// A SECRET is itself a proof of possession, so a proof that carries one is
+	// never "empty": the authenticated request below is the evidence, and the
+	// structure checks corroborate it. Without a secret there is no such
+	// evidence, and then the structure must exist or nothing does.
+	if !proof.HasSecret && len(proof.Groups) == 0 && len(proof.Members) == 0 {
+		debuglog.WarnLog("daemon: local Clash API fallback refused: the request carries " +
+			"no secret and the config provides nothing to compare, so any " +
+			"Clash-compatible API on that port would be accepted")
+		return false
+	}
+
+	// Group NAMES must be present...
+	for _, g := range proof.Groups {
 		if _, ok := proxies.Proxies[g]; !ok {
 			debuglog.InfoLog("daemon: local Clash API fallback lacks expected group %q", g)
+			return false
+		}
+	}
+
+	// ...and, since a name can coincide by accident, their MEMBERS must match the
+	// config we actually sent. A foreign core with a group called "Proxy" will not
+	// have our member set.
+	checkedMembers := 0
+	for tag, wantMembers := range proof.Members {
+		got, ok := proxies.Proxies[tag]
+		if !ok {
+			debuglog.InfoLog("daemon: local Clash API fallback lacks expected group %q", tag)
+			return false
+		}
+		if len(wantMembers) == 0 {
+			continue
+		}
+		if !sameMemberSet(wantMembers, got.All) {
+			debuglog.WarnLog("daemon: local Clash API fallback group %q has members %v, "+
+				"but the config we sent defines %v", tag, got.All, wantMembers)
+			return false
+		}
+		checkedMembers++
+	}
+
+	// WITHOUT a secret, auth proves nothing, so the structural evidence has to
+	// carry the whole claim: at least one member set must have been compared.
+	//
+	// This is the case the original code got wrong. It accepted any endpoint whose
+	// group NAMES matched, and accepted EVERYTHING when the group list was empty —
+	// so a config with no selectors and no secret produced a proof that was not
+	// merely weak but vacuous, satisfied by any Clash-shaped listener on the port.
+	//
+	// With a secret, the authenticated request above already proves possession,
+	// and a config that genuinely has no selectors remains acceptable.
+	if !proof.HasSecret && checkedMembers == 0 {
+		debuglog.WarnLog("daemon: local Clash API fallback refused: the request carries " +
+			"no secret and the config provides no group members to compare, so the " +
+			"endpoint cannot be distinguished from any other Clash-compatible API")
+		return false
+	}
+	return true
+}
+
+// sameMemberSet compares two member lists as SETS.
+//
+// Clash reports members in its own order, and a selector's member list is what
+// actually identifies the config; order is not part of the claim.
+func sameMemberSet(want, got []string) bool {
+	if len(want) != len(got) {
+		return false
+	}
+	w := append([]string(nil), want...)
+	g := append([]string(nil), got...)
+	sort.Strings(w)
+	sort.Strings(g)
+	for i := range w {
+		if w[i] != g[i] {
 			return false
 		}
 	}
@@ -363,10 +484,16 @@ func redactURL(raw string) string {
 // use.
 //
 // expectedGroups is what the config says should exist; it is the evidence that
-// the endpoint belongs to the core running OUR config. An empty list means the
-// config declares no selector groups, in which case the group check is skipped
-// and the remaining checks (Clash shape + auth) still apply.
+// the endpoint belongs to the core running OUR config. The STRONGER proof is the
+// group MEMBER sets (identityProof): a name can coincide with a foreign core's,
+// a member set derived from the bytes we sent cannot. An empty proof is refused
+// outright — "nothing to check" is not "checked and passed".
 func (b *DaemonBackend) fallbackTransport(ctx context.Context, expectedGroups []string) (services.ClashTransport, bool) {
+	return b.fallbackTransportProof(ctx, identityProof{Groups: expectedGroups, HasSecret: b.clashFallback.hasSecret()})
+}
+
+// fallbackTransportProof is fallbackTransport with the full identity proof.
+func (b *DaemonBackend) fallbackTransportProof(ctx context.Context, proof identityProof) (services.ClashTransport, bool) {
 	if _, readiness := b.clashFallback.config(); readiness == fallbackBlocked ||
 		readiness == fallbackNotConfigured {
 		return services.ClashTransport{}, false
@@ -374,7 +501,7 @@ func (b *DaemonBackend) fallbackTransport(ctx context.Context, expectedGroups []
 	if tr, ok := b.clashFallback.transportIfReady(); ok {
 		return tr, true
 	}
-	if !b.clashFallback.verify(ctx, expectedGroups) {
+	if !b.clashFallback.verifyWithProof(ctx, proof) {
 		return services.ClashTransport{}, false
 	}
 	return b.clashFallback.transportIfReady()
@@ -390,9 +517,42 @@ func (b *DaemonBackend) expectedSelectorGroups() []string {
 	return b.expectedGroups
 }
 
+// hasSecret reports whether the configured fallback carries a non-empty token.
+//
+// The answer decides how much the structural checks have to prove: a real secret
+// is a proof of possession on its own, an empty one is not a proof of anything.
+func (f *daemonClashFallback) hasSecret() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cfg.Token != ""
+}
+
+// identityProofFor builds the full proof from what the last apply registered.
+//
+// The token presence is read from the fallback config, because THAT is what the
+// request will actually carry: "no secret" is precisely the case in which the
+// structural evidence has to carry the whole claim.
+func (b *DaemonBackend) identityProofFor() identityProof {
+	b.fallbackMu.Lock()
+	groups := append([]string(nil), b.expectedGroups...)
+	members := b.expectedMembers
+	b.fallbackMu.Unlock()
+
+	memberCopy := make(map[string][]string, len(members))
+	for k, v := range members {
+		memberCopy[k] = append([]string(nil), v...)
+	}
+
+	return identityProof{
+		Groups:    groups,
+		Members:   memberCopy,
+		HasSecret: b.clashFallback.hasSecret(),
+	}
+}
+
 // groupProxiesViaFallback lists nodes through the daemon's own Clash API.
 func (b *DaemonBackend) groupProxiesViaFallback(group string) ([]api.ProxyInfo, string, error) {
-	tr, ok := b.fallbackTransport(b.ctx, b.expectedSelectorGroups())
+	tr, ok := b.fallbackTransportProof(b.ctx, b.identityProofFor())
 	if !ok {
 		return nil, "", services.NewProxyCapabilityError(services.CapabilityList)
 	}

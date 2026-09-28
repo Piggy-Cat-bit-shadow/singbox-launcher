@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -112,6 +113,17 @@ type PreparedDaemonConfig struct {
 	// Считается здесь, а не отдельным чтением с диска: только так список
 	// групп гарантированно относится к тем же байтам, что уехали демону.
 	SelectorGroups []string
+
+	// SelectorMembers — для каждой группы из SelectorGroups её СОСТАВ.
+	//
+	// Проверять только ИМЯ группы — доказательство, которое легко подделать:
+	// чужое Clash-совместимое ядро на том же loopback-порту может иметь группы
+	// с такими же ходовыми именами (Proxy, AI, Auto). Состав же выведен из
+	// конфига, который отправили МЫ, и совпасть случайно не может.
+	//
+	// Нужен именно потому, что секрет может быть пустым: при пустом токене
+	// проверка подлинности не должна вырождаться в «на порту что-то есть».
+	SelectorMembers map[string][]string
 }
 
 // daemonPrepOptions — платформенные шаги подготовки конфига (SPEC 141 §7).
@@ -267,15 +279,60 @@ func prepareDaemonConfig(config []byte, runtimeDir string, opts daemonPrepOption
 	}
 
 	groups := selectorTags(root)
+	members := selectorMembers(root)
 
 	if !changed {
-		return PreparedDaemonConfig{Bytes: config, ProxyServer: proxyServer, ClashFallback: fallback, SelectorGroups: groups}, nil
+		return PreparedDaemonConfig{
+			Bytes: config, ProxyServer: proxyServer, ClashFallback: fallback,
+			SelectorGroups: groups, SelectorMembers: members,
+		}, nil
 	}
 	out, err := json.Marshal(root)
 	if err != nil {
 		return PreparedDaemonConfig{}, fmt.Errorf("marshal config: %w", err)
 	}
-	return PreparedDaemonConfig{Bytes: out, ProxyServer: proxyServer, ClashFallback: fallback, SelectorGroups: groups}, nil
+	return PreparedDaemonConfig{
+		Bytes: out, ProxyServer: proxyServer, ClashFallback: fallback,
+		SelectorGroups: groups, SelectorMembers: members,
+	}, nil
+}
+
+// selectorMembers maps each selector/urltest tag to its member list.
+//
+// Sorted, because Clash may report members in its own order and the comparison
+// is about the SET of members, not the sequence.
+func selectorMembers(root map[string]json.RawMessage) map[string][]string {
+	raw, ok := root["outbounds"]
+	if !ok {
+		return nil
+	}
+	var outbounds []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &outbounds); err != nil {
+		return nil
+	}
+	members := make(map[string][]string)
+	for _, o := range outbounds {
+		var typ, tag string
+		if v, ok := o["type"]; ok {
+			_ = json.Unmarshal(v, &typ)
+		}
+		if typ != "selector" && typ != "urltest" {
+			continue
+		}
+		if v, ok := o["tag"]; ok {
+			_ = json.Unmarshal(v, &tag)
+		}
+		if tag == "" {
+			continue
+		}
+		var list []string
+		if v, ok := o["outbounds"]; ok {
+			_ = json.Unmarshal(v, &list)
+		}
+		sort.Strings(list)
+		members[tag] = list
+	}
+	return members
 }
 
 // selectorTags collects the tags of selector outbounds in a prepared config.

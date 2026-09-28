@@ -42,6 +42,26 @@ const (
 	StartErrClashAPIPortInUse StartErrorCode = "clash_api_port_in_use"
 	// StartErrCancelled — the start was superseded or the user stopped it.
 	StartErrCancelled StartErrorCode = "cancelled"
+
+	// The PRECONDITION codes below report a start that was declined before it
+	// began, because something the launcher needs was not in place.
+	//
+	// They exist so the reason and its remedy can cross IPC. Every one of these
+	// situations previously ended in `ErrStartAborted`, which the service layer
+	// suppressed on the theory that "the precondition already explained itself" —
+	// true only on the GUI path, where a Fyne dialog had been shown. Headless,
+	// the user was told nothing at all.
+	//
+	// StartErrTunElevationRequired — the core needs administrator authorization.
+	StartErrTunElevationRequired StartErrorCode = "tun_elevation_required"
+	// StartErrPrivilegesRequired — the core lacks the capabilities it needs.
+	StartErrPrivilegesRequired StartErrorCode = "privileges_required"
+	// StartErrPrivilegedCopyUnavailable — the protected core copy is missing or
+	// stale, so the elevated launch cannot proceed safely.
+	StartErrPrivilegedCopyUnavailable StartErrorCode = "privileged_copy_unavailable"
+	// StartErrForeignCoreRunning — another sing-box already owns the machine, so
+	// starting a second one would fight it for the TUN device.
+	StartErrForeignCoreRunning StartErrorCode = "foreign_core_running"
 )
 
 // StartFailure carries a code plus the underlying cause.
@@ -138,4 +158,71 @@ func NewClassifiedStartFailure(code StartErrorCode, cause error) *StartFailure {
 		f.Code = ClassifyStartErrorText(code, cause.Error())
 	}
 	return f
+}
+
+// PreconditionRefusal reports that a start was declined because a business
+// precondition was not met — and, crucially, whether the user was TOLD.
+//
+// WHY THIS TYPE EXISTS. `ErrStartAborted` conflated two different statements:
+// "the user cancelled" and "a precondition declined, and it already explained
+// itself". The explanation was always a Fyne dialog, which is true on the GUI
+// path and false on the IPC path: with no `uiPort`, a foreign core already
+// running, a missing privileged copy, absent Linux capabilities or a TUN
+// elevation prompt produced NO dialog — and the service layer then suppressed
+// the error. The user pressed Start, nothing happened, and nothing said why.
+//
+// A refusal therefore carries its own reason, a stable code, and `Silent`, which
+// means "nobody has been told". Only a silent refusal is escalated to the
+// frontend, so a precondition that did show its own dialog does not produce a
+// second, contradictory message.
+type PreconditionRefusal struct {
+	// Code is the stable token the frontend localizes.
+	Code StartErrorCode
+	// Message is the human-readable reason.
+	Message string
+	// Recoverable reports whether acting on the reason can make a retry work.
+	Recoverable bool
+	// Silent is true when nothing was shown to the user, because there was no UI
+	// to show it in.
+	Silent bool
+	// cause is the underlying error, for logs.
+	cause error
+}
+
+// Error implements error, so a refusal travels as an ordinary error value and
+// keeps the wrapping/propagation behaviour callers already rely on.
+func (r *PreconditionRefusal) Error() string {
+	if r == nil {
+		return ""
+	}
+	return r.Message
+}
+
+// Unwrap exposes the cause to errors.Is/As, so a refusal does not hide the
+// underlying problem from a caller that wants to inspect it.
+func (r *PreconditionRefusal) Unwrap() error {
+	if r == nil {
+		return nil
+	}
+	return r.cause
+}
+
+// NewPreconditionRefusal builds a refusal that wraps cause.
+func NewPreconditionRefusal(code StartErrorCode, message string, recoverable, silent bool, cause error) *PreconditionRefusal {
+	return &PreconditionRefusal{
+		Code:        code,
+		Message:     message,
+		Recoverable: recoverable,
+		Silent:      silent,
+		cause:       cause,
+	}
+}
+
+// AsPreconditionRefusal extracts a refusal from an error chain, if present.
+func AsPreconditionRefusal(err error) (*PreconditionRefusal, bool) {
+	var r *PreconditionRefusal
+	if errors.As(err, &r) {
+		return r, true
+	}
+	return nil, false
 }

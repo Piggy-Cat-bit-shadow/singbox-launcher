@@ -115,6 +115,15 @@ func (id ProcessIdentity) String() string {
 type classicRuntime struct {
 	mu sync.Mutex
 
+	// logOffsets records, per generation, the size of the core log when that
+	// generation's core started. Crash classification reads only what was written
+	// AFTER it, so a fatal signature left by a previous core cannot be mistaken
+	// for the current exit's cause.
+	//
+	// Keyed by generation and pruned on renew, so the map cannot grow without
+	// bound across a long session.
+	logOffsets map[uint64]int64
+
 	// generation increments every time ownership of the classic engine is
 	// (re)established or abandoned. Async work captures it at creation and
 	// compares before acting.
@@ -286,6 +295,17 @@ func (r *classicRuntime) renewGeneration() uint64 {
 	r.restartRequested = false
 	r.crashAttempts = 0
 	r.exitClaimed = false
+	// Keep only the outgoing generation's offset: it is still needed if its
+	// monitor classifies an exit a moment after the renewal, and dropping the map
+	// entirely would silently restore the whole-tail behaviour.
+	if len(r.logOffsets) > 1 {
+		prev := r.generation - 1
+		for gen := range r.logOffsets {
+			if gen != prev {
+				delete(r.logOffsets, gen)
+			}
+		}
+	}
 	return r.generation
 }
 
@@ -295,6 +315,25 @@ func (ac *AppController) ClassicPhase() ClassicPhase {
 		return ClassicStopped
 	}
 	return ac.classic.currentPhase()
+}
+
+// noteLogOffset records where the core log stood when this generation started.
+func (r *classicRuntime) noteLogOffset(gen uint64, offset int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.logOffsets == nil {
+		r.logOffsets = make(map[uint64]int64)
+	}
+	r.logOffsets[gen] = offset
+}
+
+// logOffsetFor returns the recorded log offset for a generation, or 0 when none
+// was recorded — 0 meaning "classify the whole tail", which is the previous
+// behaviour and the only safe default when the boundary is unknown.
+func (r *classicRuntime) logOffsetFor(gen uint64) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.logOffsets[gen]
 }
 
 // SetClassicPhaseForTest installs a phase directly.

@@ -68,6 +68,10 @@ type DaemonBackend struct {
 	// expectedGroups — selector-теги конфига, который демон реально получил.
 	// Доказательство при проверке fallback-эндпоинта.
 	expectedGroups []string
+	// expectedMembers completes the identity proof. Group names alone can
+	// coincide with a foreign core's; members are derived from the config WE sent
+	// and cannot.
+	expectedMembers map[string][]string
 
 	// applyMu сериализует Start/Restart/Stop от дребезга кнопок.
 	applyMu sync.Mutex
@@ -584,7 +588,11 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	if isLocalDaemonAddress(b.admin.AddrString()) {
 		b.clashFallback.setConfigured(prepared.ClashFallback)
 		b.fallbackMu.Lock()
+		// Record the FULL proof, not just the group names: names are common
+		// enough to coincide by accident, and the secret may legitimately be
+		// empty, in which case structure is the only evidence there is.
 		b.expectedGroups = prepared.SelectorGroups
+		b.expectedMembers = prepared.SelectorMembers
 		b.fallbackMu.Unlock()
 	} else {
 		b.clashFallback.block()

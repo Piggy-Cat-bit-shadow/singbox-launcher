@@ -201,9 +201,57 @@ func (ac *AppController) classifyCoreExitReason() exitReason {
 		debuglog.DebugLog("classifyCoreExitReason: cannot read %s: %v", path, err)
 		return exitReasonUnknown
 	}
+
+	// ONLY THIS GENERATION'S OUTPUT COUNTS.
+	//
+	// The log is append-only across generations, so the tail can still contain a
+	// fatal signature written by a PREVIOUS core. The classifier would then read
+	// an old failure as this exit's cause and shut down auto-restart — an
+	// unrelated transient crash would be reported, and treated, as a
+	// deterministic config error that will never succeed.
+	//
+	// The offset recorded when this generation's core started is the boundary:
+	// text before it belongs to a world that is already over.
+	if start := ac.classic.logOffsetFor(ac.classic.currentGeneration()); start > 0 {
+		if skipped := skipToOffset(text, path, start); skipped >= 0 {
+			text = text[skipped:]
+		}
+	}
+
 	reason := classifyExitText(lastLines(text, 40))
 	debuglog.InfoLog("classifyCoreExitReason: %s (log %s)", reason, path)
 	return reason
+}
+
+// skipToOffset returns the index within `tail` at which the log content from
+// `offset` onward begins.
+//
+// `tail` is the last N bytes of the file, so the relevant part starts
+// (offset - (size - len(tail))) bytes into it. A negative result means the whole
+// tail is already newer than the offset — nothing to skip — and a start beyond
+// the tail means the offset is stale (the file was rotated or truncated), in
+// which case the caller keeps the whole tail rather than discarding evidence.
+func skipToOffset(tail, path string, offset int64) int {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	size := info.Size()
+	tailStart := size - int64(len(tail))
+	if tailStart < 0 {
+		tailStart = 0
+	}
+	skip := offset - tailStart
+	if skip <= 0 {
+		return -1
+	}
+	if skip >= int64(len(tail)) {
+		// The offset points past what we read: the tail is entirely from the
+		// previous generation, so there is no current-generation output to
+		// classify — an empty string is the honest answer, not the old text.
+		return len(tail)
+	}
+	return int(skip)
 }
 
 // coreLogTailBytes — сколько хвоста лога достаточно для классификации.
@@ -323,9 +371,13 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	skipCheck := len(skipRunningCheck) > 0 && skipRunningCheck[0]
 	if !skipCheck {
 		if svc.checkAndShowSingBoxRunningWarning("startSingBox") {
-			// The warning dialog was shown by the check itself; the start did not
-			// proceed. Canceled is the honest code — nothing failed.
-			return ErrStartAborted
+			// The dialog was shown by the check itself on the GUI path. Headless
+			// there is no dialog, so the refusal carries the reason: a second core
+			// would fight the running one for the TUN device.
+			return NewPreconditionRefusal(
+				StartErrForeignCoreRunning,
+				"another sing-box process is already running; stop it before starting the VPN",
+				true, ac.uiPort == nil, ErrStartAborted)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -377,6 +429,15 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		return nil
 	}
 	debuglog.InfoLog("startSingBox: starting (generation=%d op=%d)", startGen, startOpID)
+	// Record where the core log stands NOW, before this generation can write
+	// anything to it. Crash classification reads only what follows, so a fatal
+	// signature left by an earlier core cannot be mistaken for this exit's cause
+	// and shut down auto-restart for an unrelated transient failure.
+	if path := ac.CoreLogPath(); path != "" {
+		if info, err := os.Stat(path); err == nil {
+			ac.classic.noteLogOffset(startGen, info.Size())
+		}
+	}
 	// A new attempt supersedes the previous failure: keeping a stale error
 	// visible while a retry is already running would show the user a problem
 	// that may no longer exist.
@@ -412,7 +473,17 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 			ac.uiPort.ReportCoreStartAborted("")
 		}
 		ac.classic.setPhase(startGen, ClassicStopped)
-		return ErrStartAborted
+		// A STRUCTURED refusal, not a bare Aborted.
+		//
+		// The GUI knows why because it just showed the elevation dialog. The
+		// headless frontend has no uiPort, so `ErrStartAborted` meant "declined
+		// for reasons nobody will ever tell you" — the user pressed Start and the
+		// button returned to Start with no explanation. Silent says which of the
+		// two situations this is.
+		return NewPreconditionRefusal(
+			StartErrTunElevationRequired,
+			"starting the VPN needs administrator authorization on this system",
+			true, ac.uiPort == nil, nil)
 	}
 
 	// Check capabilities on Linux before starting
@@ -425,7 +496,10 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		ac.RecordLifecycleError(LifecycleErrPermission, "start",
 			"the core needs additional Linux capabilities", suggestion, false)
 		ac.classic.setPhase(startGen, ClassicFailed)
-		return ErrStartAborted
+		return NewPreconditionRefusal(
+			StartErrPrivilegesRequired,
+			"the core needs additional Linux capabilities",
+			true, ac.uiPort == nil, fmt.Errorf("%s", suggestion))
 	}
 
 	// Reload Clash API configuration from config.json before starting
@@ -448,8 +522,28 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	if runtime.GOOS == "darwin" {
 		hasTun, err := config.ConfigHasTun(ac.FileService.ConfigPath)
 		if err != nil {
-			debuglog.WarnLog("startSingBox: Could not check TUN in config: %v; assuming no TUN (no password).", err)
-			hasTun = false
+			// FAIL CLOSED: "I could not tell" is not "there is no TUN".
+			//
+			// This used to log and set hasTun = false, which silently chose the
+			// UNPRIVILEGED launch path. If the config does contain a TUN inbound —
+			// exactly the case where the check could not be performed — the core
+			// starts without the privileges it needs and fails in a confusing way
+			// far from the cause, or worse, appears to start and does not route.
+			//
+			// The configuration could not be read, so the launcher does not know
+			// what it is about to run. Refusing is the honest answer, and the
+			// reason travels to the frontend with a stable code instead of a
+			// dialog the headless build cannot show.
+			debuglog.ErrorLog("startSingBox: cannot determine whether the config uses TUN: %v", err)
+			// Recorded in the lifecycle store AND returned as a structured
+			// refusal, so the headless frontend learns the reason even though
+			// there is no dialog to show it in.
+			ac.RecordConfigError(LifecycleErrConfigRebuild, "start",
+				"the configuration could not be read", err.Error())
+			return NewPreconditionRefusal(
+				StartErrConfigRebuildFailed,
+				"the configuration could not be read, so the launcher cannot tell whether it needs TUN privileges",
+				true, false, err)
 		}
 		if hasTun {
 			if err := svc.startSingBoxPrivileged(startGen); err != nil {
@@ -457,7 +551,13 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 				// сообщает о себе сам, поэтому наружу уходит Aborted, а не
 				// вторая ошибка про то же самое.
 				if errors.Is(err, errPrivilegedCopyNotReady) {
-					return ErrStartAborted
+					// The gate showed its own dialog with the copy command on the
+					// GUI path; on the headless path nobody was told, so the
+					// refusal carries the reason and the remedy.
+					return NewPreconditionRefusal(
+						StartErrPrivilegedCopyUnavailable,
+						"the protected copy of the core is missing or out of date; run the copy command shown in the launcher",
+						true, ac.uiPort == nil, err)
 				}
 				return NewStartFailure(StartErrSpawnFailed, err)
 			}
@@ -475,7 +575,10 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 		path, logFile, err := ac.elevatedClassicStart()
 		if err != nil {
 			if errors.Is(err, errPrivilegedCopyNotReady) {
-				return ErrStartAborted
+				return NewPreconditionRefusal(
+					StartErrPrivilegedCopyUnavailable,
+					"the protected copy of the core is missing or out of date; run the copy command shown in the launcher",
+					true, ac.uiPort == nil, err)
 			}
 			return NewStartFailure(StartErrSpawnFailed, err)
 		}
@@ -579,12 +682,14 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	// would treat a first-run config error as a crash to be restarted.
 	go svc.promoteToRunningWhenReady(startGen, cmd, corePath)
 
-	// Start auto-loading proxies after sing-box is running
-	go func() {
-		// Small delay to ensure API is ready
-		<-time.After(2 * time.Second)
-		ac.AutoLoadProxies()
-	}()
+	// Start auto-loading proxies after sing-box is running.
+	//
+	// BOUND TO THE GENERATION. This goroutine sleeps past the point where the
+	// world can change: the core can be stopped, the engine switched, or a new
+	// generation started. Without the check it would then reload proxies against
+	// whatever backend is current — or against a core that is already gone —
+	// issuing a request the user never asked for, for a VPN that is not this one.
+	go ac.delayedAutoLoadProxies(startGen)
 
 	go svc.Monitor(ac.SingboxCmd)
 	return nil
@@ -892,11 +997,45 @@ func (svc *ProcessService) startSingBoxPrivileged(gen uint64) error {
 		svc.onPrivilegedScriptExited()
 	}(pids.Script, gen)
 
-	go func() {
-		<-time.After(2 * time.Second)
-		ac.AutoLoadProxies()
-	}()
+	go ac.delayedAutoLoadProxies(gen)
 	return nil
+}
+
+// autoLoadProxiesDelay is how long the proxy auto-load waits for the core's API
+// to come up. A constant so its tests and its callers agree on one value.
+const autoLoadProxiesDelay = 2 * time.Second
+
+// delayedAutoLoadProxies reloads the proxy list once the core's API should be
+// ready, but ONLY while the generation that asked for it still owns the runtime.
+//
+// The delay is what makes the check necessary rather than defensive: two seconds
+// is long enough for the user to press Stop, switch engines, or start a new core,
+// and the reload would then act on a runtime that never requested it.
+func (ac *AppController) delayedAutoLoadProxies(gen uint64) {
+	select {
+	case <-time.After(autoLoadProxiesDelay):
+	case <-ac.contextDone():
+		return
+	}
+	if !ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("delayedAutoLoadProxies: generation %d is stale (current=%d); not reloading proxies",
+			gen, ac.classic.currentGeneration())
+		return
+	}
+	if ac.RunningState == nil || !ac.RunningState.IsRunning() {
+		debuglog.InfoLog("delayedAutoLoadProxies: generation %d no longer has a running core; not reloading proxies", gen)
+		return
+	}
+	ac.AutoLoadProxies()
+}
+
+// contextDone returns a channel closed when the app context ends, or nil when
+// there is no context (the app is not shutting down).
+func (ac *AppController) contextDone() <-chan struct{} {
+	if ac == nil || ac.ctx == nil {
+		return nil
+	}
+	return ac.ctx.Done()
 }
 
 // onPrivilegedScriptExited is called when the privileged script process exits (Wait4 returned).
