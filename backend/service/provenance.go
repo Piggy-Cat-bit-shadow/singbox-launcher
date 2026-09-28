@@ -44,6 +44,9 @@ import (
 
 	"github.com/muhammadmuzzammil1998/jsonc"
 
+	"crypto/sha256"
+	"encoding/hex"
+	"singbox-launcher/core"
 	"singbox-launcher/internal/debuglog"
 )
 
@@ -86,6 +89,28 @@ type configProvenance struct {
 	BuiltAt string `json:"built_at,omitempty"`
 	// AppVersion records which build produced it, for support.
 	AppVersion string `json:"app_version,omitempty"`
+
+	// ConfigSHA256 binds the marker to the CONTENT it describes.
+	//
+	// THE POINT OF THE WHOLE FILE. "managed: true" says the launcher built a
+	// config here AT SOME TIME. It does not say the file present NOW is that
+	// config — and the gap between those two statements is where a user's manual
+	// edit gets silently deleted. A user who opens config.json and changes a
+	// route, a DNS setting or an outbound leaves `managed: true` untouched, so
+	// the next reload or start-rebuild is authorised to overwrite work the
+	// launcher never wrote.
+	//
+	// With the hash, ownership means "the launcher owns what is CURRENTLY here".
+	// A mismatch is not proof of a foreign tool: it is proof that the content
+	// changed, and the honest response is to ask rather than to assume.
+	ConfigSHA256 string `json:"config_sha256,omitempty"`
+	// BuildRevision records which generator produced the marked content.
+	//
+	// Distinct from AppVersion: the app can be reinstalled without the config
+	// generator changing, and the generator can change without the app version
+	// moving. When a rebuild would produce different bytes for the same state,
+	// this is what makes the difference explicable.
+	BuildRevision string `json:"build_revision,omitempty"`
 }
 
 // provenancePath returns the marker path for the active config.
@@ -153,6 +178,33 @@ func (b *Backend) configOwnership() ConfigOwnership {
 		return OwnershipUnknown
 	}
 	if *p.Managed {
+		// A marker that claims ownership without binding itself to any content
+		// cannot answer the question that matters. Either it predates content
+		// binding (an older marker format) or it was written by something that
+		// did not know what it was writing. Resolving it as MANAGED would grant
+		// permission to overwrite a file nobody has verified.
+		if p.ConfigSHA256 == "" {
+			debuglog.WarnLog("config provenance: marker %s claims ownership without a "+
+				"content hash; ownership cannot be verified", path)
+			return OwnershipUnknown
+		}
+		// The marker describes specific content. If the file no longer matches,
+		// the launcher does not own what is there now.
+		current, err := b.configContentHash()
+		if err != nil {
+			debuglog.WarnLog("config provenance: cannot hash the config: %v", err)
+			return OwnershipUnknown
+		}
+		if current != p.ConfigSHA256 {
+			// Deliberately NOT reported as external. The launcher cannot tell a
+			// user's own hand-edit from a foreign tool's rewrite, and accusing the
+			// user of being someone else is the same mistake this file already
+			// made once with historical configs. UNKNOWN is the honest answer: the
+			// UI explains and offers explicit adoption.
+			debuglog.InfoLog("config provenance: the config changed since the launcher " +
+				"wrote it; ownership is no longer verifiable")
+			return OwnershipUnknown
+		}
 		return OwnershipManaged
 	}
 	// An explicit `managed: false` is positive evidence of another owner. This
@@ -182,21 +234,103 @@ func (b *Backend) markConfigManaged() error {
 	if path == "" {
 		return nil
 	}
+	// Hash what is ACTUALLY on disk, not what the caller believed it wrote. If some
+	// other writer raced this one, the marker describes the winner's bytes and the
+	// next ownership check will correctly find them matching.
+	hash, err := b.configContentHash()
+	if err != nil {
+		debuglog.WarnLog("config provenance: cannot hash the config to mark it: %v", err)
+		return err
+	}
 	managed := true
 	p := configProvenance{
-		Managed:    &managed,
-		BuiltAt:    time.Now().UTC().Format(time.RFC3339),
-		AppVersion: b.Handshake().BackendVersion,
+		Managed:       &managed,
+		BuiltAt:       time.Now().UTC().Format(time.RFC3339),
+		AppVersion:    b.Handshake().BackendVersion,
+		ConfigSHA256:  hash,
+		BuildRevision: b.buildRevisionForProvenance(),
 	}
 	raw, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
+	// Atomic, for the same reason the config itself is: a marker truncated by an
+	// interruption is malformed JSON, which reads as UNKNOWN and leaves the user
+	// explaining a state the launcher inflicted on itself.
+	if err := writeFileAtomic(path, append(raw, '\n'), 0o644); err != nil {
 		debuglog.WarnLog("config provenance: cannot write %s: %v", path, err)
 		return err
 	}
-	debuglog.InfoLog("config provenance: marked %s as launcher-managed", filepath.Base(path))
+	debuglog.InfoLog("config provenance: marked %s as launcher-managed (sha256 %.12s)",
+		filepath.Base(path), hash)
+	return nil
+}
+
+// configContentHash is the SHA-256 of the config currently on disk.
+func (b *Backend) configContentHash() (string, error) {
+	if b.ac == nil || b.ac.FileService == nil || b.ac.FileService.ConfigPath == "" {
+		return "", fmt.Errorf("no config path")
+	}
+	raw, err := os.ReadFile(b.ac.FileService.ConfigPath)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// buildRevisionForProvenance reports the generator revision recorded alongside the
+// marked content. Empty when unavailable: the field is informational, and a missing
+// revision must not make the marker unusable.
+func (b *Backend) buildRevisionForProvenance() string {
+	if rev, ok := core.ReadBuildRevisionForService(b.ac.FileService.ConfigPath); ok {
+		return rev
+	}
+	return ""
+}
+
+// writeFileAtomic replaces path with content, via a temp file in the same directory
+// and a rename.
+//
+// The file is fsynced before the rename and the directory after it, so a crash
+// leaves either the old file or the new one — never a truncated one. Same directory
+// because rename is only atomic within a filesystem.
+func writeFileAtomic(path string, content []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// No-op once the rename has succeeded.
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Best-effort: the rename is already durable in the metadata as far as the app
+	// is concerned, and a failure to fsync the directory must not fail the write.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
@@ -343,4 +477,37 @@ func (b *Backend) buildCandidateConfig() ([]byte, error) {
 		return nil, fmt.Errorf("no app controller")
 	}
 	return b.ac.BuildConfigReadOnly()
+}
+
+// installConfigPromotionProvenance makes every config promotion record provenance.
+//
+// Called once when the backend is built. This is what closes the transaction hole:
+// rather than asking each rebuild caller to remember to mark ownership, the mark
+// happens at the one place a config can reach disk. A path that promotes a config
+// and forgets is no longer expressible.
+//
+// The marker is written for the bytes ACTUALLY promoted, so it can never describe
+// content other than what the build produced.
+func installConfigPromotionProvenance(b *Backend) {
+	if b == nil {
+		return
+	}
+	core.SetConfigPromotionHook(func(configPath string, promoted []byte) {
+		if b.ac == nil || b.ac.FileService == nil {
+			return
+		}
+		// Only for OUR config: a build into a check-only location must not
+		// claim ownership of a file the launcher did not install.
+		if configPath != b.ac.FileService.ConfigPath {
+			return
+		}
+		if err := b.markConfigManaged(); err != nil {
+			// Best-effort, exactly as the build-revision marker is: the build
+			// already succeeded, and failing it now would discard a valid config
+			// over a bookkeeping write. A missing marker degrades ownership to
+			// UNKNOWN, which is the safe direction.
+			debuglog.WarnLog("config provenance: the config was promoted but ownership "+
+				"was not recorded: %v", err)
+		}
+	})
 }

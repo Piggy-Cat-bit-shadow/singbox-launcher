@@ -143,6 +143,8 @@ func New(layout paths.Layout) (*Backend, error) {
 	}
 	b := &Backend{ac: ac, sessionID: newSessionID()}
 	b.installOwnershipPolicy()
+	// Every config promotion must describe itself; see provenance.go.
+	installConfigPromotionProvenance(b)
 	b.watchCoreState()
 	// Let the runtime settle any operation still in flight as the app exits. The
 	// record lives here and the exit path lives in core, so core calls back

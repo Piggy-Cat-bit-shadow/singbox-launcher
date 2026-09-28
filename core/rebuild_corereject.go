@@ -423,6 +423,9 @@ func (l *coreRejectLoop) run(first buildRound, rebuild func() (buildRound, error
 			if err := writeBuildRevision(l.configPath, round.ConfigJSON); err != nil {
 				debuglog.WarnLog("coreRejectLoop: config written but its revision marker was not: %v", err)
 			}
+			// Record provenance in the same transaction as the promotion, so no
+			// config can reach disk undescribed. See configPromotionHook.
+			noteConfigPromoted(l.configPath, round.ConfigJSON)
 			out.Promoted = true
 			return out, nil
 		}
@@ -759,4 +762,62 @@ func (ac *AppController) disableNodeNamedByCoreAt(errText, statePath string) boo
 	}
 	debuglog.WarnLog("corereject: start named %q — turned off (%s)", rej.Tag, rej.Text)
 	return true
+}
+
+// ReadBuildRevisionForService reports the generator revision recorded beside a
+// config, for layers above core that record provenance.
+//
+// `known` is false when the install predates the marker: an empty revision is not
+// evidence of anything, and a caller recording provenance must be able to say
+// "unknown" rather than record an empty string as if it were a fact.
+func ReadBuildRevisionForService(configPath string) (string, bool) {
+	if configPath == "" {
+		return "", false
+	}
+	rev := readBuildRevision(configPath)
+	return rev, rev != ""
+}
+
+// configPromotionHook is invoked after a config is promoted, with the path and the
+// exact bytes promoted.
+//
+// WHY A HOOK RATHER THAN ANOTHER CALLER-SIDE CALL. Provenance was recorded only in
+// the rebuild paths that the service layer happened to remember (the maintenance
+// reload and the explicit adoption). Every other writer — a classic start's pre-start
+// rebuild, a daemon start, a restart's forced rebuild, the auto-rebuild after a
+// subscription update, and the first start on a fresh install — promoted a config
+// and recorded nothing. The fresh-install case was the sharpest: no config and no
+// marker reads as "go ahead", the build creates config.json, still no marker, and
+// the NEXT ownership question sees a config with no marker and answers UNKNOWN. The
+// launcher disowned the file it had just created.
+//
+// Patching each caller is how that gap appeared in the first place, and every future
+// writer would have to remember again. Recording at the PROMOTION POINT makes the
+// config write and its provenance one transaction: there is no way to promote a
+// config without describing it.
+//
+// The hook is a package variable set once at wiring time; it is read on the build
+// path, which is serialised by buildMu, and never nil-checked on the hot path.
+var configPromotionHook func(configPath string, promoted []byte)
+
+// SetConfigPromotionHook installs the callback invoked after every config promotion.
+//
+// Called once at startup by the layer that owns provenance. A nil hook means no
+// recording, which is the correct behaviour for a Go-only build with no IPC layer.
+func SetConfigPromotionHook(fn func(configPath string, promoted []byte)) {
+	configPromotionHook = fn
+}
+
+// noteConfigPromoted tells the hook about a promotion, if one is installed.
+func noteConfigPromoted(configPath string, promoted []byte) {
+	if configPromotionHook == nil {
+		return
+	}
+	configPromotionHook(configPath, promoted)
+}
+
+// NoteConfigPromotedForTest exercises the promotion announcement directly, so an
+// upper layer's hook can be tested without running a full build.
+func NoteConfigPromotedForTest(configPath string, promoted []byte) {
+	noteConfigPromoted(configPath, promoted)
 }
