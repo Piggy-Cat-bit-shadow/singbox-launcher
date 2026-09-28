@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"singbox-launcher/core/state"
 )
@@ -227,5 +228,71 @@ func TestStateCarriesARevisionThatChangesOnSave(t *testing.T) {
 	if second.Revision() == r1 {
 		t.Fatalf("the revision did not change across a save (still %d); a build that "+
 			"started before this save cannot detect that its config is now old", r1)
+	}
+}
+
+// TestTheRevisionIsIdempotentForUnchangedContent is the property the whole revision design
+// rests on, and the one it did not have.
+//
+// `Save` stamps `UpdatedAt` with the current time before marshalling, and the digest was
+// taken over those bytes — so the revision changed on EVERY save even when nothing the user
+// did changed. Measured directly: two saves of the same untouched state one second apart
+// produced 2417500444342594338 then 4102834356273990511.
+//
+// This matters because a rebuild records the revision it rendered and then re-reads to decide
+// whether the state moved while it was working. A revision that advances on its own makes
+// every concurrent write look like a user edit — including a subscription refresh stamping
+// `LastSuccessAt`, which the user did not perform — so the build conservatively clears the
+// stale marker for a change that never happened, and the "config is current" state is lost
+// for an unrelated background write.
+//
+// The digest must therefore identify the CONTENT, not the write.
+func TestTheRevisionIsIdempotentForUnchangedContent(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	// Seed a real file first: Load returns ErrNotFound on a fresh path, and the point of
+	// this test is the revision of a state that has been written.
+	writeTestState(t, statePath, "https://example.invalid/sub", "srv", "")
+
+	s, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if err := s.Save(statePath); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	first := s.Revision()
+	if first == 0 {
+		t.Fatal("the revision is zero after a save, so it carries no identity at all")
+	}
+
+	// A second save of the SAME state, with a real time gap so the timestamp differs.
+	time.Sleep(1100 * time.Millisecond)
+	if err := s.Save(statePath); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	second := s.Revision()
+
+	if first != second {
+		t.Errorf("saving unchanged content produced a NEW revision (%d then %d). "+
+			"`UpdatedAt` is stamped from the clock before marshalling, so a digest over "+
+			"the raw bytes advances on every write — and a rebuild then reports the state "+
+			"as changed, clearing the fresh marker for a change that never happened",
+			first, second)
+	}
+
+	// And a REAL change must still move it, or the fix would be "the revision never
+	// changes" and staleness could never be detected.
+	s.Sources = append(s.Sources, state.Source{
+		Node: state.Node{Kind: state.SourceKindServer, Tag: "second", Enabled: true},
+	})
+	if err := s.Save(statePath); err != nil {
+		t.Fatalf("third save: %v", err)
+	}
+	if s.Revision() == first {
+		t.Error("a real content change did NOT move the revision, so a rebuild could " +
+			"never detect that the state moved under it")
 	}
 }
