@@ -72,6 +72,24 @@ type DaemonBackend struct {
 	// applyMu сериализует Start/Restart/Stop от дребезга кнопок.
 	applyMu sync.Mutex
 
+	// applyInFlight counts applies that have begun and not yet returned.
+	//
+	// applyMu serializes applies against EACH OTHER but says nothing to the
+	// outside, so the engine handover had no way to ask "is this engine in the
+	// middle of applying a config?". `RunningState` cannot answer it either: an
+	// apply has not started a core yet, so the running flag is legitimately
+	// false for the whole window in which the daemon is being told to start one.
+	//
+	// Handing the engine over in that window is how a switch to classic could
+	// leave a DAEMON core running: the abandoned backend's apply carried on and
+	// started it. The counter is the engine's own "I am busy" answer, and the
+	// handover refuses while it is non-zero.
+	applyInFlight atomic.Int32
+
+	// applyGeneration is incremented whenever this backend stops owning applies
+	// (Close), so a retry loop can abandon a world that no longer exists.
+	applyGeneration atomic.Uint64
+
 	// rejectTries — сколько узлов выключено за текущий заход Start/Restart
 	// по второму источнику сигнала (422 / FATAL). Сбрасывается при STARTED.
 	rejectTries int32
@@ -367,6 +385,11 @@ func (b *DaemonBackend) applyCurrentConfig(caller string, forced bool) error {
 func (b *DaemonBackend) applyCurrentConfigContext(ctx context.Context, caller string, forced bool) error {
 	b.applyMu.Lock()
 	defer b.applyMu.Unlock()
+
+	// Publish "this engine is applying" for the whole duration, so the handover
+	// guard can refuse to switch the engine out from under it.
+	b.applyInFlight.Add(1)
+	defer b.applyInFlight.Add(-1)
 	// Сброс — только у настоящего нового захода (Start/Restart). Заход
 	// "core-reject-fatal" — это повтор apply ВНУТРИ того же цикла FATAL→
 	// выключили→apply, счётчик там должен копиться, а не обнуляться, иначе
@@ -404,6 +427,24 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	// Restart форсирует полную пересборку (forced=true), иначе взяли бы
 	// устаревший config.json. Провал пересборки — отказ с диалогом, а не
 	// доставка демону старого файла.
+	// OWNERSHIP BEFORE EVERY SIDE EFFECT.
+	//
+	// This used to be checked in exactly one place — after admin.Apply had
+	// already returned. That ordering made the check useless for its purpose: by
+	// then the backend had already rebuilt config.json on disk, reloaded the
+	// Clash API config, prepared the daemon copy and POSTed the config. A backend
+	// the user had already left could therefore still deliver a config and start
+	// a core, and the single late check only stopped it from updating the UI —
+	// the side effects had happened, and the daemon core was running under a user
+	// who had switched away.
+	//
+	// The rebuild is the first side effect because it WRITES THE USER'S CONFIG:
+	// a retired backend must not modify files on behalf of an engine nobody
+	// selected any more.
+	if !b.isActive() {
+		debuglog.InfoLog("daemon.%s: backend is no longer active; not rebuilding or applying", caller)
+		return false, nil
+	}
 	if err := ac.rebuildConfigBeforeStart(forced); err != nil {
 		debuglog.ErrorLog("daemon.%s: config rebuild failed, config not applied: %v", caller, err)
 		b.refreshUI()
@@ -476,6 +517,19 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	}
 	config, proxyServer := prepared.Bytes, prepared.ProxyServer
 
+	// The last checkpoint before the IRREVERSIBLE step. Everything above is
+	// recoverable local work; this call is what starts a core on the daemon. A
+	// switch landing anywhere in the window above must be observed here, or the
+	// daemon starts a core for an engine the user has left.
+	if !b.isActive() {
+		debuglog.InfoLog("daemon.%s: backend retired during preparation; config NOT applied", caller)
+		return false, nil
+	}
+	if err := b.ctxOrNil().Err(); err != nil {
+		debuglog.InfoLog("daemon.%s: cancelled before apply (%v); config NOT applied", caller, err)
+		return false, err
+	}
+
 	debuglog.InfoLog("daemon.%s: applying config.json (%d bytes) to %s", caller, len(config), b.admin.AddrString())
 	if err := b.admin.Apply(config); err != nil {
 		var applyErr *lxdclient.ApplyError
@@ -522,9 +576,20 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	} else {
 		ac.clearDaemonSystemProxy("the applied config asks for no system proxy")
 	}
-	ac.RunningState.Set(true) // стрим статусов подтвердит
+	// НЕ объявляем running здесь.
+	//
+	// Раньше стояло `ac.RunningState.Set(true)` с комментарием «стрим статусов
+	// подтвердит» — и это противоречие: если стрим авторитетен, то ПРИНЯТЫЙ
+	// apply ещё не STARTED. Ядро, которое падает сразу после приёма конфига
+	// (ровно сценарий `default outbound not found`), успевало показать
+	// пользователю «подключено» до того, как стало ясно, что оно не поднялось.
+	//
+	// Теперь running приходит ТОЛЬКО из потока статусов демона (STARTED), где
+	// он и является проверенным фактом. Apply означает «принято»: это видно
+	// как `starting` через фазу backend'а и operation-record, и этого
+	// достаточно, чтобы кнопка показала прогресс.
 	ac.StateService.ResetAutoUpdateFailedAttempts()
-	debuglog.InfoLog("daemon.%s: config applied, core is up", caller)
+	debuglog.InfoLog("daemon.%s: config applied; waiting for the daemon to report STARTED", caller)
 	b.refreshUI()
 
 	go func() {
@@ -578,6 +643,17 @@ func (b *DaemonBackend) retryAfterCoreFatal(msg string) {
 		debuglog.ErrorLog("daemon: core FATAL could not be resolved by disabling a node: %s", msg)
 		b.ac.RecordLifecycleError(LifecycleErrCoreStart, "start",
 			"the core refused the configuration", msg, false)
+		return
+	}
+	// A RETIRED BACKEND MUST NOT REPAIR ANYTHING.
+	//
+	// This runs on a goroutine nobody owns, triggered by a status frame. If the
+	// user switched engines in the meantime, applying here would write the
+	// config and start a daemon core for an engine they have left — the same
+	// stale-side-effect class as the apply path, on a path that is harder to
+	// notice because it is not user-initiated at all.
+	if !b.isActive() {
+		debuglog.InfoLog("daemon: backend is no longer active; skipping the FATAL retry")
 		return
 	}
 	b.applyCurrentConfig("core-reject-fatal", true)
@@ -661,6 +737,58 @@ func (b *DaemonBackend) StopVPN() {
 		// endpoint instead of trusting a socket that no longer exists.
 		b.clashFallback.invalidate()
 	}()
+}
+
+// ctxOrNil returns the backend context, or a background context when the
+// backend was built without one (tests, unconfigured engines).
+//
+// A nil ctx must not silently mean "uncancellable": returning a background
+// context keeps the call sites uniform while making the absence explicit in one
+// place instead of scattering nil checks — and Close() still marks the backend
+// inactive, which is the ownership signal those call sites actually depend on.
+func (b *DaemonBackend) ctxOrNil() context.Context {
+	if b == nil || b.ctx == nil {
+		return context.Background()
+	}
+	return b.ctx
+}
+
+// ApplyInFlight reports whether an apply has begun and not yet returned.
+//
+// The engine handover asks this before switching away. It is deliberately NOT
+// derived from RunningState: an apply has not started a core yet, so the running
+// flag is false for exactly the window in which the daemon is being told to
+// start one — and handing the engine over then is what let an abandoned backend
+// carry on and start a daemon core after the user had switched to classic.
+func (b *DaemonBackend) ApplyInFlight() bool {
+	if b == nil {
+		return false
+	}
+	return b.applyInFlight.Load() > 0
+}
+
+// --- test seams -------------------------------------------------------------
+//
+// These exist so the backend's state tests can assert ownership and busy rules
+// without a live daemon. They expose only facts the engine already tracks; none
+// of them can fabricate a running core.
+
+// IsActiveForTest exposes isActive for tests.
+func (b *DaemonBackend) IsActiveForTest() bool { return b.isActive() }
+
+// ApplyInFlightForTest exposes the in-flight apply counter.
+func (b *DaemonBackend) ApplyInFlightForTest() int32 { return b.applyInFlight.Load() }
+
+// SetApplyInFlightForTest sets the in-flight apply counter, so a test can state
+// "an apply is in progress" as a precondition.
+func (b *DaemonBackend) SetApplyInFlightForTest(n int32) { b.applyInFlight.Store(n) }
+
+// ApplyGenerationForTest exposes the apply generation.
+func (b *DaemonBackend) ApplyGenerationForTest() uint64 { return b.applyGeneration.Load() }
+
+// ApplyCurrentConfigForTest drives the apply entry point, for ownership tests.
+func (b *DaemonBackend) ApplyCurrentConfigForTest(caller string, forced bool) error {
+	return b.applyCurrentConfig(caller, forced)
 }
 
 // SetStopping implements stopStateBackend: records that a stop is in flight so
@@ -844,6 +972,10 @@ func (b *DaemonBackend) Close() {
 	// backend went live. A daemon engine has no generation counter; this flag is
 	// what gives it the equivalent "my epoch is over" test.
 	b.closed.Store(true)
+	// Bump the apply generation so any loop that re-checks before retrying sees
+	// that its world is gone, even if it holds a context that has not observed
+	// cancellation yet.
+	b.applyGeneration.Add(1)
 	if b.cancel != nil {
 		b.cancel()
 	}

@@ -208,6 +208,17 @@ func (ac *AppController) SwitchBackendMode(mode BackendMode) error {
 	if !ac.ClassicSettled() {
 		return fmt.Errorf("a start or stop is still in progress; wait for it to finish before switching the core engine")
 	}
+	// The DAEMON engine's busy state, which `ClassicSettled` cannot see.
+	//
+	// The classic runtime carries a phase, so `ClassicSettled` answers for it.
+	// The daemon has no phase: while it is applying a config it has not started a
+	// core yet, so RunningState is legitimately false and BOTH guards above pass.
+	// Switching away in that window abandoned a backend in the middle of an
+	// apply, and that apply then started a daemon core under a user who had just
+	// selected classic — two engines, one of them unowned.
+	if b, ok := ac.Backend().(interface{ ApplyInFlight() bool }); ok && b.ApplyInFlight() {
+		return fmt.Errorf("a config is being applied to the current engine; wait for it to finish before switching the core engine")
+	}
 	if ac.RunningState.IsRunning() {
 		return fmt.Errorf("stop the VPN before switching the core engine")
 	}
