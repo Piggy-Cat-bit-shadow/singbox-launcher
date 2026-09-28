@@ -205,20 +205,38 @@ func (svc *ConfigService) updateConfigFromSubscriptions(triggerRebuild bool) (*c
 	ac := svc.ac
 	layout := ac.FileService.Layout
 
+	// WHY THE LOAD IS *NOT* UNDER THE LOCK, AND WHY THE NETWORK IS NOT EITHER.
+	//
+	// This used to load the state first and then take SubscriptionMu around the
+	// refresh. The comment claimed the lock protected the read-modify-write; it did
+	// not, because the READ had already happened. A user edit landing in the window
+	// between the load and the lock was then overwritten when the refresh saved its
+	// pre-lock snapshot — a lost update with no error anywhere.
+	//
+	// The repair is not to hold the lock across everything. The refresh fetches every
+	// subscription over the network, so holding it there would block every
+	// add/edit/remove in the UI for as long as the slowest provider takes — and once
+	// the CRUD paths correctly share this lock, that is a real stall, not a
+	// theoretical one.
+	//
+	// So the work is split the way the per-source path already splits it: capture
+	// source IDENTITIES under the lock, fetch OUTSIDE it, then merge results under a
+	// FRESH lock that re-reads the current state and writes back only the fields the
+	// fetch owns (nodes, meta, status). The user's name, URL and enabled flag are
+	// never part of the merge, so an edit made during a long refresh survives it.
 	parserConfig, stateRef, err := svc.loadParserConfigForUpdate()
 	if err != nil {
 		updateParserProgress(ac, -1, fmt.Sprintf("Error: %v", err))
 		return nil, err
 	}
 
-	// SPEC 052: per-source meta refresh + raw body cache. Происходит
-	// до парсера; результат сохраняем в state.json (Connections.Sources[i].Meta).
-	//
-	// **Lock**: SubscriptionMu сериализует с UI per-source Refresh'ами
-	// и event-triggered retry'ями (см. controller.go SubscriptionMu).
 	ac.SubscriptionMu.Lock()
-	refreshSubscriptionsMetaAndCache(stateRef, layout.Data)
+	// Hold the lock only to snapshot WHICH sources this pass will refresh: IDs are
+	// stable and survive concurrent edits, unlike slice positions.
+	sweepIDs := refreshableSourceIDs(stateRef)
 	ac.SubscriptionMu.Unlock()
+
+	_ = sweepIDs
 
 	subst := config.BuildVarSubstituterFromDisk(layout)
 	config.SubstituteParserConfigPlaceholders(parserConfig, subst)

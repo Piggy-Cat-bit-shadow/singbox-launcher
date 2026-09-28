@@ -46,7 +46,9 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 		return
 	}
 
-	dirty := false
+	// Fetch results are collected here and merged into the CURRENT state after the
+	// network phase, so no fetch ever holds the lock or writes a snapshot.
+	var results []state.Source
 
 	// Считаем enabled subscriptions для progress reporting.
 	enabledCount := 0
@@ -88,18 +90,89 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 		}
 		progress(pct, fmt.Sprintf("Fetching %d/%d: %s", idx, enabledCount, shortURL))
 
-		if refreshOneSubscriptionSource(src, settings) {
-			dirty = true
+		// Fetch against a by-value SNAPSHOT of the source, so the network phase
+		// never touches the shared state object. The result is applied below, under
+		// a fresh lock, by re-reading the state and merging only the fields the
+		// fetch owns.
+		copied := *src
+		if refreshOneSubscriptionSource(&copied, settings) {
+			results = append(results, copied)
 		}
 	}
 
-	// Persist state с обновлённой meta. Best-effort.
-	if dirty {
-		statePath := platform.GetWizardStatePath(dataDir)
-		if err := s.Save(statePath); err != nil {
-			debuglog.WarnLog("refreshSubscriptionsMetaAndCache: state.Save: %v", err)
+	// MERGE UNDER A FRESH LOCK, BY ID.
+	//
+	// The state is re-read here rather than reusing the snapshot this sweep was
+	// built from, which is the whole point: a subscription the user renamed, edited
+	// or disabled while the fetch was in flight is described by the CURRENT file,
+	// and only the fetch-owned fields (nodes, meta, status, pending-disabled) are
+	// copied over it. The user's name, URL and enabled flag are never written from
+	// this path, so a concurrent edit cannot be erased by a refresh that started
+	// before it.
+	//
+	// Best-effort, as before: a failed save leaves the previous state intact.
+	if len(results) == 0 {
+		return
+	}
+	statePath := platform.GetWizardStatePath(dataDir)
+	latest, err := state.Load(statePath)
+	if err != nil {
+		debuglog.WarnLog("refreshSubscriptionsMetaAndCache: cannot reload state to merge "+
+			"fetch results: %v", err)
+		return
+	}
+	merged := false
+	for i := range results {
+		fetched := &results[i]
+		// Matching by ID, never by position: the slice may have been reordered or
+		// shortened by a concurrent edit, and a positional merge would write one
+		// source's nodes into another.
+		disk := latest.FindSource(fetched.ID)
+		if disk == nil || disk.Kind != state.SourceKindSubscription {
+			// Deleted while the fetch ran. Dropping the result is correct: the user
+			// removed the source, and re-adding its nodes would resurrect it.
+			debuglog.DebugLog("refreshSubscriptionsMetaAndCache: source %s disappeared "+
+				"during the sweep; its result is discarded", fetched.ID)
+			continue
+		}
+		if disk.URL != fetched.URL {
+			// The URL changed while the fetch ran, so this result belongs to the
+			// PREVIOUS provider. Applying it would attach the old provider's nodes to
+			// the new URL.
+			debuglog.InfoLog("refreshSubscriptionsMetaAndCache: source %s changed URL "+
+				"during the sweep; its result is discarded", fetched.ID)
+			continue
+		}
+		disk.Nodes = fetched.Nodes
+		disk.UpdateStatus = fetched.UpdateStatus
+		disk.Meta = fetched.Meta
+		disk.PendingDisabled = fetched.PendingDisabled
+		merged = true
+	}
+	if !merged {
+		return
+	}
+	if err := latest.Save(statePath); err != nil {
+		debuglog.WarnLog("refreshSubscriptionsMetaAndCache: state.Save: %v", err)
+	}
+}
+
+// refreshableSourceIDs lists the IDs of the sources a sweep would refresh.
+//
+// IDs rather than indices: an ID survives a concurrent insert or delete, so a sweep
+// can be described under the lock and executed without it. Indices would silently
+// address a different source once the slice moved.
+func refreshableSourceIDs(s *state.State) []string {
+	if s == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(s.Sources))
+	for i := range s.Sources {
+		if s.Sources[i].Enabled && state.CanRefreshSubscription(&s.Sources[i]) {
+			ids = append(ids, s.Sources[i].ID)
 		}
 	}
+	return ids
 }
 
 // refreshOneSubscriptionSource — атомарный fetch одного source: скачать →

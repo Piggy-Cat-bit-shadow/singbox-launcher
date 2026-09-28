@@ -27,6 +27,55 @@ import (
 // "fresh install", and the menu bar must be able to add the user's first
 // subscription without sending them through the wizard first. Returning an
 // empty state here means Save creates the file in the canonical shape.
+// withStateLocked runs one read-modify-write of state.json under the shared lock.
+//
+// WHY EVERY MUTATION GOES THROUGH HERE. The subscription refresh path takes
+// `SubscriptionMu` around its own load-modify-save, but the CRUD paths
+// (add/update/remove) loaded state, edited it and saved it back WITHOUT the lock. Two
+// writers on one file is not merely a lost update: concurrent whole-file writes were
+// observed to interleave and leave state.json unparseable, because each Save is a
+// truncate-and-write that the other can walk into.
+//
+// The lock must span the LOAD as well as the save. Loading outside it and locking only
+// for the write still lets this sequence through: refresh loads v10, the user's edit
+// loads v10, the edit saves v11, the refresh saves its stale v10 copy — the user's
+// change is gone and nothing reports an error.
+//
+// The callback must not perform network I/O. A caller that needs to fetch does the
+// fetch OUTSIDE this function and comes back with only the fields it owns; holding
+// this lock across a slow subscription would queue every subscription edit in the UI
+// behind a network call.
+func (b *Backend) withStateLocked(fn func(s *state.State, path string) error) error {
+	if b.ac == nil {
+		return &protocol.Error{
+			Code: "not_ready", Message: "backend not initialised", Recoverable: true,
+		}
+	}
+	b.ac.SubscriptionMu.Lock()
+	defer b.ac.SubscriptionMu.Unlock()
+
+	s, path, err := b.loadState()
+	if err != nil {
+		return err
+	}
+	if err := fn(s, path); err != nil {
+		return err
+	}
+	if err := s.Save(path); err != nil {
+		return &protocol.Error{
+			Code:        "save_failed",
+			Message:     "cannot save the subscription state: " + err.Error(),
+			Recoverable: true,
+		}
+	}
+	return nil
+}
+
+// loadState reads state.json WITHOUT the lock.
+//
+// Read-only callers may use it directly. Any caller that will WRITE must go through
+// withStateLocked instead, so that the load it mutates cannot be stale by the time it
+// saves.
 func (b *Backend) loadState() (*state.State, string, error) {
 	dataDir := b.ac.FileService.Layout.Data
 	path := platform.GetWizardStatePath(dataDir)
@@ -151,40 +200,57 @@ func (b *Backend) AddSubscription(name, url string) (protocol.SubscriptionDTO, e
 		name = displayNameFromURL(url)
 	}
 
-	s, path, err := b.loadState()
-	if err != nil {
-		return protocol.SubscriptionDTO{}, err
-	}
-
-	// A duplicate URL is almost always a double-click or a paste twice, not a
-	// deliberate second copy: the same link would fetch the same nodes twice.
-	for _, existing := range s.GetSubscriptionSources() {
-		if strings.EqualFold(strings.TrimSpace(existing.URL), url) {
-			return protocol.SubscriptionDTO{}, &protocol.Error{
+	// The whole load-modify-save runs under the shared lock, so a concurrent
+	// refresh cannot interleave its own whole-file write.
+	var added *state.Source
+	err := b.withStateLocked(func(s *state.State, path string) error {
+		// A duplicate URL is almost always a double-click or a paste twice, not a
+		// deliberate second copy: the same link would fetch the same nodes twice.
+		if dup := findSourceByURL(s, url, ""); dup != nil {
+			return &protocol.Error{
 				Code:        "duplicate",
 				Message:     "this subscription URL is already configured",
 				Recoverable: false,
 			}
 		}
+		src := state.NewSubscriptionSource(name, url)
+		s.Sources = append(s.Sources, src)
+		copied := src
+		added = &copied
+		return nil
+	})
+	if err != nil {
+		return protocol.SubscriptionDTO{}, err
 	}
 
-	src := state.NewSubscriptionSource(name, url)
-	s.Sources = append(s.Sources, src)
+	debuglog.InfoLog("backend: subscription %q added (%s)", name, added.ID)
+	return toSubscriptionDTO(added), nil
+}
 
-	if err := s.Save(path); err != nil {
-		return protocol.SubscriptionDTO{}, &protocol.Error{
-			Code:        "save_failed",
-			Message:     "cannot save the subscription: " + err.Error(),
-			Recoverable: true,
+// findSourceByURL returns any subscription already using this URL, excluding
+// excludeID (the source being edited).
+//
+// Case-insensitive and whitespace-trimmed because a URL that differs only in case or
+// a trailing space is the same provider: treating them as distinct would fetch the
+// same nodes twice and collide on tags.
+func findSourceByURL(s *state.State, url, excludeID string) *state.Source {
+	if s == nil {
+		return nil
+	}
+	want := strings.ToLower(strings.TrimSpace(url))
+	if want == "" {
+		return nil
+	}
+	sources := s.GetSubscriptionSources()
+	for i := range sources {
+		if sources[i].ID == excludeID {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(sources[i].URL)) == want {
+			return &sources[i]
 		}
 	}
-
-	debuglog.InfoLog("backend: subscription %q added (%s)", name, src.ID)
-	stored := s.FindSource(src.ID)
-	if stored == nil {
-		stored = &src
-	}
-	return toSubscriptionDTO(stored), nil
+	return nil
 }
 
 // UpdateSubscription edits the name, URL and enabled flag of one source.
@@ -198,44 +264,100 @@ func (b *Backend) UpdateSubscription(id, name, url string, enabled *bool) (proto
 		}
 	}
 
-	s, path, err := b.loadState()
+	trimmedURL := strings.TrimSpace(url)
+	if trimmedURL != "" && !looksLikeURL(trimmedURL) {
+		return protocol.SubscriptionDTO{}, &protocol.Error{
+			Code:        "bad_request",
+			Message:     "the subscription URL must start with http:// or https://",
+			Recoverable: false,
+		}
+	}
+	trimmedName := strings.TrimSpace(name)
+
+	// The whole load-modify-save runs under the shared lock, so a refresh cannot
+	// replace the file in the middle of the edit.
+	var updated *state.Source
+	var enabledChanged, urlChanged bool
+	err := b.withStateLocked(func(s *state.State, path string) error {
+		src := s.FindSource(id)
+		if src == nil || src.Kind != state.SourceKindSubscription {
+			return &protocol.Error{
+				Code: "not_found", Message: "no such subscription", Recoverable: false,
+			}
+		}
+
+		if trimmedURL != "" && trimmedURL != src.URL {
+			// The invariant that Add enforces must hold for edits too, or it is not
+			// an invariant: two sources on one URL fetch the same nodes twice.
+			if dup := findSourceByURL(s, trimmedURL, id); dup != nil {
+				return &protocol.Error{
+					Code:        "duplicate",
+					Message:     "another subscription already uses this URL",
+					Recoverable: false,
+				}
+			}
+			src.URL = trimmedURL
+			// THE URL IS THE SOURCE'S IDENTITY. Everything materialised from it —
+			// nodes, provider metadata, fetch status — describes the PREVIOUS
+			// provider. Keeping them made the UI show the new URL beside the old
+			// provider's node count, and a rebuild could install nodes that the
+			// displayed URL does not serve.
+			//
+			// Cleared rather than kept as "last known good": the user has just told
+			// the launcher this source is now a different provider, and silently
+			// building the old provider's nodes under the new URL is exactly the
+			// confusion this state must not represent. The refresh is required, and
+			// the stale flag below says so.
+			src.Nodes = nil
+			src.Meta = nil
+			src.UpdateStatus = nil
+			urlChanged = true
+		}
+		if trimmedName != "" {
+			src.Name = trimmedName
+		}
+		if enabled != nil && *enabled != src.Enabled {
+			src.Enabled = *enabled
+			enabledChanged = true
+		}
+		copied := *src
+		updated = &copied
+		return nil
+	})
 	if err != nil {
 		return protocol.SubscriptionDTO{}, err
 	}
-	src := s.FindSource(id)
-	if src == nil || src.Kind != state.SourceKindSubscription {
-		return protocol.SubscriptionDTO{}, &protocol.Error{
-			Code: "not_found", Message: "no such subscription", Recoverable: false,
-		}
-	}
 
-	if trimmed := strings.TrimSpace(url); trimmed != "" {
-		if !looksLikeURL(trimmed) {
-			return protocol.SubscriptionDTO{}, &protocol.Error{
-				Code:        "bad_request",
-				Message:     "the subscription URL must start with http:// or https://",
-				Recoverable: false,
-			}
-		}
-		src.URL = trimmed
-	}
-	if trimmed := strings.TrimSpace(name); trimmed != "" {
-		src.Name = trimmed
-	}
-	if enabled != nil {
-		src.Enabled = *enabled
-	}
-
-	if err := s.Save(path); err != nil {
-		return protocol.SubscriptionDTO{}, &protocol.Error{
-			Code:        "save_failed",
-			Message:     "cannot save the subscription: " + err.Error(),
-			Recoverable: true,
-		}
+	// A change that alters WHAT THE BUILD WOULD PRODUCE must mark the config stale,
+	// or the UI keeps presenting the old config.json as current.
+	//
+	// `enabled` decides whether a source participates in the build at all, and a URL
+	// change replaces which nodes it contributes. Both leave config.json describing
+	// something other than the current state, and neither previously said so: the
+	// Home screen showed no Reload prompt and the core kept running the old config.
+	if enabledChanged || urlChanged {
+		b.noteBuildInputsChanged()
 	}
 
 	debuglog.InfoLog("backend: subscription %q updated", id)
-	return toSubscriptionDTO(src), nil
+	return toSubscriptionDTO(updated), nil
+}
+
+// noteBuildInputsChanged records that the materialised config no longer matches the
+// state it was built from, and tells the UI.
+//
+// One place rather than at each call site: this is the same fact every time (a build
+// input moved), and stating it once is what keeps a future edit path from forgetting
+// to.
+func (b *Backend) noteBuildInputsChanged() {
+	if b.ac == nil {
+		return
+	}
+	if b.ac.StateService != nil {
+		b.ac.StateService.MarkConfigStale()
+	}
+	b.EmitCoreState()
+	b.emit(protocol.EventSubscriptionsChanged, nil)
 }
 
 // RemoveSubscription deletes a source.
@@ -250,31 +372,34 @@ func (b *Backend) RemoveSubscription(id string) error {
 		}
 	}
 
-	s, path, err := b.loadState()
+	// Removal is a read-modify-write like any other, so it takes the same lock: this
+	// path previously saved the whole file without it, and a concurrent refresh
+	// could resurrect the source or corrupt the file.
+	removed := false
+	err := b.withStateLocked(func(s *state.State, path string) error {
+		idx := -1
+		for i := range s.Sources {
+			if s.Sources[i].ID == id && s.Sources[i].Kind == state.SourceKindSubscription {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return &protocol.Error{
+				Code: "not_found", Message: "no such subscription", Recoverable: false,
+			}
+		}
+		s.Sources = append(s.Sources[:idx], s.Sources[idx+1:]...)
+		removed = true
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	idx := -1
-	for i := range s.Sources {
-		if s.Sources[i].ID == id && s.Sources[i].Kind == state.SourceKindSubscription {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return &protocol.Error{
-			Code: "not_found", Message: "no such subscription", Recoverable: false,
-		}
-	}
-
-	s.Sources = append(s.Sources[:idx], s.Sources[idx+1:]...)
-	if err := s.Save(path); err != nil {
-		return &protocol.Error{
-			Code:        "save_failed",
-			Message:     "cannot remove the subscription: " + err.Error(),
-			Recoverable: true,
-		}
+	if removed {
+		// Removing a source removes the nodes it contributed, so the built config no
+		// longer describes the state.
+		b.noteBuildInputsChanged()
 	}
 
 	debuglog.InfoLog("backend: subscription %q removed", id)
