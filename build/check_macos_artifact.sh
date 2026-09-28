@@ -229,6 +229,62 @@ if [ -f "$EXEC" ]; then
     fi
 fi
 
+# --- config pipeline smoke test ---
+#
+# The reason this section exists: this Action was once fully green — Check,
+# Build and every check above — while the app it produced could not start a
+# core. `FATAL: default outbound not found: proxy-out`. None of those checks ever
+# produced a configuration, so none of them could notice that the configuration
+# the app generates referenced an outbound that did not exist.
+#
+# So the bundled backend is now asked to run the REAL pipeline — load the bundled
+# template, build config.json, validate every internal reference — and to refuse
+# if the result could not be started. A build that succeeds is not evidence that
+# a config is usable; this is.
+echo "--- config pipeline smoke test ---"
+SMOKE_DIR=$(mktemp -d)
+mkdir -p "$SMOKE_DIR/bin"
+# Portable layout: the backend resolves Data next to the executable and reads the
+# template from bin/, exactly as an installed app does.
+#
+# The app does NOT bundle the template — it fetches it at runtime from the commit
+# pinned in RequiredTemplateRef (SPEC 046) — so the template used here is the
+# repository's, which IS the file that commit serves. That is the point: the
+# failure mode being guarded against is the shipped template and the code
+# disagreeing, and a fixture would agree with the code by construction.
+cp "$HELPER" "$SMOKE_DIR/jiejiebox-backend"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -f "$APP/Contents/Resources/bin/wizard_template.json" ]; then
+    cp "$APP/Contents/Resources/bin/wizard_template.json" "$SMOKE_DIR/bin/"
+else
+    cp "$REPO_ROOT/bin/wizard_template.json" "$SMOKE_DIR/bin/"
+fi
+if [ -d "$REPO_ROOT/bin/locale" ]; then
+    cp -r "$REPO_ROOT/bin/locale" "$SMOKE_DIR/bin/"
+fi
+
+if [ ! -f "$SMOKE_DIR/bin/wizard_template.json" ]; then
+    fail "config pipeline: no wizard_template.json available to build from"
+else
+    # A core to check with, when the bundle carries one. Internal reference
+    # validation always runs; the external check is additional evidence, and its
+    # absence is reported rather than silently skipped.
+    SMOKE_CORE=""
+    if [ -x "$APP/Contents/Resources/bin/sing-box" ]; then
+        SMOKE_CORE="$APP/Contents/Resources/bin/sing-box"
+    fi
+
+    if ( cd "$SMOKE_DIR" && ./jiejiebox-backend -check-config ${SMOKE_CORE:+-core "$SMOKE_CORE"} ) \
+            > "$SMOKE_DIR/out.txt" 2>&1; then
+        pass "config pipeline: generated config passes reference integrity"
+        sed 's/^/      /' "$SMOKE_DIR/out.txt" | grep -vE '^\s*$' || true
+    else
+        fail "config pipeline: the app cannot generate a startable config"
+        sed 's/^/      /' "$SMOKE_DIR/out.txt" | tail -20
+    fi
+fi
+rm -rf "$SMOKE_DIR"
+
 # --- размеры ---
 echo "--- sizes ---"
 EXEC_SIZE=$(stat -f%z "$EXEC" 2>/dev/null || echo 0)

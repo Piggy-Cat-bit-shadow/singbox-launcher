@@ -266,3 +266,38 @@ func (b *Backend) AdoptConfig() (MaintenanceResult, error) {
 	b.EmitCoreState()
 	return MaintenanceResult{Message: "adopted"}, nil
 }
+
+// RebuildConfigForCheck runs the pre-start config build and returns its error.
+//
+// Exists for the `-check-config` smoke test, which must exercise the SAME
+// pipeline a Start uses. A parallel "build for CI" function would agree with
+// itself and could not catch the failure it is meant to catch: the incident was
+// the shipped template and the real pipeline disagreeing.
+//
+// It does NOT start a core, and it does not run the `sing-box check` reject
+// loop — the caller validates references and (optionally) invokes the core
+// itself, so a CI run never depends on a core being present.
+func (b *Backend) RebuildConfigForCheck() error {
+	if b.ac == nil {
+		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
+	}
+	// forced=true: a check must be driven by the current state and template, not
+	// by whether dirty markers happen to be set. Reusing a stale config.json
+	// would validate a file nobody is about to use.
+	if err := b.ac.RebuildConfigIfDirty(true); err != nil {
+		return &protocol.Error{
+			Code:        "rebuild_failed",
+			Message:     err.Error(),
+			Recoverable: false,
+		}
+	}
+	return nil
+}
+
+// ConfigPath is the config.json the backend would deliver to a core.
+func (b *Backend) ConfigPath() string {
+	if b.ac == nil || b.ac.FileService == nil {
+		return ""
+	}
+	return b.ac.FileService.ConfigPath
+}

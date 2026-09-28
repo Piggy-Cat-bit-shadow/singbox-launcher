@@ -26,6 +26,20 @@ import (
 
 func main() {
 	pathsFlag := flag.Bool("paths", false, "Print resolved data/log paths and exit")
+	// -check-config performs the REAL pre-start pipeline without starting
+	// anything: build the config from the resolved layout, validate its
+	// references, and (when a core is given) run `sing-box check` on it.
+	//
+	// It exists because the macOS Action built a correct app that could not start
+	// a core. Check / Build / Artifact acceptance were all green, and none of them
+	// ever produced a configuration, so nothing in CI could notice that the
+	// generated config referenced an outbound that did not exist. A build that
+	// succeeds is not evidence that a config is usable, and this flag is what lets
+	// artifact acceptance say so.
+	checkConfigFlag := flag.Bool("check-config", false,
+		"Build and validate config.json from the bundled template, then exit (no core started)")
+	corePathFlag := flag.String("core", "",
+		"Path to a sing-box binary; with -check-config, also run `<core> check -c <config>`")
 	flag.Parse()
 
 	exe, err := paths.Executable()
@@ -45,6 +59,14 @@ func main() {
 
 	if *pathsFlag {
 		fmt.Printf("Mode: %s\nData: %s\nLogs: %s\n", layout.Mode, layout.Data, layout.Logs)
+		return
+	}
+
+	if *checkConfigFlag {
+		if err := runCheckConfig(layout, *corePathFlag, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "jiejiebox-backend: config pipeline FAILED: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
