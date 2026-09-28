@@ -383,7 +383,24 @@ func (b *DaemonBackend) applyCurrentConfig(caller string, forced bool) error {
 // not leave an apply racing behind it, and between attempts so a retry loop
 // cannot outlive its caller.
 func (b *DaemonBackend) applyCurrentConfigContext(ctx context.Context, caller string, forced bool) error {
-	b.applyMu.Lock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// WAIT FOR THE ENGINE, CANCELLABLY.
+	//
+	// A plain Mutex cannot be acquired with a context, so a caller stuck behind a
+	// long apply was blocked for that apply's entire duration however short its
+	// own deadline was — the "operation timeout" bounded only the work that
+	// happened to get the lock, which is not a bound at all.
+	//
+	// Acquiring in a goroutine and selecting on the context makes the WAIT
+	// interruptible. The lock is still taken and released by the same goroutine
+	// discipline, and the value is handed back so the deferred Unlock runs on
+	// this goroutine — Go's Mutex must be released by the goroutine that acquired
+	// it, which this preserves.
+	if !acquireWithContext(ctx, &b.applyMu) {
+		return ctx.Err()
+	}
 	defer b.applyMu.Unlock()
 
 	// Publish "this engine is applying" for the whole duration, so the handover
@@ -476,7 +493,7 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	// Pre-flight: убеждаемся, что демон жив и его сертификат совпадает с
 	// закреплённым, ДО отправки конфига — иначе пользователь видит сырой
 	// "connection refused" / "fingerprint mismatch" вместо понятного совета.
-	if _, err := b.admin.Status(); err != nil {
+	if _, err := b.admin.StatusCtx(b.ctxOrNil()); err != nil {
 		// The daemon did not answer. "Cannot reach the daemon" is a different
 		// remedy from "the daemon rejected the config", so it gets its own code
 		// rather than one generic failure.
@@ -490,7 +507,7 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	// (демон старой сборки). (2) Полное удаление clash_api (всё по gRPC).
 	// Classic-режим этой подготовки не проходит (cwd=bin/, единственное ядро).
 	runtimeDir := daemonFallbackStateDir()
-	passport, infoErr := b.admin.Info()
+	passport, infoErr := b.admin.InfoCtx(b.ctxOrNil())
 	if infoErr == nil && passport.StateDir != "" {
 		runtimeDir = passport.StateDir
 	} else if infoErr != nil {
@@ -531,7 +548,12 @@ func (b *DaemonBackend) applyOnce(caller string, forced bool) (retry bool, err e
 	}
 
 	debuglog.InfoLog("daemon.%s: applying config.json (%d bytes) to %s", caller, len(config), b.admin.AddrString())
-	if err := b.admin.Apply(config); err != nil {
+	// ApplyCtx, not Apply: this is the call that can START A CORE, and it is the
+	// longest one. With an uncancellable call the launcher's operation timeout
+	// guaranteed nothing — a request stuck in the network outlived every deadline
+	// and completed in a world that no longer existed (the user had switched
+	// engines, the backend was closed).
+	if err := b.admin.ApplyCtx(b.ctxOrNil(), config); err != nil {
 		var applyErr *lxdclient.ApplyError
 		if errors.As(err, &applyErr) && applyErr.Rejected() && b.retryCoreReject(applyErr.Message) {
 			debuglog.WarnLog("daemon.%s: apply rejected a node — rebuild and retry", caller)
@@ -737,6 +759,72 @@ func (b *DaemonBackend) StopVPN() {
 		// endpoint instead of trusting a socket that no longer exists.
 		b.clashFallback.invalidate()
 	}()
+}
+
+// acquireWithContext takes mu, abandoning the wait if ctx is cancelled.
+//
+// Returns false when the context ended first, in which case the lock was NOT
+// taken and the caller must not unlock.
+//
+// Go's sync.Mutex has no cancellable Lock, and it must be released by the
+// goroutine that acquired it. So the acquisition runs in a helper goroutine and
+// the CALLER waits on either the acquisition or its own context.
+//
+// OWNERSHIP IS DECIDED BY A SINGLE BUFFERED SEND, which is what makes the
+// abandoned case safe without any sleep or retry:
+//
+//   - channel capacity 1, so the helper's send NEVER blocks;
+//   - on success the helper sends the token and returns immediately WITHOUT
+//     unlocking — the caller now owns the lock;
+//   - the caller either receives the token (it owns the lock, and will unlock) or
+//     its context ends first. If the context ended first, the caller performs a
+//     NON-BLOCKING receive: a token present means the helper won the race and the
+//     lock is held, so the caller must release it; no token means the helper has
+//     not sent yet, and the caller records that by CLOSING a handshake channel
+//     the helper checks before sending — so the helper, when it finally acquires,
+//     sees the rejection and unlocks on the spot.
+//
+// There is no window in which both sides wait, and none in which neither
+// releases: every path ends with exactly one owner.
+func acquireWithContext(ctx context.Context, mu *sync.Mutex) bool {
+	if ctx == nil {
+		mu.Lock()
+		return true
+	}
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+
+	acquired := make(chan struct{}, 1)
+	abandoned := make(chan struct{})
+
+	go func() {
+		mu.Lock()
+		// Deliver ownership, unless the caller has given up. The send cannot
+		// block (capacity 1), so this goroutine never lingers.
+		select {
+		case <-abandoned:
+			mu.Unlock()
+		default:
+			acquired <- struct{}{}
+		}
+	}()
+
+	select {
+	case <-acquired:
+		return true
+	case <-ctx.Done():
+		// The caller gives up. Decide ownership without blocking.
+		select {
+		case <-acquired:
+			// The helper had already won: the lock is ours to release.
+			mu.Unlock()
+		default:
+			// The helper has not delivered. Tell it to release when it acquires.
+			close(abandoned)
+		}
+		return false
+	}
 }
 
 // ctxOrNil returns the backend context, or a background context when the

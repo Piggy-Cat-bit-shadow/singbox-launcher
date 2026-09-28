@@ -335,9 +335,21 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	// Шаблон после апгрейда докачивается в фоне (StartTemplateRefresh) —
 	// ждём его ДО захвата CmdMutex: Stop, нажатый во время ожидания, иначе
 	// встал бы на мьютексе. Сборка ниже ждёт того же шлюза, но он уже открыт.
-	ac.awaitTemplateRefresh()
+	// Context-aware from here on. Two uninterruptible waits used to sit on this
+	// path — the template refresh and the CmdMutex acquisition — so the
+	// operation deadline on the IPC path bounded nothing: a caller whose context
+	// had long expired still sat in one of them and then proceeded in a world
+	// that had moved on.
+	if err := ac.awaitTemplateRefreshContext(ctx); err != nil {
+		return err
+	}
 
-	ac.CmdMutex.Lock()
+	if !acquireWithContext(ctx, &ac.CmdMutex) {
+		// The wait for the engine was abandoned. Nothing has been changed yet,
+		// so this is a clean exit; the caller is told why.
+		debuglog.InfoLog("startSingBox: gave up waiting for the engine lock: %v", ctx.Err())
+		return ctx.Err()
+	}
 	defer ac.CmdMutex.Unlock()
 
 	// Re-check under the lock: two concurrent Start() calls both pass the

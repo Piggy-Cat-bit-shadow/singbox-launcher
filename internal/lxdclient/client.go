@@ -219,7 +219,22 @@ func (c *Client) StatusCtx(ctx context.Context) (StatusInfo, error) {
 // Apply отправляет конфиг демону: валидация сабпроцессом → подмена инстанса
 // → last-good, с автооткатом на провале старта. 422 → ApplyError.Rejected().
 func (c *Client) Apply(config []byte) error {
-	resp, err := c.do(http.MethodPost, "/admin/apply", bytes.NewReader(config), "application/json")
+	return c.ApplyCtx(context.Background(), config)
+}
+
+// ApplyCtx доставляет конфиг с отменяемым контекстом.
+//
+// Apply — единственный вызов, который МОЖЕТ поднять ядро на демоне, и он же
+// самый долгий: демон перезапускает in-process экземпляр и заново поднимает
+// слушателей. Без ctx этот вызов нельзя прервать, поэтому «таймаут операции»
+// на стороне лаунчера ничего не гарантировал: вызов, застрявший в сети или в
+// ожидании ответа демона, переживал любой срок и завершался уже в мире, которого
+// больше нет (пользователь сменил движок, backend закрыт).
+func (c *Client) ApplyCtx(ctx context.Context, config []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, err := c.doCtx(ctx, http.MethodPost, "/admin/apply", bytes.NewReader(config), "application/json")
 	if err != nil {
 		return err
 	}
@@ -240,16 +255,34 @@ func (c *Client) Apply(config []byte) error {
 }
 
 // Start поднимает ядро из last-good (без нового конфига).
-func (c *Client) Start() error { return c.simplePost("/admin/start") }
+func (c *Client) Start() error { return c.StartCtx(context.Background()) }
+
+// StartCtx — Start с отменяемым контекстом.
+func (c *Client) StartCtx(ctx context.Context) error { return c.simplePostCtx(ctx, "/admin/start") }
 
 // Stop гасит ядро; демон и канал остаются жить.
-func (c *Client) Stop() error { return c.simplePost("/admin/stop") }
+func (c *Client) Stop() error { return c.StopCtx(context.Background()) }
+
+// StopCtx — Stop с отменяемым контекстом.
+//
+// Остановка — это side effect на ядре демона, и она тоже бывает долгой
+// (демон гасит процесс и ждёт освобождения ресурсов). Без ctx вызывающий не мог
+// ни прервать ожидание, ни отличить «демон не ответил» от «мы перестали ждать».
+func (c *Client) StopCtx(ctx context.Context) error { return c.simplePostCtx(ctx, "/admin/stop") }
 
 // Rollback откатывает на last-good.
 func (c *Client) Rollback() error { return c.simplePost("/admin/rollback") }
 
 func (c *Client) simplePost(path string) error {
-	resp, err := c.do(http.MethodPost, path, nil, "")
+	return c.simplePostCtx(context.Background(), path)
+}
+
+// simplePostCtx — simplePost с отменяемым контекстом.
+func (c *Client) simplePostCtx(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, err := c.doCtx(ctx, http.MethodPost, path, nil, "")
 	if err != nil {
 		return err
 	}

@@ -565,3 +565,90 @@ func TestConcurrentModeSwitchSerialized(t *testing.T) {
 	// The wire state must still resolve rather than panicking on a torn backend.
 	_ = b.coreState()
 }
+
+// --- M: timeouts actually interrupt ----------------------------------------
+
+// TestCoreOpTimeoutCancelsMutexWait is claim M.
+//
+// The "45s operation timeout" bounded only the part of the work that happened to
+// run. Two waits on the start path could not be interrupted at all — the template
+// refresh and the CmdMutex acquisition — so a caller whose context had long
+// expired still sat in one of them, and the start then proceeded in a world that
+// had moved on. A timeout that cannot interrupt the wait it is timing is not a
+// timeout.
+//
+// Asserted structurally, because reproducing it needs a lock held by another
+// subsystem: the start path must acquire the engine lock through the
+// context-aware helper rather than a bare Lock.
+func TestCoreOpTimeoutCancelsMutexWait(t *testing.T) {
+	src := stripGoComments(readSource(t, "core/process_service.go"))
+
+	idx := indexOf(src, "func (svc *ProcessService) StartContext(")
+	if idx < 0 {
+		t.Fatal("StartContext not found")
+	}
+	end := indexOf(src[idx:], "\nfunc ")
+	if end < 0 {
+		end = len(src) - idx
+	}
+	body := src[idx : idx+end]
+
+	if !contains(body, "acquireWithContext(ctx, &ac.CmdMutex)") {
+		t.Error("StartContext takes the engine lock with a bare Lock, so a caller " +
+			"whose context expires while waiting for it is blocked anyway")
+	}
+	if contains(body, "ac.CmdMutex.Lock()") {
+		t.Error("StartContext still contains an uninterruptible CmdMutex.Lock()")
+	}
+	if !contains(body, "awaitTemplateRefreshContext(ctx)") {
+		t.Error("StartContext waits for the template refresh without a context, so its " +
+			"deadline does not cover that wait")
+	}
+}
+
+// TestDaemonApplyHonoursContext is claim M, daemon half.
+//
+// Every daemon call on the apply path used a non-contextual variant, so a stuck
+// request outlived every deadline. The apply is also the one call that can START
+// A CORE, which makes it the worst one to be unable to cancel.
+func TestDaemonApplyHonoursContext(t *testing.T) {
+	src := stripGoComments(readSource(t, "core/backend_daemon.go"))
+
+	for _, call := range []string{
+		"b.admin.ApplyCtx(",
+		"b.admin.StatusCtx(",
+		"b.admin.InfoCtx(",
+	} {
+		if !contains(src, call) {
+			t.Errorf("the daemon apply path does not use %s; that call cannot be "+
+				"interrupted, so the operation timeout does not bound it", call)
+		}
+	}
+
+	// And the non-contextual forms must not remain on the apply path.
+	idx := indexOf(src, "func (b *DaemonBackend) applyOnce(")
+	if idx < 0 {
+		t.Fatal("applyOnce not found")
+	}
+	end := indexOf(src[idx:], "\nfunc ")
+	if end < 0 {
+		end = len(src) - idx
+	}
+	body := src[idx : idx+end]
+	for _, stale := range []string{"b.admin.Apply(config)", "b.admin.Status()", "b.admin.Info()"} {
+		if contains(body, stale) {
+			t.Errorf("applyOnce still calls %s, which ignores the backend context", stale)
+		}
+	}
+}
+
+// TestDaemonApplyLockWaitIsCancellable — the lock itself must be waitable with a
+// context, or a caller stuck behind a long apply is blocked for that apply's
+// whole duration no matter what deadline it carries.
+func TestDaemonApplyLockWaitIsCancellable(t *testing.T) {
+	src := stripGoComments(readSource(t, "core/backend_daemon.go"))
+	if !contains(src, "acquireWithContext(ctx, &b.applyMu)") {
+		t.Error("the daemon apply waits for applyMu with a plain Lock; the operation " +
+			"timeout cannot interrupt that wait")
+	}
+}

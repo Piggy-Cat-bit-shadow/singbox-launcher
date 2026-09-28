@@ -306,6 +306,52 @@ func (ac *AppController) awaitTemplateRefresh() {
 	}
 }
 
+// awaitTemplateRefreshContext waits for the startup template refresh, but gives
+// up when the caller's context ends.
+//
+// Returns the context error when the wait was abandoned, so the caller can stop
+// rather than proceeding to build a config from a template that is still being
+// replaced. The non-context version keeps its existing behaviour for callers
+// with no deadline (the GUI path), where waiting is the right thing to do.
+//
+// WHY THIS EXISTS. A start that waits here cannot be interrupted, so the
+// operation timeout on the IPC path bounded nothing: a caller whose deadline had
+// long passed still sat in this select, and the start then proceeded in a world
+// that had moved on.
+func (ac *AppController) awaitTemplateRefreshContext(ctx context.Context) error {
+	if ac == nil {
+		return nil
+	}
+	p := ac.templateRefreshDone.Load()
+	if p == nil {
+		return nil
+	}
+	select {
+	case <-*p:
+		return nil
+	default:
+	}
+	if ctx == nil {
+		ac.awaitTemplateRefresh()
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	debuglog.InfoLog("template: waiting for the startup template refresh before building config.json")
+	select {
+	case <-*p:
+		return nil
+	case <-ctx.Done():
+		debuglog.WarnLog("template: the wait for the startup refresh was cancelled: %v", ctx.Err())
+		return ctx.Err()
+	case <-time.After(templateRefreshTimeout + 5*time.Second):
+		debuglog.WarnLog("template: startup refresh still running after %s — building with the installed template",
+			templateRefreshTimeout+5*time.Second)
+		return nil
+	}
+}
+
 // isDevAppVersion reports whether AppVersion is a non-release shape: the
 // hard-coded default (`v-local-test`), the build-script default
 // (`unnamed-dev`), or `git describe`-with-`-dirty`.
