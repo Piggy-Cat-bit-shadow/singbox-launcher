@@ -40,7 +40,17 @@ final class AppModel {
     private(set) var lastError: String?
 
     /// Navigation inside the menu-bar window.
-    var path: [Screen] = []
+    ///
+    /// The stack itself lives in NavigationStackModel so its ownership rule
+    /// (`popIfCurrent`) is executed by the test harness rather than described to
+    /// it — see that file for the double-pop this prevents.
+    var nav = NavigationStackModel()
+
+    /// The current path, for views that render it.
+    var path: [Screen] {
+        get { nav.path }
+        set { nav.path = newValue }
+    }
 
     /// Drop the edit drafts for one subscription.
     ///
@@ -392,43 +402,22 @@ final class AppModel {
     // defect this whole navigation layer exists to prevent.
 
     /// True when there is somewhere to go back to.
-    var canGoBack: Bool { !path.isEmpty }
+    var canGoBack: Bool { nav.canGoBack }
 
     /// Go back one screen. Safe to call with an empty path.
-    func goBack() {
-        guard !path.isEmpty else { return }
-        path.removeLast()
-    }
+    func goBack() { nav.goBack() }
 
     /// Return to the root screen.
-    func goHome() { path.removeAll() }
+    func goHome() { nav.goHome() }
 
     /// Leave the given screen, but only if the user is STILL on it.
     ///
-    /// THE BUG THIS EXISTS TO PREVENT. An operation that navigates on success
-    /// used to call `goBack()` unconditionally when its request returned. If the
-    /// user pressed Back while that request was in flight, the two popped
-    /// DIFFERENT screens: the user's own Back moved them one level, and the
-    /// operation's completion then moved them another. One save sent the user
-    /// two screens away from where they were.
-    ///
-    /// The operation must therefore express WHERE it expects to be, and give up
-    /// the pop if the user has already left. That is this method: the same pop on
-    /// the happy path, and a no-op once the user has taken their own exit.
-    ///
-    /// The check is by screen IDENTITY rather than by depth, so it stays correct
-    /// when an intervening navigation changed the stack shape.
-    ///
-    /// `path.last == screen` also implies `canGoBack`, so an empty stack is safe.
+    /// Delegates to the stack, which documents the double-pop this prevents.
     @discardableResult
-    func popIfCurrent(_ screen: Screen) -> Bool {
-        guard path.last == screen else { return false }
-        path.removeLast()
-        return true
-    }
+    func popIfCurrent(_ screen: Screen) -> Bool { nav.popIfCurrent(screen) }
 
     /// Current screen, or nil at the root.
-    var currentScreen: Screen? { path.last }
+    var currentScreen: Screen? { nav.currentScreen }
 
     /// Nodes matching the current search, in backend order.
     var filteredProxies: [ProxyNode] {
@@ -507,34 +496,6 @@ final class AppModel {
         }
     }
 
-    enum Screen: Hashable {
-        case coreDetails
-        case coreMode
-        case proxies
-        case subscriptions
-        case addSubscription
-        case editSubscription(String)
-        case daemon
-        case daemonPair
-        case more
-        case about
-
-        /// Title shown in the panel header.
-        var title: String {
-            switch self {
-            case .coreDetails: return "Core Details"
-            case .coreMode: return "Core Mode"
-            case .proxies: return "Proxies"
-            case .subscriptions: return "Subscriptions"
-            case .addSubscription: return "Add Subscription"
-            case .editSubscription: return "Subscription"
-            case .daemon: return "Daemon"
-            case .daemonPair: return "Pair Daemon"
-            case .more: return "More"
-            case .about: return "About"
-            }
-        }
-    }
 
     enum AppearancePreference: String, CaseIterable, Identifiable {
         case system, light, dark

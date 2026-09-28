@@ -57,7 +57,7 @@ struct RootView: View {
         )) {
             HomeView(model: model)
                 .navigationBarBackButtonHidden(true)
-                .navigationDestination(for: AppModel.Screen.self) { screen in
+                .navigationDestination(for: Screen.self) { screen in
                     destination(screen)
                         .navigationBarBackButtonHidden(true)
                 }
@@ -75,7 +75,7 @@ struct RootView: View {
     }
 
     @ViewBuilder
-    private func destination(_ screen: AppModel.Screen) -> some View {
+    private func destination(_ screen: Screen) -> some View {
         switch screen {
         case .coreDetails: CoreDetailsView(model: model)
         case .coreMode: CoreModeView(model: model)
