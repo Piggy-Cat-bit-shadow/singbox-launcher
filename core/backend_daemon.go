@@ -223,6 +223,24 @@ func newDaemonBackend(ac *AppController) (CoreBackend, error) {
 	b.connTracker = newConnTracker()
 	if ac.APIService != nil {
 		ac.APIService.SetTransport(b.transport)
+		// THE TRAFFIC SAMPLER NEEDS THE VERIFIED ENDPOINT, NOT THE TRANSPORT.
+		//
+		// `b.transport` is a gRPC client for proxy operations and carries no HTTP address,
+		// so a caller that needs to poll `/connections` cannot get one from it. The Clash
+		// endpoint lives behind the fallback, where it is only handed out once its identity
+		// has been PROVEN to be this daemon's — which is exactly the check the sampler must
+		// not skip, because reading connection counters from a stranger's core is the same
+		// trust decision as switching nodes on it.
+		//
+		// Published as a function so each sample re-asks: a captured endpoint would keep
+		// answering after its verification expired.
+		ac.APIService.SetVerifiedClashEndpoint(func() services.ClashTransport {
+			tr, ok := b.clashFallback.transportIfReady()
+			if !ok {
+				return services.ClashTransport{}
+			}
+			return tr
+		})
 	}
 	go b.superviseStatus()
 	go b.superviseLogs()

@@ -162,6 +162,13 @@ type APIService struct {
 	// (daemon-режим: gRPC к lxd). nil = классический Clash HTTP.
 	// Protected by StateMutex.
 	transportOverride ProxyTransport
+	// verifiedEndpoint — источник Clash-эндпоинта, принадлежность которого СВОЁМУ ядру
+	// доказана. nil у движка без такого понятия (классическое ядро: второго процесса,
+	// с которым можно перепутать, не существует).
+	//
+	// Хранится как ФУНКЦИЯ, а не как значение: доказательство стареет, и запомненный
+	// эндпоинт продолжал бы отвечать после истечения проверки.
+	verifiedEndpoint func() ClashTransport
 }
 
 // NewAPIService creates and initializes a new APIService instance.

@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	coreservices "singbox-launcher/core/services"
 	"strings"
 	"sync"
 	"time"
@@ -271,22 +270,38 @@ func fetchConnectionTotals(ctx context.Context, baseURL, token string) (up, down
 // already agreed to trust — instead of independently deciding, from the configured address
 // alone, that whatever answers there is the user's VPN.
 func (b *Backend) trafficEndpoint() (baseURL, token string, ok bool) {
-	transport, tok := b.transport()
-	if !tok {
+	if b.ac == nil || b.ac.APIService == nil {
 		return "", "", false
 	}
-	clash, isClash := transport.(coreservices.ClashTransport)
-	if !isClash {
-		// A non-Clash transport (a remote pool or chain) has no /connections endpoint to
-		// poll. Reporting "nothing to sample" is the honest answer; the previous code
-		// would have polled the configured address regardless of which transport the app
-		// was actually using.
-		return "", "", false
+
+	// THE VERIFIED ENDPOINT, WHEN THE BACKEND HAS ONE.
+	//
+	// A daemon's Clash API is reached through a transport that was PROVEN to belong to this
+	// daemon (`fallbackTransport`), and that proof is the only thing distinguishing it from
+	// any other Clash-compatible core listening on the same loopback port. When the engine
+	// can supply a verified endpoint, the sampler must use exactly that one.
+	//
+	// ASKING FOR IT IS NOT THE SAME AS ASKING FOR A TRANSPORT. An earlier version of this
+	// function asserted `transport().(ClashTransport)` — but under the daemon engine the
+	// override is `*daemonProxyTransport`, which talks gRPC and is NOT a ClashTransport. The
+	// assertion therefore failed for every daemon user and the sampler returned early
+	// forever, silently killing the speed readout in exactly the mode it was meant to
+	// protect. The endpoint is what the sampler needs; requiring a particular Go type to
+	// carry it turned a trust fix into a feature removal.
+	if provider, hasProvider := b.ac.APIService.VerifiedClashEndpoint(); hasProvider {
+		if provider.BaseURL == "" {
+			return "", "", false
+		}
+		return provider.BaseURL, provider.Token, true
 	}
-	if clash.BaseURL == "" {
-		return "", "", false
-	}
-	return clash.BaseURL, clash.Token, true
+
+	// No engine-specific endpoint: fall back to the single configured one, which for a
+	// classic core IS the verified endpoint — there is no second process to confuse it
+	// with, and `APIService` only reports an enabled config once the core is up.
+	//
+	// Reached for the classic engine and for a daemon whose fallback is not configured. A
+	// daemon WITH a fallback returns above, so the unverified path is never taken for it.
+	return b.clashEndpoint()
 }
 
 // clashEndpoint reports the configured Clash API address, without any verification.

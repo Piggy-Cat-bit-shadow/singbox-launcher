@@ -1,44 +1,83 @@
 package service
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"singbox-launcher/api"
 	"singbox-launcher/backend/protocol"
+	coreservices "singbox-launcher/core/services"
 )
 
 // TestTrafficSamplerUsesTheVerifiedTransport is statement 21 (§34 name), first half.
 //
-// Every proxy action goes through `b.transport()`, which knows about the daemon's verified
-// Clash fallback and refuses an endpoint the launcher has not confirmed belongs to this
-// daemon. The traffic sampler instead called `b.clashEndpoint()` directly and built its own
-// request against whatever `APIService` reported.
+// Every proxy action resolves its endpoint through a resolution that knows about the
+// daemon's VERIFIED Clash fallback. The traffic sampler called `clashEndpoint()` instead,
+// which reads the configured address straight out of APIService — so it was the one path
+// that would read connection counters from an endpoint the launcher had deliberately not
+// confirmed belongs to this daemon. Reading is milder than switching, but it is the same
+// trust decision, and making it twice — once with the check and once without — means the
+// check does not hold for the app as a whole.
 //
-// That is the same endpoint, reached without the verification — so the sampler is a path
-// that can read connection counters from a Clash-compatible core the launcher deliberately
-// would not issue commands to. Reading is not as dangerous as switching, but it is the same
-// trust decision being made twice, once of them without the check.
+// BEHAVIOURAL, AND THAT MATTERS. The first version of this test simply grepped for
+// `trafficEndpoint()` in `sample()`. It passed while the fix was broken: the helper
+// type-asserted the transport to `ClashTransport`, but under the daemon engine the override
+// is `*daemonProxyTransport` (a gRPC client), so the assertion failed for EVERY daemon user
+// and the sampler returned early forever — silently killing the speed readout in exactly the
+// mode it was written to protect. A test that reads text cannot see a feature disappear.
 func TestTrafficSamplerUsesTheVerifiedTransport(t *testing.T) {
-	src := stripGoComments(readServiceSource(t, "backend/service/traffic.go"))
+	b := backendWithConfig(t)
 
-	body := functionBodyForTest(t, src, "func (t *TrafficSampler) sample(ctx context.Context)")
+	// An engine that verifies an endpoint publishes it, and it is not a ClashTransport —
+	// this mirrors the daemon, whose proxy transport talks gRPC.
+	verified := coreservices.ClashTransport{BaseURL: "http://127.0.0.1:19090", Token: "secret"}
+	b.ac.APIService.SetTransport(daemonLikeTransport{})
+	b.ac.APIService.SetVerifiedClashEndpoint(func() coreservices.ClashTransport { return verified })
 
-	if strings.Contains(body, "clashEndpoint()") {
-		t.Error("the traffic sampler resolves its endpoint through clashEndpoint(), which " +
-			"bypasses the verification that guards every other proxy operation — so it can " +
-			"read counters from an endpoint the launcher has not confirmed is this daemon")
+	gotURL, gotToken, ok := b.trafficEndpoint()
+	if !ok {
+		t.Fatal("the sampler found no endpoint even though the engine published a VERIFIED " +
+			"one. The engine's proxy transport is not a ClashTransport, so requiring that " +
+			"type throws away the verified endpoint and the speed readout goes permanently " +
+			"dark in that engine")
 	}
-	// It must resolve through the helper that honours the daemon's verified override.
-	// `trafficEndpoint` defers to `transport()`, which is the function that knows about the
-	// fallback; naming the helper here rather than `transport()` directly keeps the test
-	// about the PROPERTY (goes through the verified resolution) instead of about which
-	// function is called on which line.
-	if !strings.Contains(body, "trafficEndpoint()") {
-		t.Error("the traffic sampler does not resolve its endpoint through the shared, " +
-			"verification-aware resolution")
+	if gotURL != verified.BaseURL || gotToken != verified.Token {
+		t.Fatalf("the sampler resolved %q/%q, want the VERIFIED %q/%q",
+			gotURL, gotToken, verified.BaseURL, verified.Token)
 	}
 }
+
+// TestTrafficSamplerRefusesAnUnverifiedEndpoint — the property the fix is for.
+//
+// When the engine verifies an endpoint and the verification says "do not use this", the
+// sampler must NOT fall back to the raw configured address. Falling back would mean the
+// verification is advisory, which is the same as not having it.
+func TestTrafficSamplerRefusesAnUnverifiedEndpoint(t *testing.T) {
+	b := backendWithConfig(t)
+	b.ac.APIService.SetTransport(daemonLikeTransport{})
+	// The engine has a verification concept, and it is not passing: the empty endpoint.
+	b.ac.APIService.SetVerifiedClashEndpoint(func() coreservices.ClashTransport {
+		return coreservices.ClashTransport{}
+	})
+
+	if url, _, ok := b.trafficEndpoint(); ok {
+		t.Errorf("the sampler resolved %q even though the engine's verified endpoint was "+
+			"empty. Falling back to the configured address makes the verification advisory", url)
+	}
+}
+
+// daemonLikeTransport is a ProxyTransport that is NOT a ClashTransport.
+//
+// It stands in for the daemon engine's `*daemonProxyTransport`, which is the case the
+// broken assertion silently dropped.
+type daemonLikeTransport struct{}
+
+func (daemonLikeTransport) GroupProxies(string) ([]api.ProxyInfo, string, error) { return nil, "", nil }
+func (daemonLikeTransport) SwitchProxy(string, string) error                     { return nil }
+func (daemonLikeTransport) Delay(string) (int64, error)                          { return 0, nil }
+func (daemonLikeTransport) DelayContext(context.Context, string) (int64, error)  { return 0, nil }
 
 // TestTrafficSamplerDoesNotEmitAfterStop is statement 21's second half.
 //

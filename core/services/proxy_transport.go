@@ -176,6 +176,34 @@ func (apiSvc *APIService) SetTransport(t ProxyTransport) {
 }
 
 // TransportOverride возвращает установленный override (nil в classic-режиме).
+// VerifiedClashEndpoint returns the Clash endpoint the launcher has PROVEN belongs to the
+// backend's own core, for engines that establish one.
+//
+// The second return value distinguishes "this engine verified an endpoint" from "this engine
+// has no verification concept". A caller that gets false must not conclude the endpoint is
+// untrusted — a classic core has no second process to confuse it with — only that there is
+// nothing engine-specific to prefer.
+func (apiSvc *APIService) VerifiedClashEndpoint() (ClashTransport, bool) {
+	apiSvc.StateMutex.RLock()
+	provider := apiSvc.verifiedEndpoint
+	apiSvc.StateMutex.RUnlock()
+	if provider == nil {
+		return ClashTransport{}, false
+	}
+	return provider(), true
+}
+
+// SetVerifiedClashEndpoint installs the engine's verified-endpoint provider.
+//
+// Called by the daemon engine once its Clash fallback can prove identity. The provider is
+// consulted on each read rather than captured as a value, because verification EXPIRES: a
+// captured endpoint would keep answering after its proof had gone stale.
+func (apiSvc *APIService) SetVerifiedClashEndpoint(provider func() ClashTransport) {
+	apiSvc.StateMutex.Lock()
+	defer apiSvc.StateMutex.Unlock()
+	apiSvc.verifiedEndpoint = provider
+}
+
 func (apiSvc *APIService) TransportOverride() ProxyTransport {
 	apiSvc.StateMutex.RLock()
 	defer apiSvc.StateMutex.RUnlock()
