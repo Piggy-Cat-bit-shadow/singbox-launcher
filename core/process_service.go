@@ -630,9 +630,30 @@ func (svc *ProcessService) promoteToRunningWhenReady(gen uint64, cmd *exec.Cmd, 
 }
 
 // reportEarlyExit records a core that died during startup as a start failure.
+//
+// ONE EXIT, ONE DECISION. This runs while the crash Monitor is also waiting on
+// the same process, and the two must not both act on the same death. Without
+// coordination the sequence was:
+//
+//	readiness sees the exit  → records a failed start, phase = failed
+//	monitor  sees the exit   → decides "crash", auto-restarts a core whose
+//	                           config had just been rejected
+//
+// which is precisely the restart loop the readiness gate exists to prevent. The
+// claim below makes the decision single-observation: whoever gets there first
+// owns the classification, and the other side finds the claim taken and leaves
+// the state alone.
 func (svc *ProcessService) reportEarlyExit(gen uint64, pid int) {
 	debuglog.WarnLog("startSingBox: core (PID=%d) exited during startup", pid)
 	if !svc.ac.classic.isCurrent(gen) {
+		return
+	}
+	// Claim the exit. A false result means the Monitor has already classified
+	// this death (as a crash) and is acting on it — reporting a start failure on
+	// top of that would give the user two causes for one event, and the second
+	// one could undo a restart that is already under way.
+	if !svc.ac.classic.claimExit(gen) {
+		debuglog.InfoLog("startSingBox: the exit of PID %d was already classified; not reporting a start failure", pid)
 		return
 	}
 	reason := svc.ac.classifyCoreExitReason()
@@ -1032,6 +1053,27 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	// 1. First PID (is this my process?)
 	if ac.SingboxCmd == nil || ac.SingboxCmd.Process == nil || ac.SingboxCmd.Process.Pid != monitoredPID {
 		debuglog.DebugLog("monitorSingBox: Process was restarted (PID changed from %d). This monitor is obsolete. Exiting.", monitoredPID)
+		return
+	}
+
+	// 1b. Has this exit already been classified?
+	//
+	// The readiness gate waits on the SAME process, so a core that dies during
+	// startup is observed by both. The gate owns that case and reports it as a
+	// failed START; if the monitor also classified it, it would call it a crash
+	// and auto-restart a core whose config had just been rejected — the restart
+	// loop the readiness gate was introduced to prevent. Whoever claims the exit
+	// first decides, and the other side leaves the state alone.
+	//
+	// Checked under CmdMutex, like every other decision in this function: the
+	// gate cannot run concurrently with this block, so the claim is authoritative
+	// at the moment it is read.
+	if ac.classic.exitAlreadyClaimed(monGen) {
+		debuglog.InfoLog("monitorSingBox: the exit of PID %d was already classified during startup; not treating it as a crash", monitoredPID)
+		return
+	}
+	if !ac.classic.claimExit(monGen) {
+		debuglog.InfoLog("monitorSingBox: could not claim the exit of PID %d (generation moved on); ignoring", monitoredPID)
 		return
 	}
 

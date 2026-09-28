@@ -150,6 +150,51 @@ type classicRuntime struct {
 	// opID identifies the in-flight operation, for logs and for late results to
 	// report against.
 	opID uint64
+
+	// exitClaimed records that the death of the CURRENT generation's process has
+	// already been classified and acted upon.
+	//
+	// The readiness gate and the crash Monitor both wait on the same process, so
+	// both can observe the same exit. Without a claim the readiness gate would
+	// record a failed start while the Monitor independently decided the core had
+	// CRASHED and restarted it — a restart loop for a config the core had just
+	// rejected, which is the exact failure the readiness gate exists to prevent.
+	//
+	// Cleared by beginOperation: it describes one process, and a new operation
+	// means a new process.
+	exitClaimed bool
+}
+
+// exitAlreadyClaimed reports whether the current generation's exit has already
+// been classified by another observer.
+//
+// Separate from claimExit because the Monitor needs to distinguish "someone else
+// decided" (leave everything alone) from "I won the claim" (classify it) from
+// "the generation moved on" (ignore), and collapsing those into one boolean
+// would make the monitor act on a stale generation.
+func (rt *classicRuntime) exitAlreadyClaimed(gen uint64) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.generation == gen && rt.exitClaimed
+}
+
+// claimExit reports whether this caller is the first to classify the current
+// generation's exit.
+//
+// Returns false when the exit has already been claimed, meaning some other
+// observer owns the decision and this one must not act. The generation must
+// still be current — a stale observer never claims anything.
+func (rt *classicRuntime) claimExit(gen uint64) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.generation != gen {
+		return false
+	}
+	if rt.exitClaimed {
+		return false
+	}
+	rt.exitClaimed = true
+	return true
 }
 
 // classicSnapshot is a consistent read of the runtime, taken under the lock.
@@ -211,6 +256,9 @@ func (r *classicRuntime) beginOperation(phase ClassicPhase, allowWhileBusy bool)
 	// exactly how a stale "user wants a restart" leaked into an unrelated exit.
 	r.stoppedByUser = false
 	r.restartRequested = false
+	// A new operation means a new process, so the previous process's exit claim
+	// does not apply to it.
+	r.exitClaimed = false
 	return r.generation, r.opID, true
 }
 
@@ -237,6 +285,7 @@ func (r *classicRuntime) renewGeneration() uint64 {
 	r.stoppedByUser = false
 	r.restartRequested = false
 	r.crashAttempts = 0
+	r.exitClaimed = false
 	return r.generation
 }
 

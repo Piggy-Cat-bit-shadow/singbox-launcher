@@ -940,3 +940,84 @@ func TestBuildMutexSerializesRebuilds(t *testing.T) {
 		t.Fatalf("up to %d builds ran at once; a rebuild must be exclusive", got)
 	}
 }
+
+// TestOneExitProducesOneDecision is the second-pass catch: the readiness gate and
+// the crash Monitor BOTH wait on the same process, so both observe the same death.
+//
+// Before the claim, the sequence was:
+//
+//	readiness → records a failed start, phase = failed
+//	monitor   → classifies the same exit as a crash, auto-restarts
+//
+// which is precisely the restart loop the readiness gate exists to prevent: a
+// config the core just rejected would be retried, and the user would be shown two
+// different causes for one event.
+func TestOneExitProducesOneDecision(t *testing.T) {
+	ac := newTestController()
+	withAliveScript(t, false)
+	gen, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("the start claim must be accepted")
+	}
+
+	// The readiness gate gets there first and owns the decision.
+	if !ac.classic.claimExit(gen) {
+		t.Fatal("the first observer must win the claim")
+	}
+
+	// The monitor must now see the exit as already decided, not classify it.
+	if !ac.classic.exitAlreadyClaimed(gen) {
+		t.Fatal("the monitor must be able to see that the exit is already decided; " +
+			"otherwise it restarts a core whose config was just rejected")
+	}
+	if ac.classic.claimExit(gen) {
+		t.Fatal("a second observer must not be able to claim the same exit")
+	}
+}
+
+// TestExitClaimDoesNotOutliveItsProcess — the claim describes ONE process, so a
+// new operation must start unclaimed. A carried-over claim would silence the
+// crash monitor for the next core, turning every future crash into silence.
+func TestExitClaimDoesNotOutliveItsProcess(t *testing.T) {
+	ac := newTestController()
+	gen, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("the start claim must be accepted")
+	}
+	if !ac.classic.claimExit(gen) {
+		t.Fatal("the first claim must succeed")
+	}
+
+	// The next operation brings a new process.
+	ac.classic.setPhase(gen, ClassicStopped)
+	gen2, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("a settled runtime must accept a new operation")
+	}
+	if ac.classic.exitAlreadyClaimed(gen2) {
+		t.Fatal("a new operation's process must start unclaimed, or its crash " +
+			"would be silently ignored")
+	}
+	if !ac.classic.claimExit(gen2) {
+		t.Fatal("the new generation must be claimable")
+	}
+}
+
+// TestExitClaimIsGenerationScoped — a stale observer must never claim, or a
+// superseded monitor could consume the claim belonging to the live core.
+func TestExitClaimIsGenerationScoped(t *testing.T) {
+	ac := newTestController()
+	gen, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("the start claim must be accepted")
+	}
+	stale := gen
+	ac.classic.renewGeneration()
+
+	if ac.classic.claimExit(stale) {
+		t.Fatal("a stale generation must not be able to claim an exit")
+	}
+	if ac.classic.exitAlreadyClaimed(ac.classic.currentGeneration()) {
+		t.Fatal("a stale claim must not mark the live generation as decided")
+	}
+}
