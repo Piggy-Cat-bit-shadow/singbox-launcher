@@ -579,6 +579,71 @@ straight from `ParsedNode` via a parallel pair of files
 > not forced. Neither `Start` nor `Update` writes `config.json` directly. This
 > invariant prevents stale-config-on-start regressions and is the anchor of the
 > Start/Build/Save state machine.
+>
+> **Serialization.** Because a rebuild is a read-modify-write on one file,
+> `AppController.buildMu` (`core/controller.go`) makes it exclusive. Two
+> concurrent builds could otherwise promote candidates out of order and leave a
+> config rendered from a stale state snapshot. It is a mutex, not a busy flag: a
+> second caller waits for a correct config rather than being refused one. It is
+> acquired first and never held while another launcher lock is taken, so it cannot
+> invert with `CmdMutex`.
+
+---
+
+### 6.3a Classic runtime lifecycle (`core/classic_runtime.go`)
+
+The privileged-child lifecycle is owned by a single mutex-guarded state rather
+than by independent booleans read and written from different goroutines.
+
+```
+stopped ──beginOperation──▶ starting ──readiness window survived──▶ running
+   ▲                            │                                      │
+   │                            └── early exit ──▶ failed              │
+   └──────── terminate confirmed ── stopping ◀──────────────────────────┘
+```
+
+- **Every operation carries a generation.** `isCurrent(gen)` gates every state
+  write, so a superseded goroutine cannot change the phase, clear ownership or
+  touch the crash counter. `beginOperation` refuses a start while one is in
+  flight — concurrent starts are impossible by construction.
+- **Readiness.** `exec.Start` succeeding means a process exists, not that the VPN
+  is up. The phase stays `starting` until the process survives a bounded window;
+  a death inside it is a failed START with a classified reason, not a crash.
+- **Confirmed termination** (`core/terminate.go`): TERM → wait → KILL → confirm,
+  with the process identity (executable path) verified on every probe so a
+  recycled PID is never signalled. One primitive for every kill path.
+- **Adoption.** A core inherited from a previous session is not a child, so
+  `watchAdoptedCore` polls its existence (identity-verified) and corrects the
+  state on death. Adoption refuses a PID whose executable cannot be verified.
+
+### 6.3b Lifecycle errors (`core/lifecycle_error.go`)
+
+One store — `(code, operation, message, detail, recoverable, config_error)` —
+holds why the runtime is not working. It is read by `coreState()` in
+`backend/service`, so a failure reaches the frontend both live (through the
+already-bridged state event) and in the snapshot, surviving a GUI restart.
+
+Producers: the rebuild path, `showErrorUI` (covering every existing caller), the
+deterministic-exit and restart-exhausted paths, the privileged-copy gate, and the
+daemon apply/FATAL/stop paths. Retryability is decided at the source: an occupied
+port, missing permissions, a cancelled authorization and a refused config are
+deterministic and are not advertised as retryable.
+
+### 6.3c Reference integrity (`core/build/ref_integrity.go`)
+
+After assembly, `finalizeReferences` resolves every reference the core will
+resolve — `outbounds[*].detour`, group members, `route.rules[*].outbound`,
+`route.final`, `dns.servers[*].detour`, `dns.rules[*].server`,
+`route.default_domain_resolver`, `route.rules[*].rule_set`. A dangling reference
+is an `ErrInvalidInputs` (caught at build time), and a dangling `route.final` is
+repaired to the first declared group that can carry traffic, then a direct
+outbound, then refused. The choice is by declaration order, never map order.
+
+`domain_resolver` is a DNS **server** tag, not an outbound, and is validated in a
+second pass so forward references stay legal. Validation is skipped for previews
+(an incomplete draft) and for a config with no outbounds at all (the lx-only
+template). Decoding goes through `jsonc.ToJSON`: every generated config contains
+`//` comments, so plain `encoding/json` fails on every real config.
 
 ---
 
