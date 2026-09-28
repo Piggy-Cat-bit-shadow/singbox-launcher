@@ -609,6 +609,13 @@ stopped ──beginOperation──▶ starting ──readiness window survived�
 - **Readiness.** `exec.Start` succeeding means a process exists, not that the VPN
   is up. The phase stays `starting` until the process survives a bounded window;
   a death inside it is a failed START with a classified reason, not a crash.
+- **No `defer Unlock` where a lock is released mid-body.** `Monitor` and
+  `onPrivilegedScriptExited` release `CmdMutex` before a delay and then re-acquire
+  it. Mixing that with a deferred `Unlock` produced an unrecoverable
+  `fatal error: sync: unlock of unlocked mutex` twice, because every early return
+  after the manual release had to remember not to unlock again. Both use explicit
+  accounting now (no defer), as `KillForRestart`/`ForceStopOwnedCore` always have.
+  `TestNoDeferredUnlockWhereTheLockIsReleasedMidBody` asserts the shape.
 - **Confirmed termination** (`core/terminate.go`): TERM → wait → KILL → confirm,
   with the process identity (executable path) verified on every probe so a
   recycled PID is never signalled. One primitive for every kill path.
