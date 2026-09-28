@@ -642,6 +642,14 @@ rule-set that fails much later with a parse error pointing at the download that
 succeeded. Each now reads ONE BYTE PAST the limit and reports the overflow, and
 the tests drive real objects rather than grepping for the constant.
 
+**On a bound you cannot distinguish from success, part two.** `internal/limitread`
+exists because the one-byte-past-the-limit rule was derived independently in five
+places and two of them got it wrong. A helper is the fix for a subtlety that has to
+be re-derived: the fifth copy is where the rule gets lost. Its tests drive real
+readers at a size a test can afford, and cover both boundaries plus the two ways an
+error can be misreported (a transport failure that is not an overflow, and a zero
+limit that would otherwise look like an empty input).
+
 **On locks and the files they guard.** A lock only protects the readers who use
 it, and a second lock over the same file is the same lost update as no lock,
 because the interleaving happens BETWEEN packages. `settings.json` has exactly one
@@ -655,9 +663,33 @@ and hands events to a single dispatcher goroutine. Ordering is provided by the o
 consumer, not by a lock held across subscriber calls: a subscriber that blocks (the
 production one writes to the client's pipe) must delay only LATER events, never the
 emitter — otherwise `shutting_down` itself queues behind a request that may never
-return, and teardown never begins. Numbering and enqueue must be atomic with
-respect to each other, or two emitters can be numbered 2 and 30 in that order and
-SEND them in the other, which a FIFO channel faithfully preserves as an inversion.
+return, and teardown never begins.
+
+Two properties have to hold at once, and the two obvious fixes each break one of
+them. Numbering and sending must be ATOMIC with respect to each other, or two
+emitters can be numbered 2 and 30 in that order and SEND them in the other, which a
+FIFO channel faithfully preserves as an inversion the client discards as stale. And
+the lock held across the send must NOT be the state lock, which guards the
+subscriber list that `Snapshot`, `Subscribe` and `EmitCoreState` read — a full queue
+behind a wedged client would then freeze the whole backend rather than the emitter.
+Both hold under `eventQueueMu`, which nobody reads state through; `seq` is atomic so
+concurrent readers stay race-free.
+
+**A subscriber runs ON the dispatcher goroutine**, which is the queue's only
+consumer, so a subscriber that emits more than the queue's depth would wait for a
+drain that cannot happen until it returns — a permanent self-deadlock. `emit`
+detects this and delivers inline. The detection CANNOT be a shared flag: a boolean
+meaning "a delivery is in progress" is true on the dispatcher and equally true, at
+that moment, on every other goroutine, so concurrent emitters take the inline path
+and jump the queue. The question is about the CALLER, so it reads the caller's
+goroutine identity, captured once at dispatcher start.
+
+`FlushEventsForTest` is the exact synchronisation point for tests: a sentinel that
+carries the identity of the call it releases, registered and enqueued as one atomic
+step. Registering first leaves a window where the dispatcher consumes the sentinel
+before anyone waits, and the flush then hangs on a queue that is visibly EMPTY.
+Keying waiters by sequence does not work either — two concurrent flushes observe the
+same sequence, because nothing was emitted between their reads.
 
 ---
 
