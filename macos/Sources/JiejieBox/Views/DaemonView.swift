@@ -188,6 +188,29 @@ struct DaemonView: View {
         }
     }
 
+    /// The subtitle for the install step: a plain first-time install, or an
+    /// explanation when the installed service is STALE.
+    ///
+    /// `needs_install` is true both when nothing is installed and when the
+    /// installed service no longer matches this app. Those are different
+    /// problems with different urgency — one is routine setup, the other means
+    /// the service that would receive the config is not the one this build
+    /// expects — and a single generic subtitle hides the difference.
+    ///
+    /// The backend already knows which it is and sends it in `service_detail`;
+    /// this surfaces that instead of re-deriving it, so the reason shown to the
+    /// user is the reason the launcher acted on.
+    private func installSubtitle(for status: DaemonStatus) -> String {
+        guard status.installed else {
+            return L.installServiceSubtitle.tr(language)
+        }
+        // Installed AND still needs install => stale/mismatched.
+        if let detail = status.service_detail, !detail.isEmpty {
+            return "\(L.serviceUpdateDetail.tr(language)) (\(detail))"
+        }
+        return L.serviceUpdateDetail.tr(language)
+    }
+
     /// Exactly one next step, so the screen never presents a checklist of
     /// parallel actions and leaves the user guessing which matters now.
     @ViewBuilder
@@ -195,7 +218,7 @@ struct DaemonView: View {
         switch status.nextStep {
         case .install:
             MenuRow(L.installService.tr(language),
-                    subtitle: L.installServiceSubtitle.tr(language),
+                    subtitle: installSubtitle(for: status),
                     systemImage: "shippingbox") {
                 Task { await model.daemonSetup(.install) }
             }

@@ -596,6 +596,12 @@ enum L: CaseIterable {
     case behaviourSection
     case advancedSection
     case installServiceSubtitle
+    /// Explains WHY the service needs installing/updating, using the backend's
+    /// own `service_detail`. A generic "setup required" leaves the user unable to
+    /// tell a first-time install from a service that no longer matches the app,
+    /// and those have different consequences: one is routine, the other means
+    /// the running service is not the one this app expects.
+    case serviceUpdateDetail
     case startServiceSubtitle
     case continueToPairSubtitle
     case pairServiceSubtitle
@@ -1034,6 +1040,7 @@ extension L {
         case .behaviourSection: return "Behaviour"
         case .advancedSection: return "Advanced"
         case .installServiceSubtitle: return "Creates the system service. Needs administrator rights."
+        case .serviceUpdateDetail: return "The installed service does not match this app, so it must be updated before the VPN can start."
         case .startServiceSubtitle: return "The service is installed but not running."
         case .continueToPairSubtitle: return "Paste the invite printed by Terminal."
         case .pairServiceSubtitle: return "Create a one-time invite, then pair this app."
@@ -1450,6 +1457,7 @@ extension L {
         case .behaviourSection: return "行为"
         case .advancedSection: return "高级"
         case .installServiceSubtitle: return "创建系统服务，需要管理员权限。"
+        case .serviceUpdateDetail: return "已安装的服务与当前应用不匹配，必须先更新服务才能启动 VPN。"
         case .startServiceSubtitle: return "服务已安装，但没有运行。"
         case .continueToPairSubtitle: return "粘贴终端中输出的邀请码。"
         case .pairServiceSubtitle: return "生成一次性邀请码，然后配对。"
