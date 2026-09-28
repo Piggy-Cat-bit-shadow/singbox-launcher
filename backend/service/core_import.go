@@ -99,10 +99,23 @@ func (b *Backend) ImportCoreFile(path string) (CoreImportResult, error) {
 	// file that no longer matches it. The UI blocks this first; the backend
 	// enforces it independently, because hiding a button is not a safety
 	// boundary.
+	//
+	// THE LEASE IS TAKEN FIRST, and the check is a separate, earlier courtesy.
+	// A check alone is a TOCTOU: it and the rename are two steps, so a start that
+	// begins between them still races the import. The lease is the lifecycle's own
+	// operation slot, so a start and a replacement compete for one resource and
+	// whichever arrives second is refused.
+	release, err := b.acquireCoreReplacementLease()
+	if err != nil {
+		return CoreImportResult{}, err
+	}
+	defer release()
+
 	if !b.coreIsStoppedForReplacement() {
 		return CoreImportResult{}, &protocol.Error{
-			Code:        "core_busy",
-			Message:     "stop the core before replacing it",
+			Code: "core_busy",
+			Message: "the core is running (or is still shutting down). Stop it " +
+				"before replacing the core binary.",
 			Recoverable: true,
 		}
 	}
@@ -240,14 +253,63 @@ func (b *Backend) coreIsStoppedForReplacement() bool {
 	if b.ac == nil {
 		return false
 	}
-	// Daemon mode runs the core inside the system service, whose copy is not
-	// the file being replaced; but a live daemon VPN still depends on the
-	// launcher core that built its config, so a running core blocks either way.
+	// THE LIFECYCLE DECIDES, NOT A PROCESS BOOLEAN.
+	//
+	// This checked `RunningState.IsRunning()` and the VPN button state, both of which
+	// remain false while a start operation is in flight. The gap is not exotic: a start
+	// that has been ACCEPTED but has not yet spawned leaves the running flag clear, and
+	// an import arriving in that window was permitted to atomically rename the core
+	// binary while the start goroutine was about to exec the old path. Version and
+	// config were then validated against one file and the process ran another.
+	//
+	// The operation record is the authority: any start, stop or restart that is not
+	// settled means the core file is in use, or is about to be.
+	if b.ops.busyForMaintenance() {
+		return false
+	}
+	// Daemon mode runs the core inside the system service, whose copy is not the file
+	// being replaced; but a live daemon VPN still depends on the launcher core that
+	// built its config, so a running core blocks either way.
 	if b.ac.RunningState != nil && b.ac.RunningState.IsRunning() {
 		return false
 	}
 	bs := b.ac.GetVPNButtonState()
 	return !bs.IsRunning
+}
+
+// acquireCoreReplacementLease takes the exclusion that makes an import atomic against
+// the lifecycle.
+//
+// The busy CHECK above and the rename are two separate steps, so a start beginning
+// between them still races the import. The check is necessary and not sufficient: it
+// narrows the window, and only mutual exclusion closes it.
+//
+// The lease is the lifecycle's own operation slot. Taking it through the same
+// primitive the start/stop/restart paths use means the import cannot be the one
+// component that forgot to participate — an import and a start compete for one lease,
+// so whichever arrives second is refused rather than interleaved.
+//
+// Returns a release function, or an error describing why the core is busy.
+func (b *Backend) acquireCoreReplacementLease() (func(), error) {
+	if b.ac == nil {
+		return nil, &protocol.Error{
+			Code: "not_ready", Message: "backend not initialised", Recoverable: true,
+		}
+	}
+	// The operation record is the single place that knows whether the lifecycle is
+	// settled. A lease that lived beside it could be acquired while an operation is
+	// running, which is the race this exists to prevent.
+	release, ok := b.ops.beginMaintenance()
+	if !ok {
+		return nil, &protocol.Error{
+			Code: "core_busy",
+			Message: "the core is being started, stopped or restarted (or another core " +
+				"replacement is in progress). Wait for it to settle before installing a " +
+				"different core.",
+			Recoverable: true,
+		}
+	}
+	return release, nil
 }
 
 // validateCoreCandidate checks the path itself before any bytes are touched.

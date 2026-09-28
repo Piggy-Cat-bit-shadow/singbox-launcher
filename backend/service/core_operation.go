@@ -189,6 +189,77 @@ func (s *coreOpState) beginOp(kind string) (*coreOperation, bool) {
 	return op, true
 }
 
+// beginMaintenance takes the exclusion that makes a core-file replacement atomic
+// against the lifecycle.
+//
+// The operation record is the ONE place that knows whether the lifecycle is settled,
+// so the lease lives here rather than beside it. A separate mutex would be acquired
+// successfully while a start is mid-flight — which is precisely the race it would be
+// meant to prevent — because nothing would make the start path take it.
+//
+// The lease is modelled as an operation with kind "maintenance" so that it competes
+// with start/stop/restart for the same slot: whichever arrives second is refused
+// rather than interleaved. It is released by the returned function, which clears the
+// record only if this lease is still the current one — a lease must not be able to
+// release a LATER operation's slot.
+func (s *coreOpState) beginMaintenance() (func(), bool) {
+	// REFUSE, DO NOT SUPERSEDE.
+	//
+	// beginOp supersedes an operation of a different kind, which is exactly right for
+	// start-versus-stop: a stop must be able to cancel a start. It is exactly WRONG
+	// here. Superseding a start in order to install a core would cancel the user's
+	// start and then rename the binary the cancelled start was about to exec — the
+	// race this lease exists to prevent, dressed up as success.
+	//
+	// Maintenance is not a command that competes for control of the lifecycle; it is a
+	// request that requires the lifecycle to be IDLE. So it waits for nothing and
+	// cancels nothing: if anything is in flight, it is refused.
+	s.mu.Lock()
+	busy := s.op != nil
+	s.mu.Unlock()
+	if busy {
+		return nil, false
+	}
+
+	op, ok := s.beginOp("maintenance")
+	if !ok {
+		return nil, false
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			if settled := s.finishOp(op, nil); settled == settleStale {
+				// A newer operation already owns the record; releasing here would
+				// clear its slot.
+				debuglog.DebugLog("core op: maintenance lease %d was superseded before release", op.id)
+			}
+		})
+	}
+	return release, true
+}
+
+// busyForMaintenance reports whether the lifecycle is in a state where the core file
+// must not be touched.
+//
+// Any operation that is not settled — start, stop, restart, or another replacement —
+// means the core binary is in use or is about to be. "Stopping" is NOT stopped: the
+// process may still be terminating.
+func (s *coreOpState) busyForMaintenance() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.op == nil {
+		return false
+	}
+	// A maintenance lease IS this caller's own exclusion, so it must not count as a
+	// reason to refuse. Without this the import path refuses itself: it takes the
+	// lease, then asks whether the core is free, sees its own lease in the record, and
+	// reports "core busy" for a core that is idle.
+	//
+	// Only the LIFECYCLE operations — start, stop, restart — make the core file
+	// unsafe to touch.
+	return s.op.kind != "maintenance"
+}
+
 // attachCancel gives an operation its cancellation handle, for callers that
 // build the context after registering the operation.
 //
