@@ -207,8 +207,18 @@ func (ac *AppController) RecordLifecycleError(code LifecycleErrorCode, operation
 // It deliberately does NOT touch RunningState: the core is still up, and
 // claiming otherwise before the daemon confirms it is the exact lie this seam
 // exists to prevent.
-func (ac *AppController) BeginDaemonStop() {
+// BeginDaemonStop marks a daemon stop as in flight, for the backend that owns it.
+//
+// owner is the backend performing the stop, and it must be the CURRENT one. A
+// stop can be in flight for up to daemonStopTimeout while the user switches
+// engines, and the finishing goroutine would otherwise write the state of an
+// engine it no longer owns — the same "old generation must not touch the new
+// generation's runtime" rule the Classic lifecycle enforces with generations.
+func (ac *AppController) BeginDaemonStop(owner CoreBackend) {
 	if ac == nil {
+		return
+	}
+	if owner != nil && ac.Backend() != owner {
 		return
 	}
 	if b, ok := ac.Backend().(stopStateBackend); ok {
@@ -220,8 +230,18 @@ func (ac *AppController) BeginDaemonStop() {
 // EndDaemonStop settles a daemon stop. confirmed=false keeps the "not stopped"
 // truth: the failure has already been recorded, and the state must continue to
 // show a running core rather than a stopped one.
-func (ac *AppController) EndDaemonStop(confirmed bool) {
+func (ac *AppController) EndDaemonStop(owner CoreBackend, confirmed bool) {
 	if ac == nil {
+		return
+	}
+	// A RETIRED backend must not settle anything.
+	//
+	// The stop polls for up to daemonStopTimeout. If the user switches engines
+	// meanwhile, this goroutine belongs to an engine that has been closed — and
+	// writing RunningState here would overwrite the NEW engine's state: the user
+	// would see "stopped" for a classic core that is starting, or "running" for a
+	// daemon they just left. Silently, from a goroutine nobody owns.
+	if owner != nil && ac.Backend() != owner {
 		return
 	}
 	if b, ok := ac.Backend().(stopStateBackend); ok {

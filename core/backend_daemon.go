@@ -615,7 +615,7 @@ func (b *DaemonBackend) StopVPN() {
 		// Publish "stopping" before the work starts, so the UI shows progress
 		// instead of a still-"connected" screen during the teardown.
 		if ac != nil {
-			ac.BeginDaemonStop()
+			ac.BeginDaemonStop(b)
 		}
 
 		if err := b.admin.Stop(); err != nil {
@@ -627,7 +627,7 @@ func (b *DaemonBackend) StopVPN() {
 			msg := fmt.Errorf("daemon stop: %w", err).Error()
 			if ac != nil {
 				ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", msg, "", true)
-				ac.EndDaemonStop(false)
+				ac.EndDaemonStop(b, false)
 				if ac.hasUI() {
 					b.ac.uiPort.ShowError(locale.T("Error"), msg)
 				}
@@ -643,7 +643,7 @@ func (b *DaemonBackend) StopVPN() {
 				ac.RecordLifecycleError(LifecycleErrStopFailed, "stop",
 					"the daemon accepted the stop but the core is still running",
 					err.Error(), true)
-				ac.EndDaemonStop(false)
+				ac.EndDaemonStop(b, false)
 				if ac.hasUI() {
 					ac.uiPort.ShowError(locale.T("Error"), locale.T(stopPrivilegedFailedText)+": "+err.Error())
 				}
@@ -654,7 +654,7 @@ func (b *DaemonBackend) StopVPN() {
 		// Confirmed gone by the daemon itself.
 		if ac != nil {
 			ac.clearDaemonSystemProxy("VPN stopped")
-			ac.EndDaemonStop(true)
+			ac.EndDaemonStop(b, true)
 		}
 		// The core is down, so its Clash API listener is gone with it. Dropping
 		// verification (not the configuration) means the next use re-proves the

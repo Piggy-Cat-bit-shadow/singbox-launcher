@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1019,5 +1022,141 @@ func TestExitClaimIsGenerationScoped(t *testing.T) {
 	}
 	if ac.classic.exitAlreadyClaimed(ac.classic.currentGeneration()) {
 		t.Fatal("a stale claim must not mark the live generation as decided")
+	}
+}
+
+// --- no deferred Unlock on paths that release mid-body ----------------------
+
+// TestMonitorDoesNotCrashWhenSupersededDuringTheRestartDelay is the P0 the
+// second-pass review found.
+//
+// `Monitor` releases CmdMutex before its 2s crash-restart delay and then has
+// guarded returns AFTER that release, including the one that fires when the user
+// switches engines mid-delay. With a `defer Unlock` still armed those returns
+// performed a second Unlock — `fatal error: sync: unlock of unlocked mutex`, an
+// UNRECOVERABLE crash that no recover() can catch and no caller can handle. The
+// guard written to close the mode-switch window would therefore kill the process
+// in exactly the case it was written for.
+//
+// A fatal runtime error aborts the test binary, so this test is its own proof:
+// reaching the assertions at all means the balance holds.
+func TestMonitorDoesNotCrashWhenSupersededDuringTheRestartDelay(t *testing.T) {
+	ac := newTestController()
+	cmd := exec.Command("/bin/sh", "-c", "exit 1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cannot start the stand-in process: %v", err)
+	}
+
+	gen := ac.classic.currentGeneration()
+	if !ac.classic.commitChild(gen, cmd, testExe) {
+		t.Fatal("the commit point must accept the child")
+	}
+	ac.SingboxCmd = cmd
+	ac.RunningState.Set(true)
+
+	done := make(chan struct{})
+	go func() {
+		(&ProcessService{ac: ac}).Monitor(cmd)
+		close(done)
+	}()
+
+	// Let Monitor enter the crash path and the 2s delay, then supersede it — the
+	// mode switch. The stale-monitor guard fires inside the window.
+	time.Sleep(300 * time.Millisecond)
+	ac.classic.renewGeneration()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Monitor never returned after being superseded")
+	}
+}
+
+// TestPrivilegedExitDoesNotCrashWhenSupersededDuringRestart is the P0-1 twin.
+//
+// `onPrivilegedScriptExited` has the same shape: a manual Unlock in the
+// user-restart branch, followed by a guard that returns if the generation was
+// renewed — a mode switch landing in that window killed the process.
+//
+// The restart branch is selected by pressing Restart, so the intent flag is set.
+func TestPrivilegedExitDoesNotCrashWhenSupersededDuringRestart(t *testing.T) {
+	ac := newTestController()
+	gen := ac.classic.currentGeneration()
+	if !ac.classic.commitPrivileged(gen, 4242, 4243, filepath.Join(t.TempDir(), "core.pid"), testExe) {
+		t.Fatal("the privileged commit must be accepted")
+	}
+	ac.RunningState.Set(true)
+	// Restart requested => decideCrashActionReason returns actionUserRestart,
+	// which is the branch that unlocks manually.
+	ac.RestartRequestedByUser = true
+
+	done := make(chan struct{})
+	go func() {
+		(&ProcessService{ac: ac}).onPrivilegedScriptExited()
+		close(done)
+	}()
+
+	// Supersede concurrently so the guard inside the released-lock window sees a
+	// stale generation.
+	go func() {
+		for i := 0; i < 2000; i++ {
+			ac.classic.renewGeneration()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("onPrivilegedScriptExited never returned")
+	}
+}
+
+// TestNoDeferredUnlockWhereTheLockIsReleasedMidBody is the structural invariant,
+// asserted on the source rather than by triggering each path.
+//
+// The same bug has now been produced twice by the same pattern: a function that
+// arms `defer Unlock` and ALSO releases the mutex by hand, leaving every early
+// return after the manual release to decide whether re-acquiring is required.
+// Functions that release mid-body must therefore not use the defer at all.
+//
+// This is a text check, and it is honest about that — it cannot prove the manual
+// accounting is right, only that the fragile pattern is absent. The behavioural
+// tests above cover the accounting.
+func TestNoDeferredUnlockWhereTheLockIsReleasedMidBody(t *testing.T) {
+	src, err := os.ReadFile("process_service.go")
+	if err != nil {
+		t.Fatalf("cannot read process_service.go: %v", err)
+	}
+	text := string(src)
+
+	for _, fn := range []string{
+		"func (svc *ProcessService) Monitor(",
+		"func (svc *ProcessService) onPrivilegedScriptExited(",
+	} {
+		start := strings.Index(text, fn)
+		if start < 0 {
+			t.Fatalf("cannot find %s", fn)
+		}
+		end := strings.Index(text[start+10:], "\nfunc ")
+		if end < 0 {
+			t.Fatalf("cannot find the end of %s", fn)
+		}
+		body := text[start : start+10+end]
+
+		// Only the function's own defer counts; a nested closure may keep one.
+		head := body
+		if i := strings.Index(body, "go func"); i >= 0 {
+			head = body[:i]
+		}
+		if strings.Contains(head, "defer ac.CmdMutex.Unlock()") {
+			t.Errorf("%s arms a deferred Unlock and also releases the mutex by "+
+				"hand; every early return after the manual release must then "+
+				"remember not to unlock again, which is how the fatal "+
+				"`unlock of unlocked mutex` crash was produced twice", fn)
+		}
+		if !strings.Contains(body, "ac.CmdMutex.Unlock()") {
+			t.Errorf("%s no longer releases the mutex by hand; this test is now "+
+				"checking the wrong shape and should be revisited", fn)
+		}
 	}
 }

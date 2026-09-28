@@ -901,13 +901,27 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 		debuglog.InfoLog("onPrivilegedScriptExited: stale generation %d, ignoring", gen)
 		return
 	}
+	// NO deferred Unlock in this function.
+	//
+	// It releases the lock mid-body (the restart path must not hold it across a
+	// 2s delay and a Start call), and a deferred Unlock combined with a manual one
+	// has now produced `fatal error: sync: unlock of unlocked mutex` TWICE — an
+	// unrecoverable crash, not an error any caller can handle. Every early return
+	// below would otherwise have to remember to re-acquire first, and the ones
+	// that forgot are exactly how those crashes happened.
+	//
+	// Ownership is explicit instead: each return states whether it holds the lock,
+	// and the function is written so that the manual Unlock and the final Lock
+	// balance on every path. KillForRestart and ForceStopOwnedCore already follow
+	// this discipline and have never had the bug.
 	ac.CmdMutex.Lock()
-	defer ac.CmdMutex.Unlock()
 	if !ac.classic.isCurrent(gen) {
 		debuglog.InfoLog("onPrivilegedScriptExited: generation became stale while acquiring the lock, ignoring")
+		ac.CmdMutex.Unlock()
 		return
 	}
 	if !ac.SingboxPrivilegedMode {
+		ac.CmdMutex.Unlock()
 		return
 	}
 	// The owned root process is gone (the wrapper exited and the waiter
@@ -935,6 +949,7 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 	case actionStoppedByUser:
 		ac.StoppedByUser = false
 		debuglog.InfoLog("onPrivilegedScriptExited: Stopped by user.")
+		ac.CmdMutex.Unlock()
 		return
 	case actionUserRestart:
 		ac.RestartRequestedByUser = false
@@ -943,6 +958,10 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 		// Generation re-checked after releasing the lock: this is the window in
 		// which a mode switch or a newer start can supersede us, and restarting
 		// into someone else's runtime is the failure this guards.
+		//
+		// The lock is already released here, so this return must NOT unlock again.
+		// That is the whole point of dropping the defer: with it armed, this
+		// return performed a second Unlock and killed the process.
 		if !ac.classic.isCurrent(gen) {
 			debuglog.InfoLog("onPrivilegedScriptExited: superseded before restart, not restarting")
 			return
@@ -960,12 +979,19 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 	case actionDeterministicFailure:
 		debuglog.WarnLog("onPrivilegedScriptExited: deterministic failure (%s), not restarting", reason)
 		ac.showDeterministicExitDialog(reason)
+		ac.CmdMutex.Unlock()
 		return
 	case actionMaxAttempts:
 		debuglog.DebugLog("onPrivilegedScriptExited: Max restart attempts reached.")
+		// Recorded before the UI branch: exhausting the restart budget is a
+		// lifecycle failure the frontend must show, and the headless backend has
+		// no uiPort to show it with.
+		msg := locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts)
+		ac.RecordLifecycleError(LifecycleErrRestartExhausted, "restart", msg, "", false)
 		if ac.uiPort != nil {
-			ac.uiPort.ShowError(locale.T("Error"), locale.Tf("Sing-Box failed to restart after %d attempts. Check sing-box.log for details.", restartAttempts))
+			ac.uiPort.ShowError(locale.T("Error"), msg)
 		}
+		ac.CmdMutex.Unlock()
 		return
 	}
 	// action == actionCrashRestart
@@ -978,13 +1004,12 @@ func (svc *ProcessService) onPrivilegedScriptExited() {
 	// Same window as the child-process monitor, same guard: after the delay the
 	// runtime may belong to another engine entirely.
 	//
-	// The lock is RE-ACQUIRED before returning. The deferred Unlock further up
-	// is still armed, so returning while the mutex is released would unlock a
-	// mutex this goroutine does not hold — a fatal runtime error, not a benign
-	// one. Taking it back first keeps the defer balanced on every path.
+	// No re-acquire: this function has no deferred Unlock any more, so a return
+	// here simply leaves the lock released. (Under the old defer this return had
+	// to re-take the lock; that requirement existed only to satisfy the defer and
+	// is what made the balancing invisible.)
 	if !ac.classic.isCurrent(gen) {
 		debuglog.InfoLog("onPrivilegedScriptExited: generation %d superseded during the restart delay; not restarting", gen)
-		ac.CmdMutex.Lock()
 		return
 	}
 	svc.Start(true)
@@ -1039,13 +1064,21 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		return
 	}
 
+	// NO deferred Unlock in this function — see the note in
+	// onPrivilegedScriptExited. Monitor releases the lock mid-body before the 2s
+	// crash-restart delay, so a deferred Unlock would fire on the guarded returns
+	// that follow it and crash the process with `fatal error: sync: unlock of
+	// unlocked mutex`. Those two returns are exactly the ones that fire during a
+	// mode switch, i.e. the case this function exists to handle.
+	//
+	// Each return below states whether it holds the lock.
 	ac.CmdMutex.Lock()
-	defer ac.CmdMutex.Unlock()
 
 	// Re-check under the lock: the generation can change between the gate above
 	// and acquiring CmdMutex (that is exactly the mode-switch window).
 	if !ac.classic.isCurrent(monGen) {
 		debuglog.InfoLog("monitorSingBox: generation %d became stale while acquiring the lock; ignoring exit", monGen)
+		ac.CmdMutex.Unlock()
 		return
 	}
 
@@ -1053,6 +1086,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	// 1. First PID (is this my process?)
 	if ac.SingboxCmd == nil || ac.SingboxCmd.Process == nil || ac.SingboxCmd.Process.Pid != monitoredPID {
 		debuglog.DebugLog("monitorSingBox: Process was restarted (PID changed from %d). This monitor is obsolete. Exiting.", monitoredPID)
+		ac.CmdMutex.Unlock()
 		return
 	}
 
@@ -1070,10 +1104,12 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 	// at the moment it is read.
 	if ac.classic.exitAlreadyClaimed(monGen) {
 		debuglog.InfoLog("monitorSingBox: the exit of PID %d was already classified during startup; not treating it as a crash", monitoredPID)
+		ac.CmdMutex.Unlock()
 		return
 	}
 	if !ac.classic.claimExit(monGen) {
 		debuglog.InfoLog("monitorSingBox: could not claim the exit of PID %d (generation moved on); ignoring", monitoredPID)
+		ac.CmdMutex.Unlock()
 		return
 	}
 
@@ -1095,6 +1131,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		ac.StoppedByUser = false // Reset flag for next start
 		// SPEC 065: cleanup phantom TUN-адаптеров на Win7 после exit sing-box.
 		triggerGhostTunCleanup()
+		ac.CmdMutex.Unlock()
 		return
 	}
 
@@ -1121,6 +1158,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		debuglog.WarnLog("monitorSingBox: Sing-Box exited gracefully (exit code 0).")
 		ac.ConsecutiveCrashAttempts = newAttempts
 		ac.RunningState.Set(false)
+		ac.CmdMutex.Unlock()
 		return
 	}
 
@@ -1132,6 +1170,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		ac.ConsecutiveCrashAttempts = newAttempts
 		ac.RunningState.Set(false)
 		ac.showDeterministicExitDialog(reason)
+		ac.CmdMutex.Unlock()
 		return
 	}
 
@@ -1149,6 +1188,7 @@ func (svc *ProcessService) Monitor(cmdToMonitor *exec.Cmd) {
 		if ac.uiPort != nil {
 			ac.uiPort.ShowError(locale.T("Error"), msg)
 		}
+		ac.CmdMutex.Unlock()
 		return
 	}
 

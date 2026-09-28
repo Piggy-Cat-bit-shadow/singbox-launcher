@@ -221,3 +221,72 @@ func TestClosedDaemonBackendIsNotActive(t *testing.T) {
 			"can write state after the engine has been replaced")
 	}
 }
+
+// TestRetiredDaemonBackendCannotSettleAStop is the P1 the second-pass review
+// found.
+//
+// A daemon stop polls for up to daemonStopTimeout, and the user can switch
+// engines while it is in flight. The finishing goroutine then belongs to a
+// backend that has been closed — and settling the stop writes RunningState,
+// which by then describes the NEW engine: the user would see "stopped" for a
+// classic core that is starting, or "running" for a daemon they just left.
+// Silently, from a goroutine nobody owns.
+//
+// This is the daemon engine's version of the rule the Classic lifecycle enforces
+// with generations: an engine that no longer owns the runtime must not write to
+// it.
+func TestRetiredDaemonBackendCannotSettleAStop(t *testing.T) {
+	d := newFakeDaemon(t, "STARTED")
+	ac, b := newTestDaemonBackend(t, d, false)
+
+	// A stop is in flight for THIS backend.
+	ac.BeginDaemonStop(b)
+
+	// The user switches engines: this backend is retired and a new one is live.
+	b.Close()
+	other := &DaemonBackend{ac: ac}
+	ac.setBackend(other)
+
+	// The truth of the new engine: its core is running.
+	ac.RunningState.Set(true)
+
+	// The retired stop now finishes. It must not touch the current engine.
+	ac.EndDaemonStop(b, true)
+
+	if !ac.RunningState.IsRunning() {
+		t.Fatal("a stop belonging to a RETIRED daemon backend cleared the running " +
+			"state of the current engine")
+	}
+}
+
+// TestCurrentDaemonBackendCanStillSettleAStop — the guard must not disable the
+// legitimate case, or a real stop would hang the UI in "stopping" forever.
+func TestCurrentDaemonBackendCanStillSettleAStop(t *testing.T) {
+	d := newFakeDaemon(t, "STARTED")
+	ac, b := newTestDaemonBackend(t, d, false)
+
+	ac.RunningState.Set(true)
+	ac.BeginDaemonStop(b)
+	ac.EndDaemonStop(b, true)
+
+	if ac.RunningState.IsRunning() {
+		t.Fatal("the owning backend must be able to confirm a stop")
+	}
+}
+
+// TestUnconfirmedDaemonStopKeepsReportingRunning — the other half of "unknown is
+// not down": a stop that was accepted but not confirmed must leave the state
+// saying running, because the tunnel may still be up.
+func TestUnconfirmedDaemonStopKeepsReportingRunning(t *testing.T) {
+	d := newFakeDaemon(t, "STARTED")
+	ac, b := newTestDaemonBackend(t, d, false)
+
+	ac.RunningState.Set(true)
+	ac.BeginDaemonStop(b)
+	ac.EndDaemonStop(b, false)
+
+	if !ac.RunningState.IsRunning() {
+		t.Fatal("an UNCONFIRMED stop must not report the VPN as down; the core may " +
+			"still be carrying traffic")
+	}
+}

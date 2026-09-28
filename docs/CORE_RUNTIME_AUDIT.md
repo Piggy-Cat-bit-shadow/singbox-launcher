@@ -398,3 +398,184 @@ the user with a silently dead core
   running.
 - **The build mutex is per-controller.** Two launcher processes writing the same
   `config.json` are still not coordinated; the daemon model assumes one client.
+
+---
+
+# Second pass — the class survived the first fix
+
+The first pass closed the incident by adding a reference-integrity validator. A
+deliberate second pass then re-attacked the SAME invariant from the outside,
+asking of each corrected defect: *which other paths share this mistake?* Eight
+more root causes fell out, six of them reachable in normal use. They are recorded
+here because the pattern matters more than the individual bugs: a validator is
+only as good as the set of shapes it walks, and a lifecycle fix on one engine is
+not a lifecycle fix on the other.
+
+## P0-A — the validator walked only the TOP LEVEL of every rule list
+
+`ref_integrity.go` iterated `route["rules"]` and `dns["rules"]` without
+recursing. sing-box's logical rules — `{"type":"logical","mode":"or","rules":[…]}` —
+nest arbitrarily, and this repo generates them. Reproduced before the fix:
+
+```
+{"type":"logical","mode":"or","rules":[{"domain":"a.com","outbound":"ghost-out"}]}
+  ValidateConfigReferences → 0 issues
+  CleanDanglingOutboundsInRouteRules → byte-identical, 0 warnings
+```
+
+That is the production failure exactly, one nesting level down, passing every
+check the launcher had. Fixed by extracting `walkRuleRefs` / `walkDNSRuleRefs`,
+which recurse and carry the full path, and making the cleaner recurse identically
+so the two can never disagree about the same rule. Tests:
+`TestNestedLogicalRuleTargetIsCaught`, `TestDeeplyNestedRuleTargetIsCaught`,
+`TestNestedDNSRuleServerIsCaught`, `TestCleanerRepairsNestedRule`.
+
+## P0-B — the cleaner silently deleted user routing rules
+
+A dangling target with no valid fallback was DROPPED, with a warning in the log.
+`bank.com → ru-out` simply stopped applying and fell through to `route.final`,
+and nothing in the UI said so. This also contradicted the project's own
+fail-closed policy for a dangling `detour`, which drops the node rather than
+silently rerouting it. A log line is not informed consent. Now a build error
+naming the rule and the tag. Tests:
+`TestDanglingWithoutFallbackFailsRatherThanDroppingTheRule`,
+`TestClean_DanglingWithoutFallbackFailsTheBuild`.
+
+## P0-C — the cleaner and the validator disagreed about sentinel literals
+
+`outboundSentinelLiterals` (`direct`/`block`/`dns-out`/`reject`/`drop`) are names
+the core resolves, and the cleaner deliberately left them alone. The validator had
+no sentinel concept, so `"outbound":"direct"` was reported `missing_target` and
+the BUILD FAILED on a config the core accepts — a false positive dressed as a
+dangling reference. Both passes now share `isSentinelOutbound`. Test:
+`TestSentinelLiteralsAreNotDangling`.
+
+## P0-D — the daemon reported "stopped" on an accepted request (2nd engine, same lie)
+
+The first pass taught the CLASSIC engine that a sent signal is not an exited
+process. The daemon engine kept the weaker belief: `/admin/stop` is an ordinary
+POST (`internal/lxdclient/client.go:246`) that returns 200 on ACCEPTANCE, and the
+code treated that as proof and cleared `RunningState` immediately. Reproduced with
+a daemon that accepts the stop while its core keeps running:
+
+```
+BUG PROVEN: RunningState=false while /admin/status still reports the core as
+started — the launcher claims the VPN is down while the tunnel is up
+```
+
+Worse, this was downstream of a two-cores path: mode switching is gated on
+`RunningState`, so a falsely-false flag permitted an engine switch while the
+daemon core was still up. The daemon is now polled until it confirms the core is
+gone (`awaitDaemonStopped`), unknown ≠ down, and on timeout the failure is
+recorded and `RunningState` keeps saying "running". The same correction is applied
+to `OnAppExit`, which additionally used to return `true`, making `GracefulExit`
+enter a wait loop whose first check its own eager write had already satisfied.
+Tests: `TestDaemonStopIsNotReportedUntilTheCoreIsGone`,
+`TestDaemonStopReportsStoppedOnceTheCoreIsConfirmedGone`,
+`TestDaemonStopThatIsConfirmedLaterSettlesLate`,
+`TestDaemonStopRecordsAFailureWhenItCannotBeConfirmed`.
+
+Self-inflicted bug found while testing this: the first version of the confirmed
+branch never cleared the running flag, so a successful stop would have shown
+"connected" forever. Caught by the settle test, not by review.
+
+## P0-E — a retired daemon backend could still apply config and disable user nodes
+
+`retryAfterCoreFatal` runs on a goroutine nobody owns and called
+`applyCurrentConfig`, which passed `context.Background()` rather than `b.ctx`.
+`Close()` therefore could not cancel it: after a daemon→classic switch an
+abandoned backend could still push a config to the daemon the user had left —
+and `retryCoreReject` disables user nodes on the way, before the `isActive()`
+guard that was supposed to contain it. Now bounded by `b.ctx`.
+
+Related: `isActive()` is a pointer comparison against `ac.Backend()`, and
+`setBackend` calls `prev.Close()` while `ac.backend` still points at `prev` — so
+for the whole handover a dying backend looked live, and a status frame decoded
+microseconds earlier could publish state after the new engine was active. The
+daemon engine has no generation counter; `closed atomic.Bool` is its equivalent.
+Tests: `TestClosedDaemonBackendIsNotActive`.
+
+## P1 — reserved names, inbound targets, and a headless nil-deref
+
+- A user outbound tagged `direct`/`block`/`dns-out` shadows a core built-in and
+  makes every reference to it ambiguous, yet validated as clean. Now
+  `RefReservedTag`. Test: `TestReservedTagCollisionIsCaught`.
+- `route.rules[*].inbound` was never checked, though template branches can drop an
+  inbound. Now validated at every depth, and skipped when no inbounds are declared
+  at all. Tests: `TestInboundReferenceIsCaught`,
+  `TestInboundNestedInLogicalRuleIsCaught`, `TestNoInboundsDeclaredSkipsInboundCheck`.
+- `dns.final` lacked the "no targets declared" guard its `route.final` twin has,
+  so a minimal template was rejected where the route case was tolerated. Tests:
+  `TestDNSFinalWithoutServersIsNotReported`, `TestDNSFinalWithServersIsStillCaught`.
+- `refreshUI()` dereferenced `ac.ui()` with no `hasUI()` guard, unlike every
+  sibling call in the same file — a nil-deref on the headless backend.
+
+## P1 — shutdown force-kill bypassed process identity
+
+`GracefulExit` waited 2s and then fell back to `ac.SingboxCmd.Process.Kill()`: a
+raw PID signal with no identity check (a recycled PID means killing an unrelated
+process in the last seconds of shutdown), which also cannot reach a privileged
+root core at all — `SingboxCmd` is nil there, so "Forcing kill" logged a line and
+left the TUN up. Replaced with `ForceStopOwnedCore()`, which goes through the same
+identity-verified terminate primitive as a normal stop.
+
+## What the second pass confirmed as already correct
+
+Stated with evidence, because a review that only lists problems is not a review:
+
+- **Build/validate ordering.** `ValidateConfigReferences` runs on the re-rendered,
+  repaired bytes and `res.ConfigJSON` is assigned from that same object; no filter
+  runs after validation. The emitted bytes ARE the validated bytes.
+- **Candidate preflight.** `promoteCandidate` is reachable only when `sing-box
+  check` returned nil, the candidate lives beside `config.json`, and promotion is
+  an atomic `os.Rename`. A rejected candidate cannot destroy the last working
+  config. Now pinned by `TestRejectedCandidateNeverReplacesTheGoodConfig`.
+- **In-graph filtering.** `sanitizeOutboundGraph` runs a mutating fixpoint that
+  updates detour carriers, chain positions, group members, nested chains and
+  cycles, and mutates `finalTags` so later sections see the final set.
+- **Preview builds.** No non-test caller sets `ForPreview: true`; every real
+  producer goes through the validated path, so a preview cannot mask a defect.
+- **The classic generation guard**, `applyOnce` commit ordering, `applyMu`, and the
+  supervisor reconnect/backoff were each read and found sound.
+
+## P0 — the second pass's own fixes crashed the process, twice
+
+Found by an adversarial review of the changeset rather than by a failing test,
+which is the point of having one. Both are `fatal error: sync: unlock of unlocked
+mutex` — an UNRECOVERABLE runtime error: no `recover()` catches it, no dialog
+appears, the launcher dies. Both were on the exact race paths this audit set out
+to fix.
+
+**`onPrivilegedScriptExited`** armed `defer ac.CmdMutex.Unlock()` and also released
+the mutex by hand in the user-restart branch. The supersede guard that follows then
+returned **before** the compensating re-acquire — so pressing Restart and switching
+engines in that window killed the process. Reproduced 3/3.
+
+**`Monitor`** had the same shape, and this one is worse: the comment at the guard
+reads *"THE MODE-SWITCH WINDOW, closed"*, but the guard that closes it returned
+through an armed defer. The fix converted the two-cores race it was written for
+into a fatal crash in precisely that case. Both guarded returns after the manual
+unlock were affected.
+
+The root cause is structural, not incidental: **every function that mixes
+`defer Unlock` with a manual `Unlock` has now produced this bug twice**, while the
+functions that manage the balance explicitly (`KillForRestart`,
+`ForceStopOwnedCore`, `Stop`) have never had it. Both functions were converted to
+the explicit discipline — no defer, and each return stating whether it holds the
+lock — rather than patching the two returns.
+
+`TestNoDeferredUnlockWhereTheLockIsReleasedMidBody` asserts the shape on the
+source (and says so: it proves the fragile pattern is absent, not that the manual
+accounting is right). The two behavioural tests reproduce the original crash when
+the defer is restored, which is how they were verified.
+
+## P1 — a retired daemon backend could still settle a stop
+
+`Close()` sets `closed` and `isActive()` honours it, but the stop path never
+consulted either: it called `EndDaemonStop`, which wrote `RunningState`
+unconditionally. A stop polls for up to 20s, so a user switching engines mid-stop
+left the finishing goroutine writing the state of an engine it no longer owned —
+the user would see "stopped" for a classic core that was starting, or "running"
+for a daemon they had just left. `BeginDaemonStop`/`EndDaemonStop` now take the
+backend performing the stop and refuse to act once it is no longer current: the
+daemon engine's equivalent of the Classic generation rule.
