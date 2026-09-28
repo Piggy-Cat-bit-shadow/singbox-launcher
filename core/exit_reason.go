@@ -89,9 +89,27 @@ func (r exitReason) String() string {
 var (
 	reUnknownField = regexp.MustCompile(`unknown field "?[a-z_]+"?`)
 	reDecodeConfig = regexp.MustCompile(`decode config|json: cannot unmarshal|invalid character`)
-	rePermission   = regexp.MustCompile(`operation not permitted|permission denied|not permitted`)
-	rePortInUse    = regexp.MustCompile(`address already in use|bind: address already`)
-	reMissingFile  = regexp.MustCompile(`no such file or directory|not found`)
+	// reConfigReference — the core's own dangling-reference messages.
+	//
+	// These MUST be matched before reMissingFile, whose bare `not found` used to
+	// swallow them. `default outbound not found: proxy-out` is a CONFIG problem,
+	// but it was classified as "missing local resource", so the user was told to
+	// check their file paths for a fault that was in route.final. The reason is
+	// still deterministic either way (so auto-restart stopped), which is why the
+	// misclassification was invisible — the remedy was simply wrong.
+	//
+	// Matched on the phrases sing-box actually emits for an unresolved tag:
+	//   default outbound not found: X / outbound not found: X
+	//   dns: server not found: X / rule-set not found: X / inbound not found: X
+	reConfigReference = regexp.MustCompile(`(outbound|server|rule[-_]?set|inbound|endpoint|detour|resolver)[^:\n]*not found`)
+	rePermission      = regexp.MustCompile(`operation not permitted|permission denied|not permitted`)
+	rePortInUse       = regexp.MustCompile(`address already in use|bind: address already`)
+	// reMissingFile is intentionally NARROW.
+	//
+	// A bare `not found` matches a dangling reference (`outbound not found`), an
+	// unknown flag and an unresolved hostname, all of which have their own, more
+	// useful reasons. Only a filesystem-shaped message belongs here.
+	reMissingFile  = regexp.MustCompile(`no such file or directory|open [^:]*: no such|cannot find the (file|path)|stat [^:]*: no such`)
 	reAPIAuth      = regexp.MustCompile(`authentication failed|401 unauthorized|invalid secret`)
 	reTransientNet = regexp.MustCompile(`no route to host|network is unreachable|i/o timeout|connection refused|temporary failure in name resolution|context deadline exceeded`)
 )
@@ -108,6 +126,11 @@ func classifyExitText(text string) exitReason {
 
 	switch {
 	case reUnknownField.MatchString(low) || reDecodeConfig.MatchString(low):
+		return exitReasonConfigInvalid
+	case reConfigReference.MatchString(low):
+		// A tag the config references does not exist. Deterministic, and a CONFIG
+		// fault rather than a missing file — the distinction decides which remedy
+		// the user is shown.
 		return exitReasonConfigInvalid
 	case rePortInUse.MatchString(low):
 		// Порт проверяем ДО прав: `bind: address already in use` не про права.

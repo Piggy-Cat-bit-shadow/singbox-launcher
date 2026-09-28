@@ -231,3 +231,66 @@ func TestDeterministicExitText(t *testing.T) {
 		t.Fatal("unknown must not have a deterministic-failure text")
 	}
 }
+
+// TestIncidentExitMessageIsAConfigFailure is the regression for the restart
+// policy's blind spot.
+//
+// `default outbound not found: proxy-out` is what the core printed on real
+// hardware. It was classified as `exitReasonMissingResource` because
+// reMissingFile matched a bare `not found` — so the launcher told the user to
+// check their file paths for a fault that was in route.final.
+//
+// The reason was deterministic either way, which is exactly why the bug hid: the
+// restart loop DID stop, and only the remedy was wrong. A classification that is
+// right by accident is not a classification.
+func TestIncidentExitMessageIsAConfigFailure(t *testing.T) {
+	// The shapes sing-box prints for an unresolved tag, plus the exact incident
+	// line and the surrounding FATAL framing.
+	messages := []string{
+		"FATAL default outbound not found: proxy-out",
+		"FATAL: default outbound not found: proxy-out",
+		"default outbound not found: proxy-out",
+		"FATAL failed to start: default outbound not found: proxy-out",
+		"outbound not found: some-group",
+		"dns: server not found: some-dns",
+		"rule-set not found: some-set",
+	}
+	for _, msg := range messages {
+		got := classifyExitText(msg)
+		if got != exitReasonConfigInvalid {
+			t.Errorf("%q classified as %v, want %v — a dangling reference is a CONFIG "+
+				"fault, and the remedy shown to the user depends on it",
+				msg, got, exitReasonConfigInvalid)
+		}
+		if !got.Deterministic() {
+			t.Errorf("%q must be deterministic: restarting cannot fix a missing tag", msg)
+		}
+	}
+}
+
+// TestMissingFileStillClassifiedAsResource — narrowing reMissingFile must not
+// lose the case it exists for.
+func TestMissingFileStillClassifiedAsResource(t *testing.T) {
+	for _, msg := range []string{
+		"open /etc/sing-box/config.json: no such file or directory",
+		"stat /var/lib/x: no such file or directory",
+	} {
+		if got := classifyExitText(msg); got != exitReasonMissingResource {
+			t.Errorf("%q classified as %v, want %v", msg, got, exitReasonMissingResource)
+		}
+	}
+}
+
+// TestConfigReferenceFailureDoesNotRestart — end to end through the crash
+// decision: a dangling reference must not produce attempt 1/3, 2/3, 3/3.
+func TestConfigReferenceFailureDoesNotRestart(t *testing.T) {
+	reason := classifyExitText("FATAL default outbound not found: proxy-out")
+	action, attempts := decideCrashActionReason(false, false, false, 0, 3, reason)
+	if action != actionDeterministicFailure {
+		t.Fatalf("a missing outbound must not auto-restart, got action=%v attempts=%d",
+			action, attempts)
+	}
+	if attempts != 0 {
+		t.Errorf("no restart attempts should be consumed, got %d", attempts)
+	}
+}
