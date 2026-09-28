@@ -637,6 +637,15 @@ enum L: CaseIterable {
     case clearSearch
     case coreNotRunning
     case coreNotRunningDetail
+    /// The core is UP but the Clash API has not answered yet.
+    ///
+    /// Distinct from `coreNotRunning` on purpose. They were one message, which
+    /// meant a core that was starting — or running with its API still coming up
+    /// — was reported to the user as "内核未运行". That is not a wording problem:
+    /// it tells the user the opposite of the truth about the one fact the screen
+    /// exists to report.
+    case coreApiNotReady
+    case coreApiNotReadyDetail
     case couldNotLoadProxies
     case backendDidNotAnswer
     case subscriptionsChangedReload
@@ -1075,6 +1084,8 @@ extension L {
         case .clearSearch: return "Clear the search."
         case .coreNotRunning: return "Core is not running"
         case .coreNotRunningDetail: return "Start the core to load, test and switch nodes."
+        case .coreApiNotReady: return "Core is running — connecting to its API…"
+        case .coreApiNotReadyDetail: return "The core is up. Its node list appears as soon as the API answers."
         case .couldNotLoadProxies: return "Could not load proxies"
         case .backendDidNotAnswer: return "The backend did not answer."
         case .subscriptionsChangedReload: return "Subscriptions changed, so the node list is out of date."
@@ -1492,6 +1503,8 @@ extension L {
         case .clearSearch: return "清除搜索。"
         case .coreNotRunning: return "内核未运行"
         case .coreNotRunningDetail: return "启动内核后即可载入、测试和切换节点。"
+        case .coreApiNotReady: return "内核已运行，正在连接 API……"
+        case .coreApiNotReadyDetail: return "内核已启动，API 就绪后将显示节点列表。"
         case .backendDidNotAnswer: return "后端没有响应。"
         case .subscriptionsChangedReload: return "订阅已变化，节点列表已过期。"
         case .noSelectorGroups: return "没有代理分组"

@@ -214,6 +214,15 @@ final class AppModel {
         case backendUnavailable
         /// The core is not running, so the Clash API has no node list.
         case coreStopped
+        /// The core IS up, but its API has not produced a node list yet.
+        ///
+        /// SEPARATE FROM `coreStopped` BECAUSE THEY SAY OPPOSITE THINGS. They
+        /// were one case, reached by `state != .running`, so anything not exactly
+        /// `running` was presented as "内核未运行" — including a core that was
+        /// starting, and a core that was running while its API was still coming
+        /// up. This screen exists to report whether the core is up, and it was
+        /// reporting the reverse.
+        case coreStartingUp
         /// The config has no selector groups at all.
         case noGroups
         /// The built config is behind the state; a reload is needed.
@@ -246,7 +255,35 @@ final class AppModel {
         if !proxiesSupported { return .unsupportedByEngine }
         if let _ = proxyError, proxies.isEmpty, !proxiesLoading { return .failed }
         if proxiesLoading && proxies.isEmpty { return .loading }
-        if core?.state != .running { return .coreStopped }
+        // A CORE THAT IS UP IS NOT "NOT RUNNING".
+        //
+        // This used to be `if core?.state != .running { return .coreStopped }`,
+        // which collapsed five states into one message. A core that is starting,
+        // or running while its API is still coming up, was therefore reported to
+        // the user as "内核未运行" — the opposite of the truth, on the one screen
+        // whose whole job is to say whether the core is up.
+        //
+        // The two are now distinct because the user's next action differs: a
+        // stopped core needs Start, a core that is up needs a moment.
+        guard let coreState = core?.state else {
+            // No core record at all: nothing is known to be running, and
+            // claiming otherwise would be the same lie in the other direction.
+            return .coreStopped
+        }
+        switch coreState {
+        case .stopped, .error:
+            return .coreStopped
+        case .starting, .stopping:
+            return .coreStartingUp
+        case .running:
+            break // keep evaluating: the API may still owe us the list
+        }
+        // The core reports running but the list has not arrived. Whether that is
+        // a slow API or a config needing a reload, the core IS up, so the screen
+        // must say so rather than claim it is stopped.
+        if proxies.isEmpty && groups.isEmpty {
+            return core?.config_stale == true ? .configStale : .coreStartingUp
+        }
         // `.configStale` is returned ONLY when there is nothing else to show. It
         // is not how staleness is reported — see `proxyListIsStale`, which is a
         // separate fact about the LIST rather than a state of the screen.

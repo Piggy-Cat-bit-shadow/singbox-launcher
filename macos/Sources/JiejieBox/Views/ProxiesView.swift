@@ -283,6 +283,18 @@ struct ProxiesView: View {
                 detail: L.coreNotRunningDetail.tr(language),
                 tone: .neutral)
 
+        case .coreStartingUp:
+            // The core is UP and the list has not arrived. Saying "not running"
+            // here was the reported defect: the user's core was verified running
+            // with four groups loaded while this screen denied it. A spinner plus
+            // the truth is the honest presentation, and it needs no action.
+            ProxyNotice(
+                symbol: "arrow.triangle.2.circlepath",
+                title: L.coreApiNotReady.tr(language),
+                detail: L.coreApiNotReadyDetail.tr(language),
+                tone: .neutral,
+                showsSpinner: true)
+
         case .unsupportedByEngine:
             // An explanation, NOT an error: no user action changes an engine
             // capability, so there is deliberately no Retry. Offering one would
@@ -600,6 +612,12 @@ struct ProxyNotice: View {
     var actionIsPending: Bool = false
     /// Why the action is unavailable, when it is.
     var actionDisabledReason: String?
+    /// Shown beside the title when the condition is expected to CLEAR BY ITSELF.
+    ///
+    /// Used by the "core is up, API not ready yet" notice: the state is
+    /// transient and needs no action, so a spinner communicates "wait" where a
+    /// static notice would read as a problem the user must solve.
+    var showsSpinner: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -609,6 +627,9 @@ struct ProxyNotice: View {
                     .foregroundStyle(tint)
                 Text(title)
                     .font(Typography.rowTitle.weight(.medium))
+                if showsSpinner {
+                    ProgressView().controlSize(.small)
+                }
             }
             Text(detail)
                 .font(Typography.rowSubtitle)
