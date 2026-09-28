@@ -668,9 +668,24 @@ func (b *Backend) runCoreOp(kind string, timeout time.Duration, fn func(context.
 	if !started {
 		// Already running the same operation: report success for the user's
 		// intent rather than an error, but do not start a second one.
+		//
+		// LOGGED AS A JOIN, NOT AS A NEW REQUEST.
+		//
+		// The callers log "start_core requested" before reaching this guard, so a
+		// burst of duplicates used to print a burst of identical "requested"
+		// lines and nothing that said they had been folded into one operation.
+		// Read literally, the log said the launcher was starting the core four
+		// times — which is how it was reported — while the guard was in fact
+		// working correctly.
+		//
+		// The wording above the guard is now left to the entry points, and this
+		// line states what actually happened.
+		debuglog.InfoLog("core op: %s (id=%d) — duplicate request joined the operation in flight; "+
+			"no second %s was started", kind, op.id, kind)
 		b.EmitCoreState()
 		return nil
 	}
+	debuglog.InfoLog("core op: %s (id=%d) started", kind, op.id)
 	b.EmitCoreState()
 
 	// The context is CANCELLABLE BY SUPERSESSION, not only by its own timeout.

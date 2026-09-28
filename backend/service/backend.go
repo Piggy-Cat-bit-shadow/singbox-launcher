@@ -1204,7 +1204,10 @@ func (b *Backend) StartCore() error {
 	if b.ac == nil {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
-	debuglog.InfoLog("backend: start_core requested")
+	// The request is NOT logged here: runCoreOp decides whether this is a new
+	// operation or a duplicate joining one in flight, and logging "requested"
+	// before that decision produced a burst of lines that read as four separate
+	// starts. The op-level log states which of the two actually happened.
 	return b.runCoreOp("start", b.opTimeout(), func(ctx context.Context) error {
 		return b.ac.StartVPNContext(ctx)
 	})
@@ -1215,7 +1218,8 @@ func (b *Backend) StopCore() error {
 	if b.ac == nil {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
-	debuglog.InfoLog("backend: stop_core requested")
+	// Not logged here: a duplicate stop that merely JOINS the teardown in flight
+	// must not read as a second teardown. runCoreOp logs which one it was.
 	// Stop is deliberately NOT awaited on this thread: it tears down processes
 	// and the TUN device, which can take a while. The operation's terminal state
 	// comes from the runtime transition, and a failure is reported through the
@@ -1323,7 +1327,9 @@ func (b *Backend) RestartCore() error {
 	if b.ac == nil {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
-	debuglog.InfoLog("backend: restart_core requested")
+	// Not logged here, for the same reason as start_core: runCoreOp decides
+	// between "a new operation" and "a duplicate joining one in flight", and the
+	// op-level log is the one that knows which happened.
 	return b.runCoreOp("restart", b.opTimeout(), func(ctx context.Context) error {
 		return b.ac.RestartVPNContext(ctx)
 	})
