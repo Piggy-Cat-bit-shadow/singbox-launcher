@@ -220,3 +220,82 @@ entry point; the menu is the row's only control, preserving the no-nesting rule.
 | Banner suppression | Success toast could hide a core/config warning in one `else-if` chain | Persistent conditions and transient toasts render independently |
 | Wrong path action | All three path rows used `selectFile` | File → Reveal, directory → Open, stated in the row |
 | Hover state loss | `let hover = HoverState()` recreated per body pass | `HoverStore`: one box per row identity |
+
+---
+
+## Interaction audit (this pass)
+
+The matrix above answers "what does this control call, and does it say so". This
+section answers the fifteen questions an interaction audit has to answer for
+every control: **when visible, when enabled, when disabled, what it calls, whether
+the backend precondition matches, double-click policy, concurrency with other
+operations, whether pending is shown correctly, whether success is visible,
+whether failure is visible, whether navigation after an async step is correct,
+whether a stale reply can overwrite the current screen, whether destructive
+actions are confirmed, whether the hover/hit target is honest, and whether it
+carries an accessibility label.**
+
+Rather than restate 85 rows, this records the *rules* that now decide those cells,
+the named type each rule lives in, and the control it governs. A cell is
+unambiguous when it is produced by one of these and covered by a test.
+
+### The deciding rules
+
+| Rule | Lives in | Governs | Test |
+|---|---|---|---|
+| Which core actions are offered, and the sentence when not | `ActionPolicy.decideCoreActions` → `CoreActionRefusal` | Home Start/Stop/Retry, Core Details Restart, Home version row, Core Mode switch | `TestCoreActionPolicyMatrix`, `TestCoreImportDisabledWhileCoreRunning`, `TestRestartButtonDisabledWhenRestartInvalid`, `TestCoreModeDisabledReasonMatchesPolicy` |
+| What the Home primary button does and says | `ActionPolicy.homePrimaryAction` | Home status button | `TestNonRecoverableCoreErrorDoesNotOfferGenericRetry`, `TestPendingOutranksReportedState` |
+| Whether the daemon control plane may be torn down | `ActionPolicy.decideDaemonDestructiveActions` → `DaemonDestructiveBlock` | Daemon Forget Pairing, Remove Service | `TestDaemonDestructiveSafety` |
+| What the subscription screen offers | `ActionPolicy.decideSubscriptionActions` → `SubscriptionActionRefusal` | Add, Update All, Reload Config | `TestSubscriptionActionsRequireSomethingToDo`, `TestUpdateAllHelpComesFromThePolicy` |
+| What a proxy node row may do | `ActionPolicy.proxyRowPolicy` | node select, node latency, Test All | `TestSingleNodeTestButtonsMatchSerializationPolicy` |
+| Whether the node list still describes the running config | `ActionPolicy.isProxyListStale` | Proxies stale banner | `TestStaleConfigIsVisibleWithCachedProxies` |
+| What to report after handing a command to Terminal | `ActionPolicy.terminalHandoffOutcome` | Daemon Copy/Open in Terminal | `TestTerminalSuccessWaitsForOSAScriptExit` |
+| When a prepared Terminal command stops being valid | `DaemonCommandLifetime.daemonCommandSurvives` | Daemon Re-pair, Remove Service, Install, Start | `TestPreparedCommandSurvivesAReadyDaemon` |
+| What a timed-out lifecycle command may conclude | `DaemonCommandLifetime.reconcileCoreOperation`, `snapshotCanSettleOperation` | Home Start/Stop, Core Details Restart | `TestCoreOperationTimeoutReconcilesSnapshot`, `TestSnapshotFreshnessRule` |
+| Which screen an async completion may leave | `NavigationStackModel.popIfCurrent` | Add, Edit Save/Delete, Pair, Generate Invite | `TestBackDuringAnOperationDoesNotDoublePop` |
+| Which reply may paint the screen | `RequestGeneration`, `proxyListCommitDecision` | Proxies group picker, node list | `TestStaleProxyReplyCannotTakeOverTheScreen`, `TestRapidGroupSwitchLatestIntentWins` |
+| The Test All run lifecycle | `GroupTestState`, `acceptsGroupTestStart` | Test All | `TestTestAllLocksAtTheClickNotTheFirstFrame` |
+| Whether concurrent refreshes coalesce and how a failure behaves | `CoalescingRefresh` | Daemon Refresh Status, Proxies reload | `TestRapidDaemonRefreshDropsOlderResponse`, `TestRefreshFailureDoesNotDestroyCommand` |
+| One operation at a time; chains stop on failure | `SingleFlight`, `chainShouldContinue` | Restart, Update All → Reload → Reload Groups | `TestRestartIsSingleFlight`, `TestBackendRestartStopsAfterAFailedStop`, `TestUpdateThenReloadChain` |
+| Whether the entered URL is one the backend will accept | `SubscriptionURLInput.looksValid`, compared against `service.LooksLikeURLForTest` | Add button | `TestSubscriptionURLValidationNeverRejectsWhatTheBackendAccepts` |
+| Whether typed text survives a re-render | `DraftStore` / `TextDraft` | Add, Edit, Pair invite, all three confirmation dialogs | `TestDraftsSurviveAModelUpdate`, `TestConfirmationDraftsSurviveARender` |
+| Hover only where clicking works | `ActionRow` `isHovering = $0 && isEnabled` | every ActionRow / MenuRow | `TestActionRowHoverOnlyForEnabledAction` |
+| Accessible name for a bare value | `ProxyNode.delayAccessibilityLabel` | node latency button | `TestLatencyButtonHasAccessibilityLabel` |
+| An unrecognised engine is not shown as Classic | `AppModel.activeEngine: String?` + `L.engineUnknown` | Core Mode | `TestUnknownEngineDoesNotPretendClassicActive` |
+
+### Cells that were wrong, and are now decided
+
+| Control | Cell | Before | After |
+|---|---|---|---|
+| Home status button | enabled | Retry offered for failures the backend called permanent | `recoverable == false` → navigates to Core Details; `nil` stays retryable |
+| Home version row | enabled | enabled whenever nothing was pending | `corePolicy.canImportCore` — the backend refuses unless the core is settled stopped |
+| Core Details Restart | enabled | enabled on any core | only on a running core with a binary; explains itself otherwise |
+| Core Mode switch | enabled | inline state test | `canSwitchEngine`: settled `stopped`, nothing in flight |
+| Home / Core Details / Add / Edit / Pair | navigation after async | unconditional `goBack()`, double-popping when the user had already left | `popIfCurrent(screen)`, keyed by screen identity |
+| Re-pair, Remove Service | pending → command lifetime | cleared the moment the daemon reported `ready` — i.e. immediately | survives until the state it was prepared for moves |
+| Daemon Refresh Status | double-click / concurrency | second read started; last reply won | callers join the read in flight; only the newest reply commits |
+| Daemon destructive rows | failure | could destroy state on an unknown backend | refused with a named `DaemonDestructiveBlock` |
+| Proxies group picker | stale reply | last reply to arrive painted the list | generation stamp; `superseded` / `otherGroup` / `commit` |
+| Proxies node Test | enabled | only the busy row disabled; other rows offered a click the model refused | one `proxyRowPolicy`; no row offers what the model would refuse |
+| Test All | double-click | second click started a second run before the first frame arrived | `.launching` claimed at the click |
+| Add Subscription | submit | case-sensitive URL check vs the backend's case-insensitive one | same rule, compared against the backend's own predicate by test |
+| Add / Edit / Pair / confirmations | pending | field contents lost when the view was rebuilt | `DraftStore`, keyed by screen and by subscription id |
+| Install / Start / Re-pair / Remove Service / Forget Pairing | pending | "Preparing…" on the row only | page-level `daemonOperationProgress` |
+| Every ActionRow | hover | lit up while disabled | gated on `isEnabled` |
+| node latency button | accessibility | bare number read aloud | label names the node and the measurement |
+| Subscriptions Update All | enabled | offered with nothing fetchable (all sources disabled or local) | requires at least one enabled refreshable source; the tooltip comes from the same policy |
+| Add Subscription | visible copy | claimed a first fetch that never happens | states what happens and names the action that fetches |
+| Terminal handoff | success | success reported when the request was accepted | reported from the helper's real exit status |
+
+### Still deliberately not automated
+
+These are stated so they are not mistaken for gaps:
+
+- **Actual double-click suppression by the OS.** The controls are disabled from the
+  click, which is what the user experiences; AppKit's click coalescing is not
+  modelled.
+- **VoiceOver navigation order.** Labels are asserted; the traversal order of a
+  SwiftUI `VStack` is the framework's.
+- **Real Terminal launch.** `osascript` is not run in tests; the exit-status rule
+  is executed, the process is not.
+- **Keyboard traversal and focus rings.** Not asserted anywhere in this repository.
