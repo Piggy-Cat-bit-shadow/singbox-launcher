@@ -410,6 +410,11 @@ struct ProxyActionCapabilities: Decodable, Hashable {
 
 /// Result of a config rebuild or a subscription refresh.
 struct MaintenanceResult: Decodable {
+    /// The OVERALL verdict: both phases succeeded.
+    ///
+    /// Derived on the backend rather than inferred here, because the two phases fail
+    /// independently and a caller that only sees "no error" would tell the user the
+    /// config was updated when the running core is still on the old one.
     let ok: Bool
     let message: String
     let total_sources: Int
@@ -417,6 +422,23 @@ struct MaintenanceResult: Decodable {
     let failed_sources: Int
     let nodes_count: Int
     let core_skips: [String]
+    /// Did the fetch phase succeed.
+    let refresh_ok: Bool?
+    /// Is config.json current afterwards. False with a successful refresh means the
+    /// node list moved but the core is still running the previous config — the case
+    /// that must not be reported as success.
+    let rebuild_ok: Bool?
+    /// Why the rebuild failed, when it did.
+    let rebuild_error: String?
+    /// Whether config.json still lags the state after this operation.
+    let config_stale: Bool?
+
+    /// True when the refresh worked but the running config was not updated.
+    ///
+    /// The specific misleading outcome this type exists to make expressible.
+    var rebuildFailedAfterRefresh: Bool {
+        (refresh_ok ?? ok) && !(rebuild_ok ?? true)
+    }
 }
 
 /// One periodic up/down speed sample, in bytes per second.

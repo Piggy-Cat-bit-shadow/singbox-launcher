@@ -18,9 +18,31 @@ import (
 
 // MaintenanceResult reports what a rebuild or refresh actually did.
 type MaintenanceResult struct {
-	// OK is false when the operation completed but achieved nothing useful
-	// (for example every subscription source failed).
+	// OK is false when the operation completed but achieved nothing useful, or
+	// when a phase it depends on failed.
+	//
+	// It is the OVERALL verdict, derived from the per-phase fields below rather than
+	// assumed from the first phase's success. Reporting OK because the refresh worked
+	// told the user "N nodes from M sources" while config.json had not been updated
+	// at all and the core kept running the old one.
 	OK bool `json:"ok"`
+	// RefreshOK reports the fetch phase: did the sources refresh succeed.
+	RefreshOK bool `json:"refresh_ok"`
+	// RebuildOK reports the materialisation phase: is config.json now current.
+	//
+	// SEPARATE FROM RefreshOK because the phases fail independently, and the
+	// difference is exactly what the user needs: a refresh that worked with a rebuild
+	// that failed means the node list is updated in state but the running config is
+	// still the old one. Collapsing them into one flag loses that.
+	RebuildOK bool `json:"rebuild_ok"`
+	// RebuildError carries why the rebuild failed, when it did.
+	//
+	// The core used to log this and return nil, so the failure existed only in a log
+	// file the user never sees.
+	RebuildError string `json:"rebuild_error,omitempty"`
+	// ConfigStale reports whether config.json still lags the state after this
+	// operation. True means the figures above describe state that is not yet built.
+	ConfigStale bool `json:"config_stale"`
 	// Message is a short human-readable summary, already localised by the
 	// core where the core produced it.
 	Message string `json:"message"`
@@ -127,7 +149,26 @@ func (b *Backend) UpdateSubscriptions() (MaintenanceResult, error) {
 		}
 	}
 
-	out := MaintenanceResult{OK: true}
+	// TWO PHASES, TWO OUTCOMES.
+	//
+	// The refresh and the rebuild fail independently, and a caller that learns only
+	// "the operation returned no error" cannot tell the user anything true. A
+	// successful refresh with a failed rebuild leaves the node list updated in state
+	// while the RUNNING config is still the old one — the most misleading outcome
+	// available, because everything the user can see says it worked.
+	out := MaintenanceResult{
+		RefreshOK: true,
+		RebuildOK: res == nil || res.RebuildErr == nil,
+	}
+	if res != nil && res.RebuildErr != nil {
+		out.RebuildError = res.RebuildErr.Error()
+	}
+	// The overall verdict requires BOTH phases. Anything less reports success for an
+	// operation whose point — the config the core runs — did not happen.
+	out.OK = out.RefreshOK && out.RebuildOK
+	if b.ac.StateService != nil {
+		out.ConfigStale = b.ac.StateService.IsConfigStale()
+	}
 	if res != nil {
 		out.TotalSources = res.TotalSources
 		out.SucceededSources = res.SucceededSources

@@ -324,6 +324,13 @@ func (svc *ConfigService) updateConfigFromSubscriptions(triggerRebuild bool) (*c
 		rebuildErr = ac.RebuildConfigIfDirty()
 		if rebuildErr != nil {
 			debuglog.WarnLog("UpdateConfigFromSubscriptions: auto-rebuild after refresh failed: %v", rebuildErr)
+			// Carried out on the RESULT, not only into the log. The refresh genuinely
+			// succeeded, so this is not an error return — but a caller that cannot see
+			// the rebuild failure will tell the user the config was updated when the
+			// core is still running the old one.
+			if result != nil {
+				result.RebuildErr = rebuildErr
+			}
 		}
 	}
 

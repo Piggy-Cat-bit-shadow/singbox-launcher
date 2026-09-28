@@ -75,6 +75,13 @@ type OutboundGenerationResult struct {
 	// для всего конфига, поэтому он снимается, а причина едет в UI. Одна
 	// запись на пару (код, схема), в порядке первой встречи.
 	CoreSkips []CoreSkip
+	// RebuildErr carries a failure from the rebuild that follows the refresh.
+	//
+	// The two phases fail independently and the caller must be able to report which
+	// one did. Logging it here and returning nil told every layer above that the
+	// operation succeeded, so the user was shown "N nodes from M sources" while
+	// config.json had not been updated at all.
+	RebuildErr error
 
 	// NodeSections — секции узлов, ДОШЕДШИХ до эмиссии (SPEC 121), в порядке
 	// эмиссии. Собирается здесь по той же причине, что и NodeOrigins: это

@@ -289,8 +289,25 @@ func (b *Backend) capabilities() protocol.Capabilities {
 
 // Snapshot returns the complete initial state.
 func (b *Backend) Snapshot() protocol.AppSnapshot {
+	// THE SEQUENCE MUST DESCRIBE THE CONTENT, NOT AN EARLIER MOMENT.
+	//
+	// This read the sequence under the lock, released it, and only then built the
+	// snapshot from separately-read fields. The number therefore described a moment
+	// BEFORE any of the content was captured, so a change landing in between appeared
+	// in the snapshot without being reflected in its sequence — and a client comparing
+	// that number against incoming events could neither accept the state as current nor
+	// know it was newer. The version check was unusable in exactly the case it exists
+	// for.
+	//
+	// Capturing both under one critical section makes the number a real version point.
+	// The fields are cheap reads, so holding the lock across them costs nothing
+	// measurable and removes the window entirely.
 	b.mu.Lock()
 	seq := b.seq
+	handshake := b.Handshake()
+	core := b.coreState()
+	settings := b.settingsState()
+	proxy := b.proxySummary()
 	b.mu.Unlock()
 
 	// One adoption attempt per snapshot, and only while ownership is UNKNOWN.
@@ -306,10 +323,10 @@ func (b *Backend) Snapshot() protocol.AppSnapshot {
 	return protocol.AppSnapshot{
 		SnapshotSeq: seq,
 		Session:     b.SessionID(),
-		Handshake:   b.Handshake(),
-		Core:        b.coreState(),
-		Settings:    b.settingsState(),
-		Proxy:       b.proxySummary(),
+		Handshake:   handshake,
+		Core:        core,
+		Settings:    settings,
+		Proxy:       proxy,
 	}
 }
 
