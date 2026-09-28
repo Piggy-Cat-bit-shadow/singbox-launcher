@@ -204,3 +204,35 @@ must stay degraded gracefully, which the existing probe already does.
    tell the difference, and log duplicates as *joined* rather than as new requests.
 4. **Cover the remaining required cases** (9, 11, 13, 14, 15) as executable
    tests, and record which of the fifteen are already covered by existing suites.
+
+
+---
+
+## 9. One CI failure observed, NOT reproduced, NOT fixed
+
+`TestBackupExportEnvelope` (`core/debugapi`) failed once during this round with
+`файл в конверте отличается от файла в теле`, then passed on the next run.
+
+**It is not caused by these changes**, and the reasoning is worth stating because
+"it passed on retry" is not an explanation:
+
+- `core/debugapi` does **not** import `core` (`go list -deps ./core/debugapi`
+  contains no `singbox-launcher/core`), so it cannot see the lifecycle changes at
+  all — the only pending edit at the time was in `core/controller.go`.
+- 20/20 consecutive local runs pass, as does the **full CI package set** run
+  locally with `go test -count=1` over every package CI builds.
+- It passes under UTC, `America/New_York` and `Asia/Tokyo`, with a shared
+  `TMPDIR` and with a fresh one per run (the handler uses `os.MkdirTemp`).
+- The pre-change baseline `4024f804` behaves identically.
+- Re-running CI gave success with `core/debugapi` `ok`.
+
+Examined and could not implicate:
+
+- the export embeds `AppVersion`, but the test's fake facade returns a constant
+  `"v-test"`;
+- the export clones maps (`cloneSkip`, `Params`), but only to copy them, and JSON
+  marshalling sorts map keys — iteration order cannot reach the output.
+
+**Left open deliberately.** If it recurs, the useful artefact is the failing run's
+`temp/darwin/test_output.log`, which CI already uploads, rather than more local
+guessing.
