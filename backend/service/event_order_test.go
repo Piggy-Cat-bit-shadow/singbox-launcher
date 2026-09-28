@@ -156,7 +156,13 @@ func TestConcurrentEmitIsStrictlyMonotonicUnderHeavyContention(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	time.Sleep(100 * time.Millisecond)
+
+	// FLUSH, DO NOT SLEEP. Delivery is asynchronous, and a fixed sleep turns this into a
+	// race against machine speed: it passed locally for a long time and then failed on the
+	// CI runner, which is exactly the failure mode a timing assumption produces. The flush
+	// is an exact synchronisation point — it returns once every event emitted BEFORE it has
+	// been delivered — so the assertions below read a settled state rather than a hopeful one.
+	b.FlushEventsForTest()
 
 	mu.Lock()
 	defer mu.Unlock()
