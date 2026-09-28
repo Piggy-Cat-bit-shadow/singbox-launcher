@@ -111,6 +111,10 @@ type Backend struct {
 	// makes the client's "discard seq <= my high-water mark" rule safe.
 	eventMu    sync.Mutex
 	dispatchMu sync.Mutex
+
+	// runtimeCfg records which config content the RUNNING core loaded, so a
+	// config/state divergence is detectable instead of silent.
+	runtimeCfg runtimeConfig
 }
 
 // shutdownSignal lazily creates the shutdown channels.
@@ -267,8 +271,15 @@ func (b *Backend) watchCoreState() {
 			// not keep polling a socket that is not listening.
 			if running {
 				b.Traffic().Start()
+				// Capture WHICH config just went live. This is the only moment the
+				// answer is knowable, and it is what lets the proxy surfaces tell the
+				// difference between "the core is serving what is on disk" and "the
+				// core is serving what was on disk when it started".
+				b.recordRunningConfig()
 			} else {
 				b.Traffic().Stop()
+				// Nothing is live, so there is no runtime config to diverge from.
+				b.runtimeCfg.clear()
 			}
 		}
 

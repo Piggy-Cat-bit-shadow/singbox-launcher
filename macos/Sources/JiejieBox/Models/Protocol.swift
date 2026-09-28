@@ -361,6 +361,22 @@ struct ProxyList: Decodable {
     /// than disabling every action — the same reasoning as `supported` above.
     let capabilities: ProxyActionCapabilities?
 
+    /// True when the running core is serving a DIFFERENT config from the one on
+    /// disk.
+    ///
+    /// The group names above come from `config.json`, while the live selection
+    /// comes from the Clash API — which answers about whatever the running core
+    /// loaded. After a rebuild those are different documents, so the list would
+    /// otherwise mix groups from a file the core never read with a selection
+    /// from the config it did.
+    ///
+    /// Optional so an older backend reads as "no divergence" rather than
+    /// prompting a restart that is not needed.
+    let runtime_restart_required: Bool?
+
+    /// Whether the config on disk is newer than what the running core loaded.
+    var needsRestartForRuntimeConfig: Bool { runtime_restart_required ?? false }
+
     /// Whether the engine can list proxies at all.
     var isSupported: Bool { supported ?? true }
 

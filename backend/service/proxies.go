@@ -69,6 +69,13 @@ func (b *Backend) ProxyGroups() (protocol.ProxyList, error) {
 		}
 	}
 
+	// The names above come from config.json. The Clash API below answers about whatever
+	// config the RUNNING core loaded, and after a rebuild those are different documents.
+	// Reporting that disagreement is the point: without it the picker lists groups the
+	// live core does not have and every switch to one fails naming a group the user is
+	// looking at.
+	restartRequired := b.RuntimeConfigDiverged()
+
 	transport, available := b.transport()
 	groups := make([]protocol.ProxyGroup, 0, len(names))
 	// Set once the engine reports it has no group capability at all. Checked
@@ -110,12 +117,13 @@ func (b *Backend) ProxyGroups() (protocol.ProxyList, error) {
 	available = available && !unsupported
 
 	return protocol.ProxyList{
-		Groups:            groups,
-		Proxies:           []protocol.Proxy{},
-		Group:             defaultGroup,
-		Available:         available,
-		Supported:         protocol.BoolPtr(!unsupported),
-		UnsupportedReason: unsupportedReason(unsupported),
+		Groups:                 groups,
+		Proxies:                []protocol.Proxy{},
+		Group:                  defaultGroup,
+		Available:              available,
+		Supported:              protocol.BoolPtr(!unsupported),
+		UnsupportedReason:      unsupportedReason(unsupported),
+		RuntimeRestartRequired: restartRequired,
 	}, nil
 }
 

@@ -506,6 +506,20 @@ type ProxyList struct {
 	// Supported is false. It names the ENGINE rather than a user action, since
 	// the user cannot change it.
 	UnsupportedReason string `json:"unsupported_reason,omitempty"`
+
+	// RuntimeRestartRequired is true when the running core is serving a DIFFERENT config
+	// from the one on disk.
+	//
+	// The Clash API answers about the config the running core was started with, while the
+	// group names here come from config.json. After a rebuild those disagree: the picker
+	// lists groups the live core does not have, and switching to one fails with an error
+	// naming a group the user can see on screen. Nothing compared the two before, so the
+	// divergence was invisible and permanent until the user happened to restart.
+	//
+	// The UI uses this to offer a restart instead of presenting a broken list. It is NOT
+	// an error: the config on disk is newer and correct, and the running core is simply
+	// behind it.
+	RuntimeRestartRequired bool `json:"runtime_restart_required,omitempty"`
 }
 
 // TrafficRate is one periodic speed sample.
