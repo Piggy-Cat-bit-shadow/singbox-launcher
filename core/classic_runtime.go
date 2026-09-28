@@ -297,6 +297,19 @@ func (ac *AppController) ClassicPhase() ClassicPhase {
 	return ac.classic.currentPhase()
 }
 
+// SetClassicPhaseForTest installs a phase directly.
+//
+// Exported for the backend's state tests, which must be able to state the
+// runtime's phase as a PRECONDITION instead of driving a real core far enough to
+// produce it. Only the phase is set; ownership, generation and process state are
+// untouched, so a test cannot accidentally create the impression of a live core.
+func (ac *AppController) SetClassicPhaseForTest(p ClassicPhase) {
+	if ac == nil {
+		return
+	}
+	ac.classic.setPhase(ac.classic.currentGeneration(), p)
+}
+
 // currentPhase reads the current phase.
 func (r *classicRuntime) currentPhase() ClassicPhase {
 	r.mu.Lock()

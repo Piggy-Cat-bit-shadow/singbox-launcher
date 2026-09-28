@@ -1,6 +1,10 @@
 package core
 
-import "singbox-launcher/internal/debuglog"
+import (
+	"context"
+
+	"singbox-launcher/internal/debuglog"
+)
 
 // LegacyBackend — классический движок: делегирует в ProcessService ровно те
 // же вызовы, которые раньше делали package-level обёртки. Поведение старого
@@ -26,11 +30,18 @@ type LegacyBackend struct {
 	ops *legacyOps
 }
 
-// legacyOps — три операции ProcessService, которые бэкенд уводит с потока UI.
+// legacyOps — операции ProcessService, которые бэкенд уводит с потока UI.
+//
+// startContext/restartContext are the CONTEXTUAL forms, used by the IPC path
+// that must be able to await a real outcome. They are the same code as start/
+// restart — ProcessService.StartContext is what Start itself delegates to — so
+// there is one implementation of starting a core, not two that can drift.
 type legacyOps struct {
-	start   func(skipRunningCheck bool)
-	stop    func()
-	restart func()
+	start          func(skipRunningCheck bool)
+	startContext   func(ctx context.Context, skipRunningCheck bool) error
+	stop           func()
+	restart        func()
+	restartContext func(ctx context.Context) error
 }
 
 // opsOrDefault возвращает действующие операции бэкенда.
@@ -40,9 +51,11 @@ func (b *LegacyBackend) opsOrDefault() legacyOps {
 	}
 	svc := b.ac.ProcessService
 	return legacyOps{
-		start:   func(skip bool) { svc.Start(skip) },
-		stop:    func() { svc.Stop() },
-		restart: func() { svc.KillForRestart() },
+		start:          func(skip bool) { svc.Start(skip) },
+		startContext:   func(ctx context.Context, skip bool) error { return svc.StartContext(ctx, skip) },
+		stop:           func() { svc.Stop() },
+		restart:        func() { svc.KillForRestart() },
+		restartContext: func(ctx context.Context) error { return svc.RestartContext(ctx) },
 	}
 }
 
@@ -69,6 +82,38 @@ func (b *LegacyBackend) StartVPN(skipRunningCheck ...bool) {
 	skip := len(skipRunningCheck) > 0 && skipRunningCheck[0]
 	op := b.opsOrDefault().start
 	go op(skip)
+}
+
+// StartVPNContext implements contextualCoreBackend: it starts the classic core
+// and does not return until the start has actually committed.
+//
+// WITHOUT THIS, THE HEADLESS PATH SILENTLY FELL BACK TO FIRE-AND-FORGET.
+//
+// `AppController.StartVPNContext` calls the contextual method when the engine has
+// one and otherwise calls `StartVPN` and returns nil immediately. LegacyBackend
+// had no contextual method, so on classic — the DEFAULT engine — the IPC start
+// returned nil the moment the goroutine was spawned. The caller then cleared its
+// pending operation and published the state, which at that instant was still
+// `stopped`, because nothing had started yet. The result was the exact symptom
+// the contextual interface was introduced to fix, still present on the engine
+// most users run: a successful Start click that appears to revert instantly, and
+// a client told the operation finished before any work had happened.
+//
+// So the classic engine now awaits its own commit point like the daemon does.
+func (b *LegacyBackend) StartVPNContext(ctx context.Context) error {
+	if b.ac == nil || (b.ops == nil && b.ac.ProcessService == nil) {
+		return nil
+	}
+	return b.opsOrDefault().startContext(ctx, false)
+}
+
+// RestartVPNContext implements contextualCoreBackend: restart and return the
+// real outcome rather than "a goroutine was started".
+func (b *LegacyBackend) RestartVPNContext(ctx context.Context) error {
+	if b.ac == nil || (b.ops == nil && b.ac.ProcessService == nil) {
+		return nil
+	}
+	return b.opsOrDefault().restartContext(ctx)
 }
 
 // StopVPN implements CoreBackend via ProcessService.Stop.

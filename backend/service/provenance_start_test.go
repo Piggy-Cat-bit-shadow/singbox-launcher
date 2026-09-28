@@ -417,7 +417,7 @@ func TestStartDoesNotReportStoppedWhilePending(t *testing.T) {
 	// A start in flight reports `starting`, not `stopped`. This is the whole
 	// fix: previously the state was published after a fire-and-forget start, at
 	// which point nothing had happened yet and it still read "stopped".
-	if !b.ops.beginOp("start") {
+	if _, ok := b.ops.beginOp("start"); !ok {
 		t.Fatal("beginOp refused the first start")
 	}
 	if got := b.coreLifecycleState(); got != protocol.CoreStateStarting {
@@ -427,12 +427,35 @@ func TestStartDoesNotReportStoppedWhilePending(t *testing.T) {
 		t.Errorf("DTO state during a pending start = %q, want starting", got)
 	}
 
-	// Committing the start by itself does not clear the pending record — the
-	// runtime transition does that — but the state must never go BACK to
-	// stopped in between.
-	b.ops.finishOp("start", nil)
+	// An accepted start whose runtime has NOT been observed yet is `starting`,
+	// not `stopped`.
+	//
+	// This assertion used to require `stopped`, on the reasoning that once the
+	// request record is cleared nothing is "pending" any more. That reasoning is
+	// what produced the reported symptom: "the start was accepted and the core is
+	// not up YET" was published as `stopped`, so the UI showed an idle core
+	// during the whole commit window, and a client waiting for a transition had
+	// already been told the operation was over.
+	//
+	// The two facts that must agree are the REQUEST (an operation is in flight)
+	// and the RUNTIME PHASE (the engine says it is starting). Here the engine has
+	// recorded that it is starting, so the state must say starting no matter what
+	// the request record has done.
+	b.ac.SetClassicPhaseForTest(core.ClassicStarting)
+	if got := b.coreLifecycleState(); got != protocol.CoreStateStarting {
+		t.Errorf("state with the classic runtime STARTING = %q, want starting: the "+
+			"runtime phase is authoritative once it exists, and reporting stopped "+
+			"for an engine that is coming up is how a successful click appeared to "+
+			"revert instantly", got)
+	}
+
+	// Once the runtime settles with nothing running, `stopped` is the honest
+	// answer again — the phase outranks the request record in both directions.
+	b.ac.SetClassicPhaseForTest(core.ClassicStopped)
+	op, _ := b.ops.beginOp("start")
+	b.ops.finishOp(op, nil)
 	if got := b.coreLifecycleState(); got != protocol.CoreStateStopped {
-		t.Errorf("state after an accepted start with no running runtime = %q, want stopped", got)
+		t.Errorf("state after the runtime settled with no core = %q, want stopped", got)
 	}
 }
 
@@ -440,16 +463,32 @@ func TestStartDoesNotReportStoppedWhilePending(t *testing.T) {
 func TestRapidDoubleClickStartsOnce(t *testing.T) {
 	b := backendWithConfig(t)
 
-	if !b.ops.beginOp("start") {
+	if _, ok := b.ops.beginOp("start"); !ok {
 		t.Fatal("the first start was refused")
 	}
-	if b.ops.beginOp("start") {
+	if _, ok := b.ops.beginOp("start"); ok {
 		t.Error("a second start was accepted while the first was in flight; " +
 			"a double click must produce one operation")
 	}
 	// A DIFFERENT operation is a genuine change of intent and must be allowed.
-	if !b.ops.beginOp("stop") {
+	//
+	// This assertion previously stopped at the record: it checked that `stop`
+	// replaced `start` and called that "newer intent wins". Overwriting a record
+	// is not winning — the start's goroutine, context and work were never
+	// cancelled, so both intents ran and the start could still finish last and
+	// commit after the stop. The cancellation itself is now asserted, by the
+	// operation's own superseded signal, which is what the real work observes.
+	startOp, _ := b.ops.snapshotOp(), true
+	stopOp, accepted := b.ops.beginOp("stop")
+	if !accepted {
 		t.Error("a stop during a start must be accepted: newer intent wins")
+	}
+	if startOp == nil || !startOp.isSuperseded() {
+		t.Error("superseding a start must MARK it superseded, so work that cannot be " +
+			"cancelled by context can still refuse to commit")
+	}
+	if stopOp == nil || stopOp.kind != "stop" {
+		t.Error("the stop must own the operation record after superseding the start")
 	}
 	if got := b.coreLifecycleState(); got != protocol.CoreStateStopping {
 		t.Errorf("state = %q, want stopping after the stop superseded the start", got)
@@ -462,8 +501,8 @@ func TestRapidDoubleClickStartsOnce(t *testing.T) {
 func TestStartFailureBecomesErrorStateWithCode(t *testing.T) {
 	b := backendWithConfig(t)
 
-	b.ops.beginOp("start")
-	b.ops.finishOp("start", core.NewStartFailure(core.StartErrDaemonApplyFailed,
+	op, _ := b.ops.beginOp("start")
+	b.ops.finishOp(op, core.NewStartFailure(core.StartErrDaemonApplyFailed,
 		jsonError("default outbound not found: proxy-out")))
 
 	if got := b.coreLifecycleState(); got != protocol.CoreStateError {
@@ -514,8 +553,8 @@ func TestRunningBeatsPending(t *testing.T) {
 // leave a red failure on screen.
 func TestAbortedStartIsNotAnError(t *testing.T) {
 	b := backendWithConfig(t)
-	b.ops.beginOp("start")
-	b.ops.finishOp("start", core.ErrStartAborted)
+	op, _ := b.ops.beginOp("start")
+	b.ops.finishOp(op, core.ErrStartAborted)
 
 	if _, lastErr := b.ops.snapshot(); lastErr != nil {
 		t.Errorf("an aborted start was recorded as a failure: %v", lastErr)

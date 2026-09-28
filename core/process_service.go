@@ -1594,6 +1594,113 @@ func (svc *ProcessService) KillForRestart() {
 	svc.Start(true)
 }
 
+// RestartContext restarts the classic core and returns the REAL outcome.
+//
+// The contextual counterpart of KillForRestart, for the IPC path that must be
+// able to report a reason. KillForRestart reports failures by recording a
+// lifecycle error and returning nothing; a headless caller cannot distinguish
+// "restarted" from "the core could not be stopped", so this returns the error
+// as well.
+//
+// It performs the same teardown and then AWAITS the replacement start, which is
+// what makes the caller's operation end at a real commit point rather than at
+// the moment a goroutine was launched.
+func (svc *ProcessService) RestartContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ac := svc.ac
+	ac.CmdMutex.Lock()
+
+	owned, hasOwned, privileged := ac.classic.ownedProcess()
+	if !hasOwned {
+		if ac.SingboxPrivilegedMode && ac.SingboxPrivilegedPID != 0 {
+			owned = ProcessIdentity{PID: ac.SingboxPrivilegedPID, Executable: svc.privilegedCorePath()}
+			hasOwned = owned.Executable != ""
+			privileged = true
+		} else if ac.SingboxCmd != nil && ac.SingboxCmd.Process != nil {
+			owned = ProcessIdentity{PID: ac.SingboxCmd.Process.Pid, Executable: svc.currentCorePath()}
+			hasOwned = owned.Executable != ""
+		}
+	}
+	if !hasOwned {
+		// Nothing to restart from: the user asked for a running core, and
+		// starting one is the honest way to provide it.
+		debuglog.InfoLog("RestartContext: nothing owned to restart; starting instead")
+		ac.CmdMutex.Unlock()
+		return svc.StartContext(ctx, true)
+	}
+
+	gen := ac.classic.currentGeneration()
+	ac.classic.setIntent(gen, false, true)
+	ac.classic.setPhase(gen, ClassicRestarting)
+	ac.RestartRequestedByUser = true
+
+	cmd := ac.SingboxCmd
+	scriptPID := ac.SingboxPrivilegedPID
+	singboxPID := ac.SingboxPrivilegedSingboxPID
+	pidFile := ac.SingboxPrivilegedPIDFile
+	corePath := svc.currentCorePath()
+	ac.CmdMutex.Unlock()
+
+	// The termination helpers poll with their own bounded timeouts, so the
+	// context is checked around them rather than threaded into every poll. A
+	// cancelled restart abandons the WAIT, which is what the caller needs; the
+	// teardown itself must run to completion or the core would be left in a
+	// half-killed state.
+	if err := ctx.Err(); err != nil {
+		ac.CmdMutex.Lock()
+		ac.classic.clearIntent(gen)
+		ac.RestartRequestedByUser = false
+		ac.CmdMutex.Unlock()
+		return err
+	}
+
+	checker := platformChecker{}
+	var termErr error
+	if privileged {
+		_, termErr = terminatePrivilegedOwned(scriptPID, singboxPID, pidFile, corePath, "restart", checker)
+	} else {
+		_, termErr = terminateOwnedProcess(owned, "restart", checker, func(pid int, force bool) error {
+			return signalLocalProcess(cmd, pid, force)
+		})
+	}
+
+	ac.CmdMutex.Lock()
+	if termErr != nil {
+		ac.classic.clearIntent(gen)
+		ac.RestartRequestedByUser = false
+		ac.classic.setPhase(gen, ClassicFailed)
+		debuglog.ErrorLog("RestartContext: could not confirm exit: %v", termErr)
+		ac.RecordLifecycleError(LifecycleErrStopFailed, "restart",
+			"the core could not be stopped for a restart", termErr.Error(), true)
+		ac.CmdMutex.Unlock()
+		return NewStartFailure(StartErrSpawnFailed, termErr)
+	}
+
+	ac.classic.clearOwnership(gen)
+	ac.SingboxPrivilegedMode = false
+	ac.SingboxPrivilegedPID = 0
+	ac.SingboxPrivilegedSingboxPID = 0
+	ac.SingboxPrivilegedPIDFile = ""
+	ac.RunningState.Set(false)
+	if pidFile != "" {
+		_ = os.Remove(pidFile)
+	}
+	ac.CmdMutex.Unlock()
+
+	if !ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("RestartContext: generation %d was superseded; not restarting", gen)
+		return nil
+	}
+	runGhostTunCleanup(true)
+	// AWAIT the replacement, unlike KillForRestart which launches it and returns.
+	return svc.StartContext(ctx, true)
+}
+
 // CheckIfRunningAtStart checks if sing-box is already running at application start.
 // Shows a warning dialog if a running instance is detected.
 func (svc *ProcessService) CheckIfRunningAtStart() {

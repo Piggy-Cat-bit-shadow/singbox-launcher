@@ -124,15 +124,35 @@ func (b *Backend) watchCoreState() {
 		return
 	}
 	b.cancelCoreWatch = b.ac.EventBus.Subscribe(events.VpnStateChanged, func(ev events.Event) {
-		// Run the sampler exactly while the core is up: a menu bar should
-		// not keep polling a socket that is not listening.
+		running := false
 		if p, ok := ev.Payload.(events.VpnStateChangedPayload); ok {
-			if p.Running {
+			running = p.Running
+			// Run the sampler exactly while the core is up: a menu bar should
+			// not keep polling a socket that is not listening.
+			if running {
 				b.Traffic().Start()
 			} else {
 				b.Traffic().Stop()
 			}
 		}
+
+		// A stop operation ENDS here, on the authoritative runtime transition.
+		//
+		// This is the terminal state the stop operation previously never
+		// reached: `runCoreOpFireAndForget` registered the operation and returned
+		// without ever clearing it, so `op == stop` stayed set forever and the
+		// wire state reported `stopping` for the rest of the session (or until
+		// some unrelated operation happened to overwrite the record).
+		//
+		// The transition alone is not enough to decide: a CRASH also moves the
+		// running flag from true to false. Only a deliberate stop may end a stop
+		// operation, so `completeStop` requires that a stop operation is actually
+		// the current one — a crash leaves no stop operation to settle, and the
+		// crash path keeps its own decision about restarting.
+		if !running {
+			b.completeStop("the runtime reported the core is down")
+		}
+
 		// RunningState.Set can fire from any goroutine; emit is mutex-guarded,
 		// so publishing straight from the bus handler is safe.
 		b.EmitCoreState()

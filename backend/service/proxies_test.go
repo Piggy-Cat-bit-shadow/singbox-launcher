@@ -57,7 +57,14 @@ func backendWithConfig(t *testing.T) *Backend {
 	if err != nil {
 		t.Skipf("cannot build a controller in this environment: %v", err)
 	}
-	return &Backend{ac: ac}
+	b := &Backend{ac: ac}
+	// Wire the backend exactly as New() does. A bare &Backend{ac: ac} skips
+	// watchCoreState, so the runtime transitions the lifecycle state machine
+	// depends on would never fire and every test of a transition would be
+	// testing a backend that is not the one that ships.
+	b.installOwnershipPolicy()
+	b.watchCoreState()
+	return b
 }
 
 // TestProxyGroupsShape pins the group payload the Swift client decodes.
