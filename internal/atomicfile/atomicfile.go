@@ -153,6 +153,14 @@ func SyncDir(dir string) {
 // Age is the property that actually distinguishes a leftover from a live write. A staging
 // file is written, fsynced and renamed within one operation, so one that has not been touched
 // for hours belongs to a process that is gone.
+//
+// IT HAS NO PRODUCTION CALLER, and this comment previously claimed otherwise — it said
+// "Called by `WriteWith` before staging", which was false and is exactly the failure mode
+// this codebase keeps producing. `WriteWith` does NOT call it and must not: a writer cannot
+// know whether another writer holds a staging file, which is how the name-only version came
+// to delete a live writer's file. Wiring it in requires establishing exclusivity first, which
+// nothing in this package can do on its own. It stays exported, correct and unused rather
+// than being given a call site that would be wrong.
 func SweepStale(target string) {
 	dir := filepath.Dir(target)
 	base := filepath.Base(target)

@@ -137,7 +137,7 @@ func DownloadSRS(ctx context.Context, url string, destPath string) error {
 		// including a cancelled context", while the check sat before the work it was meant
 		// to interrupt, so the cancellation it named was not actually handled here.
 		//
-		// `backgroundReader` polls between reads, so a cancelled context stops the transfer
+		// `contextReader` polls between reads, so a cancelled context stops the transfer
 		// promptly and the error propagates out through `WriteWith`, which then removes the
 		// staging file.
 		n, cerr := io.Copy(w, newContextReader(ctx, resp.Body))

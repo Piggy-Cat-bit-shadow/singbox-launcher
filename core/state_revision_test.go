@@ -296,3 +296,68 @@ func TestTheRevisionIsIdempotentForUnchangedContent(t *testing.T) {
 			"never detect that the state moved under it")
 	}
 }
+
+// TestASubscriptionRefreshDoesNotMoveTheRevision — the case the first fix missed.
+//
+// `revisionMovedSinceBuild` exists to answer "did the USER change the state while this build
+// was rendering?". A subscription refresh is performed by the LAUNCHER on a timer, and it
+// rewrites `sub_status` — `last_success_at`, `last_attempt_at`, error counts, byte counts —
+// inside each source. Those fields record WHEN and HOW something was fetched, not what the
+// state says, and the rebuild never reads them.
+//
+// Excluding only `meta.updated_at` therefore fixed the clock but not the refresh: a
+// background fetch still moved the digest, the build conservatively kept the stale marker, and
+// "the config is current" was lost to a change the user did not make.
+func TestASubscriptionRefreshDoesNotMoveTheRevision(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	writeTestState(t, statePath, "https://example.invalid/sub", "srv", "")
+	s, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := s.Save(statePath); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	before := s.Revision()
+
+	// A refresh completing: the diagnostics block is rewritten exactly as the fetch pipeline
+	// writes it.
+	if len(s.Sources) == 0 {
+		t.Fatal("the fixture has no sources, so the test would prove nothing")
+	}
+	s.Sources[0].UpdateStatus = &state.SubUpdateStatus{
+		URLAtFetch:        "https://example.invalid/sub",
+		LastAttemptAt:     "2026-01-01T00:00:00Z",
+		LastSuccessAt:     "2026-01-01T00:00:01Z",
+		LastStatus:        "ok",
+		RawBodyBytes:      4096,
+		NodesCountFetched: 12,
+	}
+	if err := s.Save(statePath); err != nil {
+		t.Fatalf("save after refresh: %v", err)
+	}
+
+	if got := s.Revision(); got != before {
+		t.Errorf("a background subscription refresh moved the revision (%d then %d). A "+
+			"refresh is not a user edit, so a rebuild that reads this comparison will "+
+			"report the state as changed and clear the fresh marker for a change the user "+
+			"never made", before, got)
+	}
+
+	// And a REAL edit must still move it — otherwise the exclusion has gone too far and
+	// staleness could never be detected.
+	if len(s.Sources) > 0 {
+		s.Sources[0].Nodes = append(s.Sources[0].Nodes, state.Node{
+			Kind: state.SourceKindServer, Tag: "added-by-user", Enabled: true,
+		})
+	}
+	if err := s.Save(statePath); err != nil {
+		t.Fatalf("save after edit: %v", err)
+	}
+	if s.Revision() == before {
+		t.Error("a user edit did NOT move the revision, so the exclusion is too broad and " +
+			"a stale config could never be detected")
+	}
+}

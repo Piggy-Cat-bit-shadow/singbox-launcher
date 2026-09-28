@@ -1185,6 +1185,20 @@ func (b *DaemonBackend) Close() {
 	// его в nil нельзя (иначе proxy-операции теряют gRPC-транспорт).
 	if b.ac.APIService != nil && b.ac.APIService.TransportOverride() == services.ProxyTransport(b.transport) {
 		b.ac.APIService.SetTransport(nil)
+		// AND THE VERIFIED-ENDPOINT PROVIDER, WHICH IS A SEPARATE REGISTRATION.
+		//
+		// The transport and the provider were installed together but only one was removed,
+		// and the survivor is worse than useless: the provider stays INSTALLED and starts
+		// answering "no endpoint" once this backend is closed. `trafficEndpoint` treats an
+		// installed provider as authoritative and never falls through to the configured
+		// endpoint, so a classic core with a perfectly good address got `ok=false` forever —
+		// the speed readout dark in exactly the mode the trust fix was meant to protect,
+		// through the opposite door from the type-assertion bug it replaced.
+		//
+		// Guarded by the same ownership test as the transport: a daemon→daemon swap has
+		// already installed the new backend's provider by the time this runs, and clearing it
+		// would leave the NEW daemon with no endpoint at all.
+		b.ac.APIService.SetVerifiedClashEndpoint(nil)
 	}
 	b.connMu.Lock()
 	if b.conn != nil {

@@ -44,8 +44,6 @@ import (
 
 	"github.com/muhammadmuzzammil1998/jsonc"
 
-	"crypto/sha256"
-	"encoding/hex"
 	"singbox-launcher/core"
 	"singbox-launcher/internal/debuglog"
 )
@@ -257,8 +255,13 @@ func (b *Backend) markConfigManagedBytes(promoted []byte) error {
 	}
 	hash := ""
 	if promoted != nil {
-		sum := sha256.Sum256(promoted)
-		hash = hex.EncodeToString(sum[:])
+		// The SAME function every other config identity goes through.
+		//
+		// This was a raw `sha256.Sum256` — a second implementation of "hash this config" in
+		// the very file whose neighbour declares itself the single one. The two agreed by
+		// inspection rather than by construction, which is the drift that makes a comparison
+		// report divergence that is not there.
+		hash = hashConfigBytes(promoted)
 	} else {
 		var err error
 		hash, err = b.configContentHash()

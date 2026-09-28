@@ -68,6 +68,42 @@ func TestTrafficSamplerRefusesAnUnverifiedEndpoint(t *testing.T) {
 	}
 }
 
+// TestTrafficSamplerFallsBackWhenNoProviderIsInstalled is the other half of the same rule.
+//
+// ENGINE-SPECIFIC VERIFICATION IS AUTHORITATIVE ONLY WHILE THAT ENGINE IS PRESENT. The daemon
+// installs a provider when it starts and the transport when it starts; `Close` removed the
+// transport and left the provider, so after a daemon→classic switch the provider stayed
+// installed and began answering "no endpoint" — permanently. `trafficEndpoint` treats an
+// installed provider as decisive and never falls through to the configured endpoint, so a
+// classic core with a perfectly good address got `ok=false` forever and the speed readout
+// went dark in exactly the mode the verification work was meant to protect. That is the same
+// user-visible defect as the type-assertion bug it replaced, arriving through the other door.
+//
+// Removing the provider is what makes the classic fallback reachable again. This test asserts
+// the property at the level the bug lives at: no provider installed, endpoint still resolved.
+func TestTrafficSamplerFallsBackWhenNoProviderIsInstalled(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// A classic core with a configured endpoint — the situation the stale provider broke.
+	// These are the fields `GetClashAPIConfig` reports, which is what the fallback reads.
+	b.ac.APIService.Enabled = true
+	b.ac.APIService.BaseURL = "http://127.0.0.1:9090"
+	b.ac.APIService.Token = "configured-token"
+
+	// No engine-specific provider: the state after a daemon backend has closed.
+	b.ac.APIService.SetVerifiedClashEndpoint(nil)
+
+	url, _, ok := b.trafficEndpoint()
+	if !ok {
+		t.Fatal("the sampler resolved no endpoint after the engine-specific provider was " +
+			"removed. An uninstalled provider must fall through to the configured endpoint, " +
+			"or a classic core is left with a permanently dark speed readout")
+	}
+	if url == "" {
+		t.Error("the sampler reported success with an empty URL")
+	}
+}
+
 // daemonLikeTransport is a ProxyTransport that is NOT a ClashTransport.
 //
 // It stands in for the daemon engine's `*daemonProxyTransport`, which is the case the

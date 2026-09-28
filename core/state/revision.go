@@ -49,6 +49,22 @@ func contentRevisionExcludingVolatile(data []byte) uint64 {
 
 // withoutVolatileFields returns the document with volatile metadata blanked.
 //
+// TWO KINDS OF FIELD ARE REMOVED, and both for the same reason: they record WHEN or HOW
+// something was fetched, not WHAT the state says, and the consumers of the revision are
+// asking the second question.
+//
+//   - `meta.updated_at` — the write time, stamped by `Save` itself, so it changed on every
+//     save regardless of content.
+//   - each source's `sub_status` — the fetch diagnostics block: `last_success_at`,
+//     `last_attempt_at`, `error_count`, HTTP status, byte counts. A subscription REFRESH is
+//     performed by the launcher on a timer, not by the user, and it rewrites this block.
+//
+// The second one is why the first fix was incomplete. `revisionMovedSinceBuild` exists to ask
+// "did the USER change the state while this build was rendering?", and a background refresh
+// stamping `last_success_at` is not that: the answer was yes, the build conservatively kept
+// the stale marker, and "the config is current" was lost to a change the user did not make.
+// The rebuild never reads `update_status`, so excluding it cannot hide a change that matters.
+//
 // A parse failure returns ok=false, and the caller then hashes the bytes as they are: a
 // document this function cannot understand is not one whose revision should silently become
 // the digest of an empty map.
@@ -58,31 +74,76 @@ func withoutVolatileFields(data []byte) ([]byte, bool) {
 		return nil, false
 	}
 
+	touched := false
+
 	// THE TIMESTAMP LIVES UNDER `meta`, NOT AT THE TOP LEVEL.
 	//
 	// The first version of this looked for `updated_at` in the root object, found nothing,
 	// and returned the bytes unchanged — so the digest stayed time-dependent and the fix
 	// silently did nothing. The probe caught it: two saves still produced different
 	// revisions. `meta` is a nested object, so the field has to be removed there.
-	metaRaw, present := doc["meta"]
-	if !present {
-		return data, true
+	if metaRaw, present := doc["meta"]; present {
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(metaRaw, &meta); err != nil {
+			return nil, false
+		}
+		if _, hasUpdated := meta["updated_at"]; hasUpdated {
+			delete(meta, "updated_at")
+			newMeta, err := json.Marshal(meta)
+			if err != nil {
+				return nil, false
+			}
+			doc["meta"] = newMeta
+			touched = true
+		}
 	}
-	var meta map[string]json.RawMessage
-	if err := json.Unmarshal(metaRaw, &meta); err != nil {
-		return nil, false
+
+	// The fetch-diagnostics blocks.
+	//
+	// A parse failure here leaves the bytes alone, which is the conservative direction: the
+	// revision then moves on a refresh — the behaviour that existed before — rather than the
+	// digest becoming a false identity.
+	if raw, present := doc["sources"]; present {
+		var sources []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &sources); err == nil {
+			changed := false
+			for _, src := range sources {
+				// The JSON name is `update_status`, which is NOT what the Go field is
+				// called — the first version of this looked for `sub_status`, found
+				// nothing, and silently excluded nothing at all. The test caught it.
+				if _, has := src["update_status"]; has {
+					delete(src, "update_status")
+					changed = true
+				}
+			}
+			// THE SOURCES ARE REWRITTEN WHETHER OR NOT ANYTHING WAS REMOVED, for the same
+			// reason the top-level document is: `json.Marshal` of a map emits sorted keys,
+			// so writing back only the documents that had something to remove leaves the
+			// others in their original order. Two sources with identical content then hash
+			// differently depending on which one carried a fetch status.
+			_ = changed
+			if newSources, err := json.Marshal(sources); err == nil {
+				doc["sources"] = newSources
+				touched = true
+			}
+		}
 	}
-	if _, hasUpdated := meta["updated_at"]; !hasUpdated {
-		// Nothing volatile to remove; avoid a re-marshal that would reorder keys and
-		// change the digest for no reason.
-		return data, true
-	}
-	delete(meta, "updated_at")
-	newMeta, err := json.Marshal(meta)
-	if err != nil {
-		return nil, false
-	}
-	doc["meta"] = newMeta
+
+	// THE DOCUMENT IS ALWAYS RE-MARSHALLED, EVEN WHEN NOTHING WAS REMOVED.
+	//
+	// Skipping the re-marshal when `touched` was false seemed like a harmless optimisation —
+	// "avoid reordering keys for no reason" — and it silently defeated the whole function.
+	// Re-marshalling a `map` emits keys in SORTED order, so a document that needed no
+	// removal kept its original order while one that did got sorted. Two states with
+	// identical content then hashed differently depending only on WHICH of them happened to
+	// carry a timestamp or a fetch status: a refresh moved the revision not because anything
+	// changed, but because the normalisation was applied asymmetrically.
+	//
+	// The observed symptom was the original bug surviving the fix — a refresh still moved the
+	// digest — while the normalised sources were byte-identical. Normalising BOTH sides is
+	// what makes the digest a function of content.
+	_ = touched
+
 	normalized, err := json.Marshal(doc)
 	if err != nil {
 		return nil, false
