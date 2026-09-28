@@ -132,6 +132,36 @@ final class AppModel {
     /// unreachable backend, an empty config, and a config that is merely out of
     /// date. Collapsing them produced a single "No nodes in this group" for
     /// every case, which is wrong for most of them.
+    /// Live state of a "Test All" run.
+    ///
+    /// A dedicated type rather than a bool-like pending flag: the row shows a
+    /// counter and each finished node updates immediately, so the UI needs
+    /// total/completed plus which nodes are currently in flight. Cramming that
+    /// into the shared pending enum is what made the old state unmaintainable.
+    enum ProxyGroupTestState: Equatable {
+        case idle
+        case running(GroupTestProgress)
+
+        var progress: GroupTestProgress? {
+            if case .running(let p) = self { return p }
+            return nil
+        }
+
+        var isRunning: Bool { progress != nil }
+    }
+
+    /// Progress of one running group test.
+    struct GroupTestProgress: Equatable {
+        let id: UInt64
+        let group: String
+        let total: Int
+        var completed: Int
+        var succeeded: Int
+        var failed: Int
+        /// Nodes whose measurement is in flight, so only those show a spinner.
+        var inFlight: Set<String>
+    }
+
     enum ProxyListState: Equatable {
         /// Nothing requested yet.
         case idle
@@ -670,28 +700,113 @@ final class AppModel {
     }
 
     /// Measure one node.
+    ///
+    /// A failure is data, not a global error: the row already shows "timeout"
+    /// and the technical reason is available there. Writing `lastError` would
+    /// put a per-node failure on the Home banner, which is the policy this
+    /// screen was fixed to follow.
     func testProxy(_ node: ProxyNode) async {
         await withPending(.testingProxy(node.name), success: nil) {
             let list = try await self.client.testProxy(group: node.group, name: node.name)
             self.apply(list)
-            if let refreshed = list.proxies.first(where: { $0.name == node.name }),
-               !refreshed.isMeasured {
-                self.lastError = "\(node.label) \(L.nodeDidNotRespond.tr(self.resolvedLanguage))"
-            }
         }
     }
 
-    /// Measure every node in the current group. Sequential in the backend to
-    /// avoid starving live traffic, so this can take a while.
+    /// Measure every node in the current group.
+    ///
+    /// The backend owns scheduling and concurrency; this only starts the run and
+    /// consumes progress. Doing the fan-out here would move cancellation,
+    /// aggregation and error policy into the UI, where they cannot be tested
+    /// against a transport.
     func testGroup() async {
         guard !selectedGroup.isEmpty else { return }
-        await withPending(.testingGroup, success: nil) {
-            let list = try await self.client.testProxyGroup(self.selectedGroup)
-            self.apply(list)
+        guard proxyActions.can_test_group else { return }
+        let group = selectedGroup
+        do {
+            let result = try await client.testProxyGroup(group)
+            // The response is authoritative. It may arrive before or after the
+            // finished event, so both paths clear the state — applying them in
+            // either order must converge, never resume "running".
+            apply(result.proxies)
+            if result.group == selectedGroup {
+                groupTest = .idle
+            }
+        } catch {
+            // A transport-level failure is the one case that clears the UI
+            // without a result; without this the panel would stay on "测速 12/36"
+            // forever.
+            groupTest = .idle
+            lastError = error.localizedDescription
         }
+    }
+
+    /// Apply one progress frame, ignoring anything from a superseded run.
+    ///
+    /// Filtering by BOTH run id and group is what stops a slow run from painting
+    /// results onto a screen that has already moved to another group or another
+    /// engine. Filtering by node name alone would let a stale frame update a row
+    /// that now belongs to a different test.
+    func applyGroupTestProgress(_ p: ProxyTestProgress) {
+        if p.isStarted {
+            groupTest = .running(GroupTestProgress(
+                id: p.run_id, group: p.group, total: p.total,
+                completed: 0, succeeded: 0, failed: 0, inFlight: []))
+            return
+        }
+
+        guard var running = groupTest.progress, running.id == p.run_id,
+              running.group == p.group, running.group == selectedGroup else {
+            // A superseded run, or one for a group the user has left.
+            return
+        }
+
+        switch p.phase {
+        case "node_started":
+            // Only this row spins. Marking every node as testing at the start
+            // would suggest the app is hammering all of them at once, when in
+            // fact only `concurrency` of them are in flight.
+            if let node = p.node { running.inFlight.insert(node) }
+            groupTest = .running(running)
+        case "result":
+            running.completed = p.completed
+            running.succeeded = p.succeeded
+            running.failed = p.failed
+            if let node = p.node { running.inFlight.remove(node) }
+            groupTest = .running(running)
+            // The backend stores the measurement BEFORE emitting, so re-reading
+            // here cannot show a stale value.
+            if let node = p.node, let status = p.status,
+               let delay = p.delay, let measured = ProxyMeasurementStatus(rawValue: status) {
+                updateNodeMeasurement(name: node, delay: delay, status: measured, error: p.error)
+            }
+        case "finished":
+            groupTest = .idle
+        default:
+            break
+        }
+    }
+
+    /// Patch one node's latency from a progress frame.
+    ///
+    /// Deliberately a local patch rather than a full reload: the point of
+    /// streaming progress is that a row updates the moment its result arrives,
+    /// without waiting for all N nodes or issuing N requests.
+    private func updateNodeMeasurement(
+        name: String, delay: Int64, status: ProxyMeasurementStatus, error: String?
+    ) {
+        guard let idx = proxies.firstIndex(where: { $0.name == name }) else { return }
+        // Success carries the number; every other outcome clears it, because a
+        // node we just failed to reach is not "42 ms" on the strength of an
+        // older reading.
+        proxies[idx].delay = status == .success ? delay : -1
+        proxies[idx].status = status.rawValue
+        if let error { proxies[idx].last_error = error }
     }
 
     private func apply(_ list: ProxyList) {
+        if let caps = list.capabilities {
+            proxyActions = caps
+        }
         if !list.groups.isEmpty { groups = list.groups }
         // A group-only reply must not wipe the visible nodes.
         if list.available || !list.proxies.isEmpty || !(list.group ?? "").isEmpty {
@@ -1198,7 +1313,16 @@ final class AppModel {
     }
 
     /// True while the whole group is being measured.
-    var proxyGroupTestInFlight: Bool { pending == .testingGroup }
+    /// Live "Test All" state. Distinct from `pending`, which covers one-shot
+    /// actions: a group test streams progress and must survive its own request
+    /// being outstanding.
+    private(set) var groupTest: ProxyGroupTestState = .idle
+
+    /// Per-action engine capabilities, refreshed with every proxy list.
+    private(set) var proxyActions: ProxyActionCapabilities = .all
+
+    /// Legacy accessor kept so existing call sites keep working.
+    var proxyGroupTestInFlight: Bool { groupTest.isRunning }
 
     /// True while any core-affecting command is in flight.
     var coreOperationBusy: Bool {
@@ -1343,6 +1467,13 @@ final class AppModel {
         case BackendEventName.settingsChanged:
             if let settings = event.decode(SettingsState.self) {
                 self.settings = settings
+            }
+        case BackendEventName.proxyTestProgress:
+            // Streamed deltas from a running group test. Applied without a
+            // reload: the whole point is that a row updates the moment its
+            // result arrives, not after all N nodes finish.
+            if let p = event.decode(ProxyTestProgress.self) {
+                applyGroupTestProgress(p)
             }
         case BackendEventName.proxiesChanged:
             // The backend rebuilt the config or refreshed subscriptions, so the

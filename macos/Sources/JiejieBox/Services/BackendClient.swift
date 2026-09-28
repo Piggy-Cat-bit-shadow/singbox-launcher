@@ -658,10 +658,17 @@ actor BackendClient {
                           as: ProxyList.self)
     }
 
-    func testProxyGroup(_ group: String) async throws -> ProxyList {
+    /// Measure every node of a group.
+    ///
+    /// Returns the FINAL summary, not the node list: the backend owns
+    /// scheduling, and progress arrives meanwhile on the event stream. The
+    /// request timeout (120s, see `timeoutSeconds`) is set ABOVE the backend's
+    /// own run budget so the backend always gets to answer first — a client
+    /// timeout would abandon a run that is still doing useful work.
+    func testProxyGroup(_ group: String) async throws -> ProxyGroupTestResult {
         try await request(BackendMethod.testProxyGroup,
                           params: ["group": .string(group)],
-                          as: ProxyList.self)
+                          as: ProxyGroupTestResult.self)
     }
 
     // MARK: - Maintenance

@@ -244,6 +244,13 @@ func (b *DaemonBackend) ensureProbed() {
 	if done {
 		return
 	}
+	if b.ctx == nil {
+		// No owning context (a backend under construction, or a test). Probing
+		// needs a context to bound it, and inventing one here would defeat the
+		// cancellation the owner is supposed to provide. Leaving `probed` false
+		// means capabilities read as unknown rather than as a claim.
+		return
+	}
 	client, err := b.grpcClient()
 	if err != nil {
 		// Cannot probe without a connection. Leaving `probed` false means the
@@ -253,4 +260,87 @@ func (b *DaemonBackend) ensureProbed() {
 	ctx, cancel := context.WithTimeout(b.ctx, probeTimeout)
 	defer cancel()
 	b.probeCapabilities(ctx, client)
+}
+
+// ProxyActionCapabilities reports, per proxy action, whether the reachable
+// engine supports it.
+//
+// WHY PER ACTION. An engine can genuinely implement one of these and not
+// another, and the coarse single-boolean model mis-reported those cases in both
+// directions: a daemon with a working node list but no URL-test RPC had its
+// entire proxy screen disabled, and a daemon that could not switch looked the
+// same as one that could not list at all. Each action now answers for itself, so
+// the UI disables exactly the thing that does not work.
+type ProxyActionCapabilities struct {
+	CanList       bool
+	CanSwitch     bool
+	CanTestSingle bool
+	CanTestGroup  bool
+	// Reasons are machine-readable tokens, not prose: the UI maps them to
+	// localized text, so no screen has to parse an English sentence.
+	ListReason   string
+	SwitchReason string
+	TestReason   string
+}
+
+// Reason tokens. Stable identifiers, safe to switch on in the frontend.
+const (
+	// ReasonOK — supported; no reason needed.
+	ReasonOK = ""
+	// ReasonEngineLacksRPC — the engine does not implement the method.
+	ReasonEngineLacksRPC = "engine_lacks_rpc"
+	// ReasonCoreStopped — the engine is reachable but not running.
+	ReasonCoreStopped = "core_stopped"
+	// ReasonUnknown — capability could not be established (probe did not run).
+	ReasonUnknown = "unknown"
+)
+
+// proxyActionCapabilities derives the per-action set for this backend.
+//
+// Classic mode supports all three actions by construction: it talks to the
+// core's Clash-compatible HTTP API, whose endpoints are part of the core's
+// contract rather than of this launcher's generated client. Daemon mode answers
+// from the probe, because the reachable daemon's method set is not knowable from
+// the client stub — the drift that produced this whole compatibility layer.
+//
+// This is the ONLY place that decides. The frontend must not branch on the
+// backend mode: it consumes these booleans, so adding a fourth engine later
+// needs no UI change.
+func (b *DaemonBackend) ProxyActionCapabilities() ProxyActionCapabilities {
+	if b == nil || b.caps == nil {
+		return ProxyActionCapabilities{
+			ListReason: ReasonUnknown, SwitchReason: ReasonUnknown, TestReason: ReasonUnknown,
+		}
+	}
+	b.ensureProbed()
+
+	b.caps.mu.RLock()
+	probed := b.caps.probed
+	supports := b.caps.supports
+	b.caps.mu.RUnlock()
+
+	if !probed {
+		// The daemon did not answer. Unreachability is reported by the status,
+		// and claiming "unsupported" here would be a fact we never established.
+		return ProxyActionCapabilities{
+			ListReason: ReasonUnknown, SwitchReason: ReasonUnknown, TestReason: ReasonUnknown,
+		}
+	}
+
+	caps := ProxyActionCapabilities{ListReason: ReasonOK, SwitchReason: ReasonOK, TestReason: ReasonOK}
+	caps.CanList = supports[rpcGetGroups]
+	caps.CanSwitch = supports[rpcSelectOutbound]
+	caps.CanTestSingle = supports[rpcURLTestOutbound]
+	caps.CanTestGroup = supports[rpcURLTestOutbound]
+
+	if !caps.CanList {
+		caps.ListReason = ReasonEngineLacksRPC
+	}
+	if !caps.CanSwitch {
+		caps.SwitchReason = ReasonEngineLacksRPC
+	}
+	if !caps.CanTestSingle {
+		caps.TestReason = ReasonEngineLacksRPC
+	}
+	return caps
 }

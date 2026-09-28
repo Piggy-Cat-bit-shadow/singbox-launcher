@@ -255,6 +255,14 @@ enum L: CaseIterable {
     case noNodes
     case testAll
     case testing
+    /// "Testing 12/36" — live progress inside the Test All button.
+    case testingProgress
+    case latencyTimedOut
+    case latencyFailed
+    case latencyNotMeasured
+    /// Shown when the engine cannot measure latency at all.
+    case latencyUnsupported
+    case allTestsFailed
     case notMeasured
     case searchProxies
     case selectGroup
@@ -542,6 +550,8 @@ enum L: CaseIterable {
     case backendUnavailableShort
     case noNodesToTest
     case measureAllHelp
+    case measureAgainHelp
+    case measureNodeHelp
     case anotherOpRunning
     case nothingToTest
     case noGroup
@@ -587,6 +597,16 @@ extension L {
         case .en: return Self.en(self)
         case .zhHans: return Self.zhHans(self)
         }
+    }
+
+    /// Translate and substitute positional arguments.
+    ///
+    /// Separate from `tr` so the common case stays a plain lookup. The format
+    /// string lives in the translation table, which is what lets a language
+    /// reorder the numbers — "测速 12/36" and "Testing 12/36" do not
+    /// necessarily want them in the same order.
+    func tr(_ lang: Localization, _ args: CVarArg...) -> String {
+        String(format: tr(lang), arguments: args)
     }
 
     private static func en(_ key: L) -> String {
@@ -639,6 +659,12 @@ extension L {
         case .noNodes: return "This group has no nodes."
         case .testAll: return "Test All"
         case .testing: return "Testing…"
+        case .testingProgress: return "Testing %1$d/%2$d"
+        case .latencyTimedOut: return "Timed out"
+        case .latencyFailed: return "Failed"
+        case .latencyNotMeasured: return "—"
+        case .latencyUnsupported: return "Latency testing is not supported"
+        case .allTestsFailed: return "All nodes failed the latency test"
         case .notMeasured: return "—"
         case .searchProxies: return "Search"
         case .selectGroup: return "Group"
@@ -909,6 +935,8 @@ extension L {
         case .backendUnavailableShort: return "The backend is unavailable."
         case .noNodesToTest: return "This group has no nodes to test."
         case .measureAllHelp: return "Measure latency for every node in this group."
+        case .measureAgainHelp: return "Measure this node again."
+        case .measureNodeHelp: return "Measure this node's latency."
         case .anotherOpRunning: return "Another operation is running."
         case .nothingToTest: return "Nothing to test yet."
         case .noGroup: return "No group"
@@ -994,6 +1022,12 @@ extension L {
         case .noProxyGroups: return "没有代理分组"
         case .noNodes: return "该分组没有节点。"
         case .testAll: return "全部测速"
+        case .testingProgress: return "测速 %1$d/%2$d"
+        case .latencyTimedOut: return "超时"
+        case .latencyFailed: return "失败"
+        case .latencyNotMeasured: return "未测速"
+        case .latencyUnsupported: return "暂不支持测速"
+        case .allTestsFailed: return "所有节点测速失败"
         case .testing: return "测速中…"
         case .notMeasured: return "—"
         case .searchProxies: return "搜索"
@@ -1265,6 +1299,8 @@ extension L {
         case .backendUnavailableShort: return "后端不可用。"
         case .noNodesToTest: return "该分组没有可测试的节点。"
         case .measureAllHelp: return "测试该分组中所有节点的延迟。"
+        case .measureAgainHelp: return "重新测量该节点的延迟。"
+        case .measureNodeHelp: return "测量该节点的延迟。"
         case .anotherOpRunning: return "还有其他操作正在进行。"
         case .nothingToTest: return "暂无可测试内容。"
         case .noGroup: return "无分组"

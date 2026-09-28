@@ -130,15 +130,19 @@ struct ProxiesView: View {
             Task { await model.testGroup() }
         } label: {
             HStack(spacing: 5) {
-                if model.pending == .testingGroup {
+                if let progress = model.groupTest.progress {
                     ProgressView().controlSize(.mini)
+                    // "Testing 12/36": the count is the whole point of streaming
+                    // progress — a bare spinner gives no sense of whether a
+                    // 200-node group is nearly done or barely started.
+                    Text(L.testingProgress.tr(language, progress.completed, progress.total))
+                        .font(Typography.rowValue.weight(.medium))
                 } else {
                     Image(systemName: "bolt.horizontal")
                         .font(Typography.rowSubtitle)
+                    Text(L.testAll.tr(language))
+                        .font(Typography.rowValue.weight(.medium))
                 }
-                Text(model.pending == .testingGroup
-                     ? L.testing.tr(language) : L.testAll.tr(language))
-                    .font(Typography.rowValue.weight(.medium))
             }
             .padding(.horizontal, 9)
             .frame(height: 24)
@@ -151,11 +155,17 @@ struct ProxiesView: View {
     }
 
     private var canTestGroup: Bool {
+        // Engine capability first: on an engine that cannot measure, the button
+        // must be disabled and EXPLAINED rather than clickable into a failure.
+        guard model.proxyActions.can_test_group else { return false }
         guard model.proxyListState == .ready else { return false }
-        return model.pending == nil
+        return model.pending == nil && !model.groupTest.isRunning
     }
 
     private var testAllHelp: String {
+        if !model.proxyActions.can_test_group {
+            return L.latencyUnsupported.tr(language)
+        }
         switch model.proxyListState {
         case .coreStopped: return L.coreStoppedTest.tr(language)
         case .backendUnavailable: return L.backendUnavailableShort.tr(language)
@@ -433,20 +443,42 @@ struct ProxiesView: View {
             RowAction(
                 id: "test-\(node.id)",
                 title: "",
-                value: node.delayLabel,
+                // A node that failed shows WHY it has no number ("timed out")
+                // rather than "0 ms", which would read as the fastest node in
+                // the list. The technical reason stays in the tooltip so the
+                // list does not become a wall of transport errors.
+                value: node.delayLabel(language),
                 valueColor: delayColor(node),
-                isPending: testing,
+                isPending: testing || groupTesting(node),
                 isDisabled: testDisabled,
                 weight: 1,
-                help: node.isMeasured
-                    ? "Measure this node again."
-                    : "Measure this node's latency.",
+                help: testHelp(node),
                 action: { Task { await model.testProxy(node) } }
             ),
         ])
     }
 
+    /// True while this node's measurement is in flight during a group test.
+    ///
+    /// Only nodes actually occupying a worker show a spinner; the ones still
+    /// queueing keep their previous value, which is what makes the streamed
+    /// progress legible instead of every row spinning at once.
+    private func groupTesting(_ node: ProxyNode) -> Bool {
+        model.groupTest.progress?.inFlight.contains(node.name) ?? false
+    }
+
+    private func testHelp(_ node: ProxyNode) -> String {
+        // The real reason, for a user who wants it. The row itself stays short.
+        if let error = node.last_error, !error.isEmpty { return error }
+        if node.didFailMeasurement { return L.measureAllHelp.tr(language) }
+        return node.isMeasured
+            ? L.measureAgainHelp.tr(language)
+            : L.measureNodeHelp.tr(language)
+    }
+
     private func delayColor(_ node: ProxyNode) -> Color {
+        // A failure is never coloured as a good result, whatever the bucket.
+        if node.didFailMeasurement { return .orange }
         if !node.isMeasured { return .secondary }
         if node.isFast { return .green }
         if node.isSlow { return .orange }

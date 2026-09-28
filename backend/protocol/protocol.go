@@ -143,6 +143,12 @@ const (
 	EventSettingsChanged = "settings_changed"
 	// EventProxiesChanged reports that the proxy list was reloaded.
 	EventProxiesChanged = "proxies_changed"
+
+	// EventProxyTestProgress carries one delta frame of a group latency test:
+	// started, one node's result, or finished. The final result also returns as
+	// the test_proxy_group response, so a client that missed the stream still
+	// converges on the same truth.
+	EventProxyTestProgress = "proxy_test_progress"
 	// EventProxySelectionChanged reports that a group switched its node.
 	EventProxySelectionChanged = "proxy_selection_changed"
 	// EventTrafficRate carries a periodic up/down speed sample.
@@ -164,6 +170,13 @@ type Error struct {
 	Details map[string]any `json:"details,omitempty"`
 	// Recoverable reports whether retrying the same call may succeed.
 	Recoverable bool `json:"recoverable"`
+	// Reason is a stable machine-readable token explaining WHY, when the code
+	// alone is not enough to choose the right wording.
+	//
+	// Used by the proxy capability errors: "engine_lacks_rpc" tells the UI to
+	// say the background service is too old, without the UI parsing an English
+	// sentence or inspecting the backend mode.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Error implements the error interface so handlers can return *Error
@@ -358,6 +371,38 @@ type Proxy struct {
 	Selected bool `json:"selected"`
 	// LastError is the last ping failure for this proxy, if any.
 	LastError string `json:"last_error,omitempty"`
+	// Status classifies the latency result: success / timeout / failed /
+	// unsupported / cancelled, or "" when this session has not measured it.
+	//
+	// A stable token so the row can be labelled in the user's language without
+	// the frontend parsing an error string — Classic and daemon produce
+	// completely different error text for the same condition.
+	Status string `json:"status,omitempty"`
+}
+
+// ProxyActionCapabilities reports, per proxy action, what the active engine can
+// do.
+//
+// PER ACTION, not one boolean. An engine can list nodes and be unable to test
+// them, or list and test but not switch; a single flag forced those into "the
+// proxy screen is broken", which disabled working features and hid the node
+// list from users who could still see and choose from it.
+//
+// The frontend consumes these booleans and never branches on the backend mode:
+// that keeps engine differences in the engine layer, where they can be tested
+// against a transport, instead of spread through the UI.
+type ProxyActionCapabilities struct {
+	CanList   bool `json:"can_list"`
+	CanSwitch bool `json:"can_switch"`
+	// CanTestSingle — one node's latency can be measured.
+	CanTestSingle bool `json:"can_test_single"`
+	// CanTestGroup — the whole group can be measured ("Test All").
+	CanTestGroup bool `json:"can_test_group"`
+	// Reasons are stable tokens ("", "engine_lacks_rpc", "core_stopped",
+	// "unknown") the UI maps to localized text. Never prose.
+	ListReason   string `json:"list_reason,omitempty"`
+	SwitchReason string `json:"switch_reason,omitempty"`
+	TestReason   string `json:"test_reason,omitempty"`
 }
 
 // ProxyList is the reply to MethodGetProxies and MethodGetProxyGroups.
@@ -369,6 +414,10 @@ type ProxyList struct {
 	Proxies []Proxy `json:"proxies"`
 	// Group echoes the group the proxies were listed from.
 	Group string `json:"group,omitempty"`
+	// Capabilities reports what the active engine can do, per action, so the UI
+	// disables exactly the actions that cannot work instead of guessing from the
+	// backend mode.
+	Capabilities *ProxyActionCapabilities `json:"capabilities,omitempty"`
 	// Available is false when no Clash API endpoint is configured, which is
 	// the normal state while the core is stopped. The frontend uses it to
 	// show "start the core first" instead of an empty list.

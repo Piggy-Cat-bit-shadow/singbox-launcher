@@ -141,10 +141,32 @@ func SetPingTestURL(url string) {
 }
 
 // GetDelay asks Clash to measure latency for the specified proxy node (GetPingTestURL). Returns ErrPlatformInterrupt when the system is sleeping or context is cancelled.
+// GetDelay measures one proxy's latency with no caller context.
+//
+// Deprecated: use GetDelayContext. Kept because older callers (and the legacy
+// Fyne targets) use it; it delegates so there is exactly ONE HTTP delay
+// implementation rather than a second copy that could drift.
 func GetDelay(baseURL, token, proxyName string) (int64, error) {
+	return GetDelayContext(context.Background(), baseURL, token, proxyName)
+}
+
+// GetDelayContext measures one proxy's latency through the Clash-compatible
+// /proxies/{name}/delay endpoint, under the caller's context.
+//
+// The caller's context carries RUN cancellation (engine switch, core stop, a
+// superseded test run). It is deliberately not merged with the per-node test
+// budget, which stays in the request query string and in the HTTP deadline
+// below: a node that is merely slow must return a slow number, while a run that
+// is cancelled must stop promptly.
+func GetDelayContext(parent context.Context, baseURL, token, proxyName string) (int64, error) {
 	ctx, err := requestContext()
 	if err != nil {
 		return 0, err
+	}
+	// The request hangs off the caller's context, so cancelling the run
+	// aborts in-flight HTTP immediately.
+	if parent != nil {
+		ctx = parent
 	}
 	logMessage := fmt.Sprintf("[%s] GET /proxies/%s/delay request started.\n", time.Now().Format("2006-01-02 15:04:05"), proxyName)
 	writeLog(debuglog.LevelVerbose, "%s", logMessage)

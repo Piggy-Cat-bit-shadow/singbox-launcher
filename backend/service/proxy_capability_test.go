@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -38,6 +39,9 @@ func (s stubTransport) GroupProxies(string) ([]api.ProxyInfo, string, error) {
 
 func (s stubTransport) SwitchProxy(string, string) error { return s.err }
 func (s stubTransport) Delay(string) (int64, error)      { return 0, s.err }
+func (s stubTransport) DelayContext(context.Context, string) (int64, error) {
+	return 0, s.err
+}
 
 // proxyBackend builds a backend whose APIService carries the given transport, so
 // the proxy path is exercised without a running core or a live daemon.

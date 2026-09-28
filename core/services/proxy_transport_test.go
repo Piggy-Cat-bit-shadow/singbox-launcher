@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"testing"
 
 	"singbox-launcher/api"
@@ -21,6 +22,10 @@ func (s *stubTransport) SwitchProxy(group, name string) error {
 	return nil
 }
 func (s *stubTransport) Delay(name string) (int64, error) {
+	return s.DelayContext(context.Background(), name)
+}
+
+func (s *stubTransport) DelayContext(_ context.Context, name string) (int64, error) {
 	s.delayed = name
 	return 42, nil
 }

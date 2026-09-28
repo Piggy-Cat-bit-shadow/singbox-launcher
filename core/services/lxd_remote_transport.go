@@ -271,12 +271,36 @@ func (t *LxdRemoteTransport) SwitchProxy(group, name string) error {
 
 // Delay implements ProxyTransport через URLTestOutbound (точечный URL-тест
 // одного узла на СТОРОНЕ роутера — меряется его канал, а не наш).
+// Delay measures without a caller context: the legacy entry point.
 func (t *LxdRemoteTransport) Delay(proxyName string) (int64, error) {
-	client, ctx, cancel, err := t.rpcForURLTest()
+	return t.DelayContext(context.Background(), proxyName)
+}
+
+// DelayContext measures one outbound on a REMOTE daemon under ctx.
+//
+// The remote path is not reachable from the shipped menu-bar product
+// (capabilities.Remote is false), but it must keep implementing ProxyTransport
+// so the other targets compile.
+func (t *LxdRemoteTransport) DelayContext(parent context.Context, proxyName string) (int64, error) {
+	client, rpcCtx, cancel, err := t.rpcForURLTest()
 	if err != nil {
 		return 0, err
 	}
 	defer cancel()
+	ctx := rpcCtx
+	if parent != nil {
+		// Honour the run's cancellation on top of the transport's own deadline.
+		merged, mcancel := context.WithCancel(rpcCtx)
+		defer mcancel()
+		go func() {
+			select {
+			case <-parent.Done():
+				mcancel()
+			case <-merged.Done():
+			}
+		}()
+		ctx = merged
+	}
 	resp, err := client.URLTestOutbound(ctx, &daemonpb.URLTestOutboundRequest{
 		OutboundTag: proxyName,
 		Link:        api.GetPingTestURL(),

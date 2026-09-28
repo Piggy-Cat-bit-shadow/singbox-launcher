@@ -821,12 +821,12 @@ func (b *DaemonBackend) PoolSlots(group string) ([]PoolSlotInfo, error) {
 	// is a capability rather than a wrapped gRPC string.
 	b.ensureProbed()
 	if !b.caps.supported(rpcGetPool) {
-		return nil, services.ErrProxyListUnsupported
+		return nil, services.NewProxyCapabilityError(services.CapabilityList)
 	}
 	pool, err := client.GetPool(ctx, &daemonpb.GetPoolRequest{GroupTag: group})
 	if err != nil {
 		if isUnimplemented(err) {
-			return nil, services.ErrProxyListUnsupported
+			return nil, services.NewProxyCapabilityError(services.CapabilityList)
 		}
 		return nil, fmt.Errorf("daemon GetPool: %w", err)
 	}
@@ -847,12 +847,12 @@ func (b *DaemonBackend) Chains() ([]ChainInfo, error) {
 	defer cancel()
 	b.ensureProbed()
 	if !b.caps.supported(rpcGetChains) {
-		return nil, services.ErrProxyListUnsupported
+		return nil, services.NewProxyCapabilityError(services.CapabilityList)
 	}
 	list, err := client.GetChains(ctx, &emptypb.Empty{})
 	if err != nil {
 		if isUnimplemented(err) {
-			return nil, services.ErrProxyListUnsupported
+			return nil, services.NewProxyCapabilityError(services.CapabilityList)
 		}
 		return nil, fmt.Errorf("daemon GetChains: %w", err)
 	}
@@ -873,7 +873,7 @@ func (b *DaemonBackend) ProbeLayer(chainTag string, pos int) (int64, string, err
 	defer cancel()
 	b.ensureProbed()
 	if !b.caps.supported(rpcURLTestOutbound) {
-		return 0, "", services.ErrProxyListUnsupported
+		return 0, "", services.NewProxyCapabilityError(services.CapabilityTest)
 	}
 	resp, err := client.URLTestOutbound(ctx, &daemonpb.URLTestOutboundRequest{
 		OutboundTag: chainProbeTag(chainTag, pos),
@@ -882,7 +882,7 @@ func (b *DaemonBackend) ProbeLayer(chainTag string, pos int) (int64, string, err
 	})
 	if err != nil {
 		if isUnimplemented(err) {
-			return 0, "", services.ErrProxyListUnsupported
+			return 0, "", services.NewProxyCapabilityError(services.CapabilityTest)
 		}
 		return 0, "", fmt.Errorf("daemon URLTestOutbound: %w", err)
 	}
@@ -949,7 +949,7 @@ func (t *daemonProxyTransport) EndpointStatuses() (map[string]services.EndpointS
 	// capability, so callers get the sentinel rather than a gRPC string.
 	t.b.ensureProbed()
 	if !t.b.caps.supported(rpcGetOutbounds) {
-		return nil, services.ErrProxyListUnsupported
+		return nil, services.NewProxyCapabilityError(services.CapabilityList)
 	}
 	return services.EndpointStatusesRPC(ctx, client)
 }
@@ -964,7 +964,7 @@ func (t *daemonProxyTransport) SetEndpointEnabled(tag string, enabled bool) (str
 	}
 	t.b.ensureProbed()
 	if !t.b.caps.supported(rpcSetEndpointEnabled) {
-		return "", services.ErrProxyListUnsupported
+		return "", services.NewProxyCapabilityError(services.CapabilitySwitch)
 	}
 	ctx, cancel := context.WithTimeout(t.b.ctx, chainProbeCallTimeout())
 	defer cancel()
@@ -1027,14 +1027,14 @@ func (t *daemonProxyTransport) GroupProxies(group string) ([]api.ProxyInfo, stri
 // honest outcome and the one this audit exists to produce.
 func (t *daemonProxyTransport) groupsSnapshot(ctx context.Context, client daemonpb.StartedServiceClient) (*daemonpb.Groups, error) {
 	if !t.b.caps.supported(rpcGetGroups) {
-		return nil, services.ErrProxyListUnsupported
+		return nil, services.NewProxyCapabilityError(services.CapabilityList)
 	}
 	g, err := client.GetGroups(ctx, &emptypb.Empty{})
 	if err != nil {
 		if isUnimplemented(err) {
 			// The probe said yes and the call says no: trust the call, and treat
 			// it as the capability it is rather than as a transient failure.
-			return nil, services.ErrProxyListUnsupported
+			return nil, services.NewProxyCapabilityError(services.CapabilityList)
 		}
 		return nil, fmt.Errorf("daemon GetGroups: %w", err)
 	}
@@ -1050,11 +1050,11 @@ func (t *daemonProxyTransport) SwitchProxy(group, name string) error {
 	defer cancel()
 	t.b.ensureProbed()
 	if !t.b.caps.supported(rpcSelectOutbound) {
-		return services.ErrProxyListUnsupported
+		return services.NewProxyCapabilityError(services.CapabilitySwitch)
 	}
 	if _, err := client.SelectOutbound(ctx, &daemonpb.SelectOutboundRequest{GroupTag: group, OutboundTag: name}); err != nil {
 		if isUnimplemented(err) {
-			return services.ErrProxyListUnsupported
+			return services.NewProxyCapabilityError(services.CapabilitySwitch)
 		}
 		return fmt.Errorf("daemon SelectOutbound: %w", err)
 	}
@@ -1064,15 +1064,26 @@ func (t *daemonProxyTransport) SwitchProxy(group, name string) error {
 // Delay implements services.ProxyTransport через lx-RPC URLTestOutbound —
 // точечный URL-тест одного узла с granular cancel (SPEC 015 форка).
 func (t *daemonProxyTransport) Delay(proxyName string) (int64, error) {
+	return t.DelayContext(context.Background(), proxyName)
+}
+
+// DelayContext measures one outbound through lx-RPC URLTestOutbound under ctx.
+//
+// ctx carries RUN cancellation; the per-node budget travels in the request's
+// Timeout field, exactly as the classic transport sends it in the query string.
+// A cancelled run must stop promptly, while a merely slow node must still
+// return an honest number — which is why the two are not merged.
+func (t *daemonProxyTransport) DelayContext(ctx context.Context, proxyName string) (int64, error) {
 	client, err := t.b.grpcClient()
 	if err != nil {
 		return 0, err
 	}
-	// Distinguished from "the node is slow": a daemon without the URL-test RPC
-	// cannot measure anything, which is a capability, not a failed measurement.
+	// A daemon without the URL-test RPC cannot measure anything. Reported as the
+	// LATENCY capability specifically, so an engine that lists fine but cannot
+	// test keeps its node list usable instead of having the whole page disabled.
 	t.b.ensureProbed()
 	if !t.b.caps.supported(rpcURLTestOutbound) {
-		return 0, services.ErrProxyListUnsupported
+		return 0, services.NewProxyCapabilityError(services.CapabilityTest)
 	}
 	// Дедлайн вызова с запасом над бюджетом теста (как у ProbeLayer): при
 	// бюджете выше daemonRPCTimeout медленный узел получал бы транспортную
@@ -1081,9 +1092,9 @@ func (t *daemonProxyTransport) Delay(proxyName string) (int64, error) {
 	if probe := chainProbeCallTimeout(); probe > callTimeout {
 		callTimeout = probe
 	}
-	ctx, cancel := context.WithTimeout(t.b.ctx, callTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	resp, err := client.URLTestOutbound(ctx, &daemonpb.URLTestOutboundRequest{
+	resp, err := client.URLTestOutbound(callCtx, &daemonpb.URLTestOutboundRequest{
 		OutboundTag: proxyName,
 		Link:        api.GetPingTestURL(),
 		// Timeout — миллисекунды (uint32), в отличие от Interval у Subscribe*,
@@ -1094,7 +1105,7 @@ func (t *daemonProxyTransport) Delay(proxyName string) (int64, error) {
 	})
 	if err != nil {
 		if isUnimplemented(err) {
-			return 0, services.ErrProxyListUnsupported
+			return 0, services.NewProxyCapabilityError(services.CapabilityTest)
 		}
 		return 0, fmt.Errorf("daemon URLTestOutbound: %w", err)
 	}

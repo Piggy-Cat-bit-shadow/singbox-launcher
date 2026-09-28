@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -24,6 +25,84 @@ import (
 // capability rather than a failure.
 var ErrProxyListUnsupported = errors.New("the active engine does not support listing proxies")
 
+// ErrProxySwitchUnsupported reports that the active engine cannot SELECT a proxy,
+// while it may still be able to list them.
+//
+// Kept separate from the list sentinel because an engine can genuinely have one
+// without the other, and collapsing them disables working features. A daemon
+// that serves the group read but not SelectOutbound can still show its nodes;
+// the user simply cannot switch from here. Reporting that as "listing
+// unsupported" would hide a list that works.
+var ErrProxySwitchUnsupported = errors.New("the active engine does not support switching proxies")
+
+// ErrProxyLatencyUnsupported reports that the active engine cannot MEASURE
+// latency, while listing and switching may both work.
+//
+// This is the case the coarse single-sentinel model got wrong most often: the
+// whole proxy page was treated as broken because one action was missing. An
+// engine without the URL-test RPC still lists and still switches; only the test
+// column is unavailable, and only that should be disabled.
+var ErrProxyLatencyUnsupported = errors.New("the active engine does not support measuring proxy latency")
+
+// ProxyCapability identifies which proxy action a capability error refers to.
+//
+// Callers switch on this rather than on error text or on the backend mode, so
+// the UI never has to guess what an engine can do from a string or from knowing
+// whether it is talking to a daemon.
+type ProxyCapability string
+
+const (
+	// CapabilityList — reading the proxies of a group.
+	CapabilityList ProxyCapability = "list"
+	// CapabilitySwitch — selecting a proxy inside a selector group.
+	CapabilitySwitch ProxyCapability = "switch"
+	// CapabilityTest — measuring proxy latency (single node or whole group).
+	CapabilityTest ProxyCapability = "test"
+)
+
+// ProxyCapabilityError is a capability report carrying the action it concerns.
+//
+// It wraps one of the sentinels above, so both work: errors.Is(err,
+// ErrProxyLatencyUnsupported) and a structured switch on Capability. The
+// sentinels keep existing callers working; the struct answers "which action?"
+// without string matching.
+type ProxyCapabilityError struct {
+	Capability ProxyCapability
+	// Err is one of ErrProxyListUnsupported / ErrProxySwitchUnsupported /
+	// ErrProxyLatencyUnsupported.
+	Err error
+}
+
+func (e *ProxyCapabilityError) Error() string {
+	if e == nil || e.Err == nil {
+		return "proxy action unsupported"
+	}
+	return e.Err.Error()
+}
+
+func (e *ProxyCapabilityError) Unwrap() error { return e.Err }
+
+// NewProxyCapabilityError builds a capability report for an action.
+func NewProxyCapabilityError(c ProxyCapability) error {
+	switch c {
+	case CapabilityList:
+		return &ProxyCapabilityError{Capability: c, Err: ErrProxyListUnsupported}
+	case CapabilitySwitch:
+		return &ProxyCapabilityError{Capability: c, Err: ErrProxySwitchUnsupported}
+	case CapabilityTest:
+		return &ProxyCapabilityError{Capability: c, Err: ErrProxyLatencyUnsupported}
+	default:
+		return &ProxyCapabilityError{Capability: c, Err: ErrProxyListUnsupported}
+	}
+}
+
+// IsProxyCapabilityError reports whether err is any proxy capability report.
+func IsProxyCapabilityError(err error) bool {
+	return errors.Is(err, ErrProxyListUnsupported) ||
+		errors.Is(err, ErrProxySwitchUnsupported) ||
+		errors.Is(err, ErrProxyLatencyUnsupported)
+}
+
 // ProxyTransport abstracts the wire used for proxy-group operations. The
 // classic engine talks to the Clash HTTP API embedded in the running core;
 // the daemon engine talks gRPC to the lxd daemon. APIService и Servers-tab
@@ -35,7 +114,22 @@ type ProxyTransport interface {
 	// SwitchProxy selects a proxy inside a selector group.
 	SwitchProxy(group, name string) error
 	// Delay measures proxy latency in ms (URL-test against the ping URL).
+	//
+	// Deprecated: use DelayContext. Kept so existing callers and the legacy
+	// Fyne targets compile unchanged; it delegates with a background context.
 	Delay(proxyName string) (int64, error)
+	// DelayContext measures latency under a caller-supplied context.
+	//
+	// The context is what lets a group test cancel every in-flight measurement
+	// at once when the user stops the core, switches engine or starts a new run.
+	// Without it each layer would invent its own unrelated deadline and the
+	// cancellations could not reach the worker actually blocked on I/O.
+	//
+	// The per-node test budget (api.GetPingTestTimeoutMs) stays SEPARATE from
+	// this context: the budget says "this node is too slow", the context says
+	// "this run is over". Collapsing them would make a cancelled run
+	// indistinguishable from a slow node.
+	DelayContext(ctx context.Context, proxyName string) (int64, error)
 }
 
 // ClashTransport — классический транспорт поверх Clash HTTP API. Значения
@@ -63,8 +157,14 @@ func (t ClashTransport) SwitchProxy(group, name string) error {
 }
 
 // Delay implements ProxyTransport.
+// Delay measures without a caller context: the legacy entry point.
 func (t ClashTransport) Delay(proxyName string) (int64, error) {
-	return api.GetDelay(t.BaseURL, t.Token, proxyName)
+	return t.DelayContext(context.Background(), proxyName)
+}
+
+// DelayContext measures through the Clash-compatible endpoint under ctx.
+func (t ClashTransport) DelayContext(ctx context.Context, proxyName string) (int64, error) {
+	return api.GetDelayContext(ctx, t.BaseURL, t.Token, proxyName)
 }
 
 // SetTransport устанавливает транспорт-override (daemon-режим). nil — вернуть

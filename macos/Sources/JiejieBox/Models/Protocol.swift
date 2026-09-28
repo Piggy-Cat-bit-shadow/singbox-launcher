@@ -108,6 +108,8 @@ enum BackendEventName {
     static let trafficRate = "traffic_rate"
     static let subscriptionsChanged = "subscriptions_changed"
     static let daemonChanged = "daemon_changed"
+    /// One delta frame of a group latency test (started / result / finished).
+    static let proxyTestProgress = "proxy_test_progress"
 }
 
 /// A structured backend failure.
@@ -246,27 +248,65 @@ struct ProxyNode: Decodable, Identifiable, Hashable {
     let name: String
     let display_name: String
     let type: String?
-    let delay: Int64
+    /// Latency in ms; -1 means "no current measurement".
+    ///
+    /// `var` so a streamed progress frame can update one row the moment its
+    /// result arrives, instead of waiting for the whole run and reloading.
+    var delay: Int64
     let group: String
     let selected: Bool
-    let last_error: String?
+    var last_error: String?
+    /// How the last measurement ended: success / timeout / failed / unsupported
+    /// / cancelled, or absent when this session has not measured the node.
+    ///
+    /// A token rather than prose because the two engines report the same
+    /// condition with completely different text, and a row must not have to
+    /// match on strings to decide whether to say "timed out".
+    var status: String?
 
     var id: String { name }
 
     var label: String { display_name.isEmpty ? name : display_name }
 
-    /// True when a latency measurement exists.
-    var isMeasured: Bool { delay >= 0 }
-
-    /// Latency rendered for the row.
-    var delayLabel: String {
-        guard isMeasured else { return "—" }
-        return "\(delay) ms"
+    /// Latency rendered for the row: a number, a failure word, or a dash.
+    ///
+    /// A failed node shows WHY it has no number rather than "0 ms", which would
+    /// read as the fastest node in the list.
+    func delayLabel(_ language: Localization) -> String {
+        switch measurement {
+        case .timeout: return L.latencyTimedOut.tr(language)
+        case .failed, .unsupported: return L.latencyFailed.tr(language)
+        case .cancelled: return L.latencyNotMeasured.tr(language)
+        case .success, .none:
+            return isMeasured ? "\(delay) ms" : L.latencyNotMeasured.tr(language)
+        }
     }
+
+    /// Short form for compact contexts.
+    var delayLabel: String { isMeasured ? "\(delay) ms" : "—" }
 
     /// Coarse quality bucket, used only to colour the value.
     var isFast: Bool { isMeasured && delay < 200 }
     var isSlow: Bool { isMeasured && delay >= 600 }
+
+    /// True when a latency measurement exists.
+    var isMeasured: Bool { delay >= 0 }
+
+    /// The node's measurement outcome, if this session produced one.
+    var measurement: ProxyMeasurementStatus? {
+        status.flatMap(ProxyMeasurementStatus.init(rawValue:))
+    }
+
+    /// True when the node was measured and did not answer.
+    ///
+    /// Distinct from "not measured": a timeout is a result the user asked for
+    /// and must be shown, whereas an unmeasured node shows a dash.
+    var didFailMeasurement: Bool {
+        switch measurement {
+        case .timeout, .failed: return true
+        default: return false
+        }
+    }
 }
 
 /// Reply to get_proxy_groups / get_proxies / switch_proxy / test_proxy.
@@ -285,9 +325,57 @@ struct ProxyList: Decodable {
     /// Machine-readable cause, present only when `supported` is false. The
     /// frontend owns the wording; the backend only names the engine limitation.
     let unsupported_reason: String?
+    /// Per-action capabilities of the active engine.
+    ///
+    /// Optional so a backend predating the field reads as fully capable rather
+    /// than disabling every action — the same reasoning as `supported` above.
+    let capabilities: ProxyActionCapabilities?
 
     /// Whether the engine can list proxies at all.
     var isSupported: Bool { supported ?? true }
+
+    /// What the engine can do. Absent means "assume all", so an older backend
+    /// keeps every button enabled.
+    var actions: ProxyActionCapabilities { capabilities ?? .all }
+}
+
+/// Measurement outcome of one node, as reported by the backend.
+enum ProxyMeasurementStatus: String, Decodable {
+    case success
+    case timeout
+    case failed
+    case unsupported
+    case cancelled
+}
+
+/// What the active engine can do, per action.
+///
+/// The UI reads these and never branches on the backend mode. That is what keeps
+/// engine differences in the engine layer: a new backend needs no screen
+/// changes, and an engine that can list but not measure disables only the
+/// measure button.
+struct ProxyActionCapabilities: Decodable, Hashable {
+    let can_list: Bool
+    let can_switch: Bool
+    let can_test_single: Bool
+    let can_test_group: Bool
+    /// Stable tokens ("", "engine_lacks_rpc", "core_stopped", "unknown").
+    let list_reason: String?
+    let switch_reason: String?
+    let test_reason: String?
+
+    /// The optimistic default used when a backend omits the field.
+    static let all = ProxyActionCapabilities(
+        can_list: true, can_switch: true, can_test_single: true, can_test_group: true,
+        list_reason: nil, switch_reason: nil, test_reason: nil
+    )
+
+    /// True when the engine cannot measure latency, whatever the reason.
+    var testUnavailable: Bool { !can_test_single || !can_test_group }
+
+    /// The reason token to explain an unavailable test, preferring the group
+    /// one because "Test All" is the action the user sees.
+    var testReasonToken: String? { test_reason ?? switch_reason ?? list_reason }
 }
 
 /// Result of a config rebuild or a subscription refresh.
@@ -747,4 +835,44 @@ enum RelativeTime {
         if seconds < 86_400 { return "\(seconds / 3600)h ago" }
         return "\(seconds / 86_400)d ago"
     }
+}
+
+// MARK: - Proxy latency testing
+
+/// One progress frame of a group latency test.
+///
+/// Deltas only: a result frame names the single node that finished, so a
+/// 200-node group does not send 200-node payloads per event.
+struct ProxyTestProgress: Decodable {
+    let run_id: UInt64
+    let group: String
+    /// started / result / finished
+    let phase: String
+    let total: Int
+    let completed: Int
+    let succeeded: Int
+    let failed: Int
+
+    let node: String?
+    let delay: Int64?
+    let status: String?
+    let error: String?
+
+    var isStarted: Bool { phase == "started" }
+    var isResult: Bool { phase == "result" }
+    var isFinished: Bool { phase == "finished" }
+}
+
+/// Final result of a group latency test.
+struct ProxyGroupTestResult: Decodable {
+    let run_id: UInt64
+    let group: String
+    let total: Int
+    let succeeded: Int
+    let failed: Int
+    let cancelled: Bool?
+    let duration_ms: Int64
+    let proxies: ProxyList
+
+    var wasCancelled: Bool { cancelled ?? false }
 }

@@ -26,7 +26,10 @@ import (
 // without a Fyne application: every UI touchpoint inside core is guarded, so
 // no widget is ever constructed.
 type Backend struct {
-	ac *core.AppController
+	// groupTests owns the single active proxy latency test. One run at a time:
+	// the UI presents one progress state, and a new run supersedes the old.
+	groupTests groupTestManager
+	ac         *core.AppController
 
 	mu sync.Mutex
 	// seq is the monotonic event sequence. It lets the frontend discard an

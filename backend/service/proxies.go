@@ -10,12 +10,14 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"singbox-launcher/api"
 	"singbox-launcher/backend/protocol"
+	"singbox-launcher/core"
 	"singbox-launcher/core/config"
 	coreservices "singbox-launcher/core/services"
 	"singbox-launcher/internal/debuglog"
@@ -228,6 +230,33 @@ func (b *Backend) Proxies(group string) (protocol.ProxyList, error) {
 		if delay <= 0 {
 			delay = delayNotMeasured
 		}
+		status := ""
+		lastError := b.ac.APIService.GetLastPingError(p.Name)
+
+		// OVERLAY. A result this session measured is more authoritative than
+		// whatever the engine reports, because the engine's group snapshot is
+		// not a reliable echo of a test that just ran: a daemon's
+		// URLTestOutbound reply says nothing about the next GetGroups. Without
+		// this, a freshly measured 42 ms would be replaced by -1 on re-read and
+		// the row would flicker back to "—" the moment anything refreshed.
+		if m, ok := b.ac.APIService.GetMeasurement(p.Name); ok {
+			status = string(m.Status)
+			switch m.Status {
+			case coreservices.MeasurementSuccess:
+				delay = m.Delay
+			case coreservices.MeasurementTimeout, coreservices.MeasurementFailed,
+				coreservices.MeasurementUnsupported, coreservices.MeasurementCancelled:
+				// The node was measured and did NOT answer. Keeping the old
+				// number would present a stale value as present health, so the
+				// engine's own value is discarded too: a node we just failed to
+				// reach is not "42 ms" because some core cache says so.
+				delay = delayNotMeasured
+			}
+			if m.Error != "" {
+				lastError = m.Error
+			}
+		}
+
 		proxies = append(proxies, protocol.Proxy{
 			Name:        p.Name,
 			DisplayName: p.DisplayOrName(),
@@ -235,7 +264,8 @@ func (b *Backend) Proxies(group string) (protocol.ProxyList, error) {
 			Delay:       delay,
 			Group:       group,
 			Selected:    p.Name == selected,
-			LastError:   b.ac.APIService.GetLastPingError(p.Name),
+			LastError:   lastError,
+			Status:      status,
 		})
 	}
 
@@ -244,12 +274,23 @@ func (b *Backend) Proxies(group string) (protocol.ProxyList, error) {
 	// reads an absent value as "assume supported", which is the right default
 	// for an older backend but should not be how the CURRENT backend answers.
 	return protocol.ProxyList{
-		Groups:    []protocol.ProxyGroup{},
-		Proxies:   proxies,
-		Group:     group,
-		Available: true,
-		Supported: protocol.BoolPtr(true),
+		Groups:       []protocol.ProxyGroup{},
+		Proxies:      proxies,
+		Group:        group,
+		Available:    true,
+		Supported:    protocol.BoolPtr(true),
+		Capabilities: b.capabilitiesDTO(),
 	}, nil
+}
+
+// capabilitiesDTO projects the engine's per-action abilities for the wire.
+func (b *Backend) capabilitiesDTO() *protocol.ProxyActionCapabilities {
+	c := b.proxyActionCapabilities()
+	return &protocol.ProxyActionCapabilities{
+		CanList: c.CanList, CanSwitch: c.CanSwitch,
+		CanTestSingle: c.CanTestSingle, CanTestGroup: c.CanTestGroup,
+		ListReason: c.ListReason, SwitchReason: c.SwitchReason, TestReason: c.TestReason,
+	}
 }
 
 // SwitchProxy selects a node inside a group and reports the new state.
@@ -302,6 +343,10 @@ func (b *Backend) TestProxy(group, name string) (protocol.ProxyList, error) {
 			Code: "not_ready", Message: "backend not initialised", Recoverable: true,
 		}
 	}
+	caps := b.proxyActionCapabilities()
+	if !caps.CanTestSingle {
+		return protocol.ProxyList{}, capabilityErrorFor(caps)
+	}
 	transport, ok := b.transport()
 	if !ok {
 		return protocol.ProxyList{}, &protocol.Error{
@@ -311,48 +356,96 @@ func (b *Backend) TestProxy(group, name string) (protocol.ProxyList, error) {
 		}
 	}
 
-	delay, err := transport.Delay(name)
-	if err != nil {
-		// A failed measurement is data, not a fatal error: the node is
-		// unreachable, and the UI shows that per row.
-		b.ac.APIService.SetLastPingError(name, err.Error())
-		debuglog.DebugLog("backend: latency test for %q failed: %v", name, err)
-	} else {
-		b.ac.APIService.SetLastPingError(name, "")
-		_ = delay
+	// One measurement primitive for single and group tests, so timeout handling
+	// and error classification cannot drift between them.
+	outcome := measureProxy(context.Background(), transport, proxyNode{Group: group, Name: name})
+
+	// STORE the result. The previous version measured, discarded the number and
+	// re-read the list hoping the core would echo it back — which Classic
+	// sometimes did and daemon did not, since a URLTestOutbound reply is not a
+	// promise about the next group snapshot.
+	b.ac.APIService.SetMeasurement(name, coreservices.ProxyMeasurementState{
+		Delay:      outcome.Delay,
+		Status:     outcome.Status,
+		Error:      outcome.Error,
+		MeasuredAt: outcome.MeasuredAt,
+		Generation: b.groupTests.ActiveRunID(),
+	})
+	if outcome.Status != coreservices.MeasurementSuccess {
+		debuglog.DebugLog("backend: latency test for %q: %s (%s)",
+			name, outcome.Status, outcome.Error)
 	}
 
+	// The returned list is overlaid with the measurement just taken, so the row
+	// shows the value this request produced.
 	return b.Proxies(group)
 }
 
 // TestProxyGroup measures every node in a group.
 //
-// Sequential on purpose: firing hundreds of simultaneous handshakes starves
-// in-flight traffic, which is the same reasoning behind the existing
-// auto-ping cap (SPEC 039 §1.3).
+// Superseded by RunGroupTest, which measures with bounded concurrency and emits
+// progress. Kept for API stability; it forwards so there is exactly ONE
+// scheduler rather than a second serial one that could silently diverge.
 func (b *Backend) TestProxyGroup(group string) (protocol.ProxyList, error) {
-	list, err := b.Proxies(group)
+	res, err := b.RunGroupTest(context.Background(), group)
 	if err != nil {
 		return protocol.ProxyList{}, err
 	}
-	if !list.Available {
-		return list, nil
-	}
+	return res.Proxies, nil
+}
 
-	transport, ok := b.transport()
-	if !ok {
-		return list, nil
-	}
-
-	for _, p := range list.Proxies {
-		if _, derr := transport.Delay(p.Name); derr != nil {
-			b.ac.APIService.SetLastPingError(p.Name, derr.Error())
-		} else {
-			b.ac.APIService.SetLastPingError(p.Name, "")
+// proxyActionCapabilities reports what the active engine can do, per action.
+//
+// CLASSIC answers "all three" because it drives the core's Clash-compatible HTTP
+// API, whose endpoints are part of the core's contract rather than of this
+// launcher's generated client. Daemon mode asks the daemon, because the reachable
+// daemon's method set is not knowable from the client stub — the drift that
+// produced the whole compatibility layer.
+//
+// This is the ONLY place the engine's abilities are decided. The frontend reads
+// these booleans and must never branch on the backend mode, so a future engine
+// needs no UI change.
+func (b *Backend) proxyActionCapabilities() core.ProxyActionCapabilities {
+	if b.ac == nil {
+		return core.ProxyActionCapabilities{
+			ListReason: core.ReasonUnknown, SwitchReason: core.ReasonUnknown, TestReason: core.ReasonUnknown,
 		}
 	}
+	if db, ok := b.ac.Backend().(*core.DaemonBackend); ok {
+		return db.ProxyActionCapabilities()
+	}
+	return core.ProxyActionCapabilities{
+		CanList: true, CanSwitch: true, CanTestSingle: true, CanTestGroup: true,
+	}
+}
 
-	// Re-read after measuring so the returned delays are the ones the core
-	// recorded, not the ones we hoped for.
-	return b.Proxies(group)
+// ProxyActionCapabilities exposes the per-action set to the protocol layer.
+func (b *Backend) ProxyActionCapabilities() core.ProxyActionCapabilities {
+	return b.proxyActionCapabilities()
+}
+
+// capabilityErrorFor turns an unsupported action into a typed protocol error.
+//
+// The code is stable and machine-readable so the UI can explain the situation in
+// the user's language; the message is a diagnostic fallback, never the primary
+// text a user reads.
+func capabilityErrorFor(caps core.ProxyActionCapabilities) error {
+	reason := caps.ListReason
+	code := "proxy_list_unsupported"
+	msg := "the active engine does not support listing proxies"
+
+	switch {
+	case !caps.CanTestGroup && caps.CanList:
+		// The specific case worth calling out: nodes are visible, but latency
+		// cannot be measured. Reporting this as a list failure would disable a
+		// screen that works.
+		code = "proxy_latency_unsupported"
+		msg = "the active engine does not support measuring proxy latency"
+		reason = caps.TestReason
+	case !caps.CanSwitch && caps.CanList:
+		code = "proxy_switch_unsupported"
+		msg = "the active engine does not support switching proxies"
+		reason = caps.SwitchReason
+	}
+	return &protocol.Error{Code: code, Message: msg, Recoverable: false, Reason: reason}
 }

@@ -39,7 +39,63 @@ type proxyScopeState struct {
 	// This allows remembering the last proxy per selector (group) independently.
 	LastSelectedProxyByGroup map[string]string
 	// LastPingError maps proxy name -> last ping error message (for tooltip when button shows "Error").
+	//
+	// Kept as a projection of Measurements so existing Fyne targets keep
+	// compiling and behaving; new code should read Measurements, which carries
+	// the delay and timestamp a bare error string cannot.
 	LastPingError map[string]string
+	// Measurements is the authoritative runtime latency state for this scope.
+	//
+	// Runtime only: never persisted. It exists because the core's own history is
+	// not a reliable echo — a daemon URLTestOutbound returning 42 ms does not
+	// guarantee the next group snapshot reports 42 ms, so a measured value that
+	// is discarded and re-read can silently revert to "unknown".
+	Measurements map[string]ProxyMeasurementState
+}
+
+// MeasurementStatus classifies how a latency measurement ended.
+//
+// The UI switches on these tokens instead of inspecting error strings, so
+// Classic and Daemon — whose underlying error text differs completely — produce
+// the same three row states.
+type MeasurementStatus string
+
+const (
+	// MeasurementSuccess — the node answered; Delay is meaningful.
+	MeasurementSuccess MeasurementStatus = "success"
+	// MeasurementTimeout — the node did not answer within its budget.
+	MeasurementTimeout MeasurementStatus = "timeout"
+	// MeasurementFailed — the node answered with an error.
+	MeasurementFailed MeasurementStatus = "failed"
+	// MeasurementUnsupported — the engine cannot measure at all.
+	MeasurementUnsupported MeasurementStatus = "unsupported"
+	// MeasurementCancelled — the run was cancelled; the node was not judged.
+	MeasurementCancelled MeasurementStatus = "cancelled"
+)
+
+// ProxyMeasurementState is one node's runtime latency result.
+type ProxyMeasurementState struct {
+	// Delay in ms. Meaningful only when Status is MeasurementSuccess; -1
+	// otherwise, because 0 is a legitimate latency and must not double as
+	// "no result".
+	Delay int64
+	// Status is the classification the UI colours and labels by.
+	Status MeasurementStatus
+	// Error is the technical reason, for a tooltip. Deliberately not the row
+	// label: a node list showing full transport errors is unreadable.
+	Error string
+	// MeasuredAt is when the result was taken. Recorded for freshness; the UI
+	// does not display it yet.
+	MeasuredAt time.Time
+	// Generation identifies the run that produced this result, so a late result
+	// from a superseded run can be recognised and dropped.
+	Generation uint64
+	// EverSucceeded records that this node measured successfully at some point.
+	// Lets a future UI show "last known good" without conflating it with the
+	// CURRENT result, which is the mistake §20 warns against.
+	EverSucceeded bool
+	// LastSuccessDelay is the most recent successful value, or -1.
+	LastSuccessDelay int64
 }
 
 func newProxyScopeState() *proxyScopeState {
@@ -48,6 +104,7 @@ func newProxyScopeState() *proxyScopeState {
 		SelectedIndex:            -1,
 		LastSelectedProxyByGroup: make(map[string]string),
 		LastPingError:            make(map[string]string),
+		Measurements:             make(map[string]ProxyMeasurementState),
 	}
 }
 
@@ -321,6 +378,10 @@ func (apiSvc *APIService) GetLastSelectedProxyForGroup(group string) string {
 }
 
 // SetLastPingError stores the last ping error message for a proxy (for tooltip when button shows "Error").
+//
+// Wraps the measurement store so the legacy Fyne UI keeps working unchanged.
+// It records only the error half; callers that have a real delay should use
+// SetMeasurement instead, which is what keeps a measured value from being lost.
 func (apiSvc *APIService) SetLastPingError(proxyName, errMsg string) {
 	apiSvc.StateMutex.Lock()
 	defer apiSvc.StateMutex.Unlock()
@@ -332,6 +393,75 @@ func (apiSvc *APIService) SetLastPingError(proxyName, errMsg string) {
 	} else {
 		apiSvc.mutableStateLocked().LastPingError[proxyName] = errMsg
 	}
+}
+
+// SetMeasurement records the authoritative runtime result for a proxy.
+//
+// This is the write the latency flow is built on: the transport returns a
+// number, the backend stores it here, and later reads overlay it. Nothing is
+// discarded in the hope that the core will echo it back.
+func (apiSvc *APIService) SetMeasurement(proxyName string, m ProxyMeasurementState) {
+	apiSvc.StateMutex.Lock()
+	defer apiSvc.StateMutex.Unlock()
+	state := apiSvc.mutableStateLocked()
+	if state.Measurements == nil {
+		state.Measurements = make(map[string]ProxyMeasurementState)
+	}
+	if state.LastPingError == nil {
+		state.LastPingError = make(map[string]string)
+	}
+	// Carry forward the last known good value: a node that measured 42 ms and
+	// then timed out still has a meaningful last-success, but its CURRENT delay
+	// is no longer 42 ms.
+	prev, seen := state.Measurements[proxyName]
+	if seen && prev.EverSucceeded {
+		m.EverSucceeded = true
+		m.LastSuccessDelay = prev.LastSuccessDelay
+	}
+	if m.Status == MeasurementSuccess {
+		m.EverSucceeded = true
+		m.LastSuccessDelay = m.Delay
+	}
+	if m.LastSuccessDelay == 0 && !m.EverSucceeded {
+		m.LastSuccessDelay = -1
+	}
+	state.Measurements[proxyName] = m
+	if m.Error == "" {
+		delete(state.LastPingError, proxyName)
+	} else {
+		state.LastPingError[proxyName] = m.Error
+	}
+}
+
+// GetMeasurement returns the recorded measurement for a proxy.
+func (apiSvc *APIService) GetMeasurement(proxyName string) (ProxyMeasurementState, bool) {
+	apiSvc.StateMutex.RLock()
+	defer apiSvc.StateMutex.RUnlock()
+	m, ok := apiSvc.stateLocked().Measurements[proxyName]
+	return m, ok
+}
+
+// GetMeasurements returns a copy of the whole measurement map.
+func (apiSvc *APIService) GetMeasurements() map[string]ProxyMeasurementState {
+	apiSvc.StateMutex.RLock()
+	defer apiSvc.StateMutex.RUnlock()
+	src := apiSvc.stateLocked().Measurements
+	out := make(map[string]ProxyMeasurementState, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// ClearMeasurements drops all recorded latency results for this scope.
+//
+// Called when the cache would be a lie rather than a stale truth: a config swap,
+// a changed remote target, or an engine identity change means the old numbers
+// describe nodes that may no longer exist.
+func (apiSvc *APIService) ClearMeasurements() {
+	apiSvc.StateMutex.Lock()
+	defer apiSvc.StateMutex.Unlock()
+	apiSvc.mutableStateLocked().Measurements = make(map[string]ProxyMeasurementState)
 }
 
 // GetLastPingError returns the last ping error message for a proxy, or empty string.

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -155,6 +156,125 @@ func TestUnsupportedSentinelIsTheUserFacingAnswer(t *testing.T) {
 		if strings.Contains(msg, forbidden) {
 			t.Errorf("the user-facing sentinel mentions internal RPC detail %q: %q",
 				forbidden, msg)
+		}
+	}
+}
+
+// TestLatencyUnsupportedIsIndependentOfListing — the §51/§85/§86 case.
+//
+// THE most important new case: an engine that lists nodes perfectly well but
+// cannot measure them. The old single-boolean model reported this as "cannot
+// list", which hid a working node list from the user and disabled switching too.
+func TestLatencyUnsupportedIsIndependentOfListing(t *testing.T) {
+	// Measured shape after the compatibility work: groups served, URL-test not.
+	c := capsWith("lists-but-cannot-test", rpcGetGroups, rpcSelectOutbound)
+	b := &DaemonBackend{caps: c}
+
+	caps := b.ProxyActionCapabilities()
+	if !caps.CanList {
+		t.Error("CanList=false for an engine that serves GetGroups")
+	}
+	if !caps.CanSwitch {
+		t.Error("CanSwitch=false for an engine that serves SelectOutbound")
+	}
+	if caps.CanTestSingle || caps.CanTestGroup {
+		t.Error("test reported as supported for an engine without URLTestOutbound")
+	}
+	if caps.TestReason != ReasonEngineLacksRPC {
+		t.Errorf("TestReason = %q, want %q", caps.TestReason, ReasonEngineLacksRPC)
+	}
+	if caps.ListReason != ReasonOK {
+		t.Errorf("ListReason = %q, want empty for a working list", caps.ListReason)
+	}
+}
+
+// TestSwitchUnsupportedIsIndependentOfTest — the mirror case.
+//
+// An engine that can list AND measure but not switch. Switching must be the only
+// thing disabled; disabling test as well would take away a working feature.
+func TestSwitchUnsupportedIsIndependentOfTest(t *testing.T) {
+	c := capsWith("lists-and-tests", rpcGetGroups, rpcURLTestOutbound)
+	b := &DaemonBackend{caps: c}
+
+	caps := b.ProxyActionCapabilities()
+	if !caps.CanList {
+		t.Error("CanList=false despite GetGroups")
+	}
+	if !caps.CanTestSingle || !caps.CanTestGroup {
+		t.Error("test reported unsupported despite URLTestOutbound")
+	}
+	if caps.CanSwitch {
+		t.Error("CanSwitch=true without SelectOutbound")
+	}
+	if caps.SwitchReason != ReasonEngineLacksRPC {
+		t.Errorf("SwitchReason = %q, want %q", caps.SwitchReason, ReasonEngineLacksRPC)
+	}
+}
+
+// TestAllActionsSupportedIsNotReportedAsLimited — the converse, so the fix is
+// not "always report something unsupported".
+func TestAllActionsSupportedIsNotReportedAsLimited(t *testing.T) {
+	b := &DaemonBackend{caps: currentDaemonCaps()}
+	caps := b.ProxyActionCapabilities()
+	if !caps.CanList || !caps.CanSwitch || !caps.CanTestSingle || !caps.CanTestGroup {
+		t.Errorf("a fully capable daemon reported limits: %+v", caps)
+	}
+	if caps.ListReason != ReasonOK || caps.SwitchReason != ReasonOK || caps.TestReason != ReasonOK {
+		t.Errorf("a fully capable daemon carried reasons: %+v", caps)
+	}
+}
+
+// TestCapabilitiesUnknownBeforeProbe — an unprobed backend must not claim
+// abilities it has not confirmed.
+func TestCapabilitiesUnknownBeforeProbe(t *testing.T) {
+	b := &DaemonBackend{caps: &daemonCapabilities{}}
+	caps := b.ProxyActionCapabilities()
+	if caps.CanList || caps.CanSwitch || caps.CanTestSingle || caps.CanTestGroup {
+		t.Error("capabilities claimed before any probe")
+	}
+	if caps.TestReason != ReasonUnknown {
+		t.Errorf("TestReason = %q, want %q", caps.TestReason, ReasonUnknown)
+	}
+}
+
+// TestSentinelSplitKeepsTheActionsDistinct — the §7 requirement that
+// Unimplemented on one RPC must not be reported as another's limitation.
+func TestSentinelSplitKeepsTheActionsDistinct(t *testing.T) {
+	list := coreservices.NewProxyCapabilityError(coreservices.CapabilityList)
+	sw := coreservices.NewProxyCapabilityError(coreservices.CapabilitySwitch)
+	test := coreservices.NewProxyCapabilityError(coreservices.CapabilityTest)
+
+	if !errors.Is(list, coreservices.ErrProxyListUnsupported) {
+		t.Error("list error does not wrap the list sentinel")
+	}
+	if errors.Is(list, coreservices.ErrProxyLatencyUnsupported) {
+		t.Error("a list capability error also matches the LATENCY sentinel; the " +
+			"actions are not distinguishable")
+	}
+	if errors.Is(test, coreservices.ErrProxyListUnsupported) {
+		t.Error("a latency capability error matches the LIST sentinel, which is " +
+			"exactly the coarse mapping this change removes")
+	}
+	if errors.Is(sw, coreservices.ErrProxyLatencyUnsupported) {
+		t.Error("a switch capability error matches the latency sentinel")
+	}
+
+	// And the structured form answers "which action?" without string matching.
+	for _, tc := range []struct {
+		err  error
+		want coreservices.ProxyCapability
+	}{
+		{list, coreservices.CapabilityList},
+		{sw, coreservices.CapabilitySwitch},
+		{test, coreservices.CapabilityTest},
+	} {
+		var ce *coreservices.ProxyCapabilityError
+		if !errors.As(tc.err, &ce) {
+			t.Errorf("%v is not a ProxyCapabilityError", tc.err)
+			continue
+		}
+		if ce.Capability != tc.want {
+			t.Errorf("capability = %q, want %q", ce.Capability, tc.want)
 		}
 	}
 }

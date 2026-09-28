@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -248,12 +249,20 @@ func (s *Server) handle(req protocol.Request) (resp protocol.Response) {
 		return protocol.Response{ID: req.ID, Result: list}
 
 	case protocol.MethodTestProxyGroup:
+		// The response is the FINAL result; progress arrives meanwhile as
+		// proxy_test_progress events on the same connection. The request being
+		// outstanding must not stop the reader from delivering them — the
+		// frontend applies progress and only then sees this return.
 		group, _ := req.Params["group"].(string)
-		list, err := s.backend.TestProxyGroup(group)
+		// The request's own lifetime is bounded by the connection, which the
+		// server does not model as a context here; the run has its own budget
+		// and its own cancellation (supersede / core stop / shutdown), which is
+		// what actually needs to interrupt it.
+		result, err := s.backend.RunGroupTest(context.Background(), group)
 		if err != nil {
 			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
 		}
-		return protocol.Response{ID: req.ID, Result: list}
+		return protocol.Response{ID: req.ID, Result: result}
 
 	case protocol.MethodReloadConfig:
 		result, err := s.backend.ReloadConfig()
