@@ -83,24 +83,66 @@ type Backend struct {
 	traffic     *TrafficSampler
 	trafficOnce sync.Once
 
-	// shutdownOnce makes Shutdown exactly-once; shutdownStarted lets a caller
-	// observe that teardown has begun.
-	shutdownOnce    sync.Once
-	shutdownStarted chan struct{}
-	shutdownInit    sync.Once
+	// shutdownOnce makes Shutdown exactly-once; the two channels are the two
+	// DISTINCT states teardown has, and conflating them was a defect:
+	//
+	//   shutdownBegan — closed at the START of Shutdown. Everything that must
+	//                   stop doing work listens here.
+	//   shutdownDone  — closed when the teardown has FINISHED. Only a caller that
+	//                   needs the process to be quiescent waits here.
+	//
+	// A single channel closed by a `defer` inside Shutdown meant "finished", while
+	// every consumer treated it as "begun". The visible consequence: for the whole
+	// duration of the teardown the backend reported that it was NOT shutting down,
+	// and the group latency test — whose context hung off that channel — was
+	// cancelled only after GracefulExit had completely returned, by which time
+	// cancelling it is meaningless because the provider is already gone.
+	shutdownOnce  sync.Once
+	shutdownBegan chan struct{}
+	shutdownDone  chan struct{}
+	shutdownInit  sync.Once
+
+	// events serialises sequence assignment WITH delivery.
+	//
+	// A separate mutex from `mu` on purpose: a subscriber may re-enter the backend
+	// (reading a snapshot, asking whether it is shutting down), so delivering under
+	// the state lock would deadlock. Holding THIS lock across both steps makes the
+	// numbers subscribers observe strictly increasing, which is the only thing that
+	// makes the client's "discard seq <= my high-water mark" rule safe.
+	eventMu    sync.Mutex
+	dispatchMu sync.Mutex
 }
 
-// shutdownSignal lazily creates the channel Shutdown closes.
+// shutdownSignal lazily creates the shutdown channels.
 //
-// Lazily, because Backend is also constructed directly in tests as a zero
-// value, and a nil channel would make IsShuttingDown report the wrong answer.
-func (b *Backend) shutdownSignal() chan struct{} {
+// Lazily, because Backend is also constructed directly in tests as a zero value, and
+// a nil channel would make both predicates report the wrong answer.
+func (b *Backend) shutdownSignal() (began, done chan struct{}) {
 	b.shutdownInit.Do(func() {
-		if b.shutdownStarted == nil {
-			b.shutdownStarted = make(chan struct{})
+		if b.shutdownBegan == nil {
+			b.shutdownBegan = make(chan struct{})
+		}
+		if b.shutdownDone == nil {
+			b.shutdownDone = make(chan struct{})
 		}
 	})
-	return b.shutdownStarted
+	return b.shutdownBegan, b.shutdownDone
+}
+
+// ShutdownBegan is closed as soon as Shutdown starts.
+//
+// This is what background work must select on: a new operation, a proxy test, a
+// subscription fetch or a daemon retry should refuse or abort the moment teardown
+// begins, not when it has finished.
+func (b *Backend) ShutdownBegan() <-chan struct{} {
+	began, _ := b.shutdownSignal()
+	return began
+}
+
+// ShutdownDone is closed when the teardown has completed.
+func (b *Backend) ShutdownDone() <-chan struct{} {
+	_, done := b.shutdownSignal()
+	return done
 }
 
 // runContext returns a context that is cancelled when the backend shuts down.
@@ -123,7 +165,10 @@ func (b *Backend) runContext() context.Context {
 		// directly; this bridge is created ONCE for the whole backend rather than
 		// once per operation.
 		go func() {
-			<-b.shutdownSignal()
+			// BEGAN, not done: every operation derived from this context must stop
+			// when teardown STARTS.
+			began, _ := b.shutdownSignal()
+			<-began
 			cancel()
 		}()
 	})
@@ -667,6 +712,23 @@ func (b *Backend) Subscribe(fn func(protocol.Event)) func() {
 // same order subscribers observe them; without that, two concurrent state
 // changes could arrive at the frontend out of order.
 func (b *Backend) emit(name string, payload any) {
+	// SEQUENCE ASSIGNMENT AND DELIVERY ARE ONE OPERATION.
+	//
+	// They used to be two: the number was taken under `mu`, the lock was released,
+	// and only then were subscribers called. Two goroutines could therefore be
+	// numbered 10 and 11 in order and delivered 11-then-10 — and the client's rule
+	// "discard any event whose seq is <= my high-water mark" then threw away the
+	// lower one as stale. A lost `core_state_changed` overtaken by a
+	// `settings_changed` leaves the UI on a stale core state until something
+	// unrelated re-emits it.
+	//
+	// The fix is NOT to deliver under `mu`: a subscriber may re-enter the backend,
+	// and that would deadlock. It is to give sequence-plus-delivery its own lock,
+	// so the two steps are atomic with respect to each other while remaining
+	// independent of the state mutex.
+	b.eventMu.Lock()
+	defer b.eventMu.Unlock()
+
 	b.mu.Lock()
 	b.seq++
 	// The session is stamped here, under the same lock that hands out the
@@ -684,6 +746,8 @@ func (b *Backend) emit(name string, payload any) {
 	}
 	b.mu.Unlock()
 
+	// Delivered while `eventMu` is held, so no later-numbered event can overtake.
+	// Callers that want to observe this ordering need no additional synchronisation.
 	for _, fn := range subs {
 		fn(ev)
 	}
@@ -748,9 +812,17 @@ func (b *Backend) StopCore() error {
 // but relying on that would mean every future side effect added here must also
 // be — a fragile invariant. The guard makes it true by construction.
 func (b *Backend) Shutdown() {
-	signal := b.shutdownSignal()
+	began, done := b.shutdownSignal()
 	b.shutdownOnce.Do(func() {
-		defer close(signal)
+		// THE ORDER OF THESE TWO CLOSES IS THE FIX.
+		//
+		// `began` closes FIRST, before any teardown work, so every consumer that
+		// must stop doing work — the run context, the group latency test, new
+		// operations — is released immediately. `done` closes at the END, for
+		// callers that genuinely need the process quiescent. Previously one channel
+		// closed only at the end and was read as "begun" by everyone.
+		close(began)
+		defer close(done)
 		if b.ac == nil {
 			return
 		}
@@ -792,8 +864,9 @@ func (b *Backend) Shutdown() {
 // IsShuttingDown reports whether Shutdown has begun, so a caller can avoid
 // starting work the teardown is about to cancel.
 func (b *Backend) IsShuttingDown() bool {
+	began, _ := b.shutdownSignal()
 	select {
-	case <-b.shutdownSignal():
+	case <-began:
 		return true
 	default:
 		return false

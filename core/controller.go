@@ -440,6 +440,11 @@ func (ac *AppController) IsExiting() bool {
 
 func (ac *AppController) gracefulExit() {
 	ac.exiting.Store(true)
+	// Test seam: runs at the start of the teardown so a test can hold it open and
+	// observe the difference between "begun" and "finished".
+	if exitHookForTest != nil {
+		exitHookForTest()
+	}
 	// Сторож взводится ДО остановки ядра. Из трея этот код идёт на
 	// main-потоке Fyne (драйвер маршалит action через runOnMain), и всё,
 	// что здесь зависнет, зависнет вместе с циклом событий: окно не

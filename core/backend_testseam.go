@@ -82,3 +82,16 @@ func SetSwitchModeSeamForTest(fn func(mode BackendMode) (bool, error)) func() {
 	switchModeSeamForTest = fn
 	return func() { switchModeSeamForTest = prev }
 }
+
+// exitHookForTest lets a test block the teardown, so "shutdown has begun" and
+// "shutdown has finished" can be observed as two distinct states.
+var exitHookForTest func()
+
+// SetExitHookForTest installs a hook that runs at the START of GracefulExit and
+// replaces any previous one. Passing nil clears it.
+func (ac *AppController) SetExitHookForTest(fn func()) {
+	if ac == nil {
+		return
+	}
+	exitHookForTest = fn
+}
