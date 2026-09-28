@@ -202,6 +202,50 @@ enum CoreState: String, Decodable {
     var isTransitioning: Bool {
         self == .starting || self == .stopping
     }
+
+    /// Whether this state ENDS the given lifecycle goal.
+    ///
+    /// A RESTART IS NOT FINISHED BY `stopped`, and that distinction is the whole
+    /// reason this takes the goal rather than answering "is it settled". A
+    /// restart passes through `stopping` -> `stopped` -> `starting` -> `running`,
+    /// so treating any non-transitioning state as completion made the midpoint
+    /// `stopped` look like the end of the operation: the spinner cleared, the
+    /// buttons reopened, and the user was offered "Start" in the middle of the
+    /// restart they had just requested.
+    ///
+    /// `error` ends every goal: a failed operation is over, and the reason is
+    /// reported by the error fields rather than by leaving the UI busy.
+    ///
+    /// `starting` deliberately does NOT end `.start`. The backend publishes it
+    /// as the transition begins, and releasing there would show "running" work
+    /// as complete one step early — the original defect, just moved.
+    func isTerminal(for goal: CoreGoal) -> Bool {
+        switch self {
+        case .error:
+            return true
+        case .stopped:
+            // Only a stop is finished by `stopped`. For a restart this is the
+            // halfway point; for a start it means the start has not taken.
+            return goal == .stop
+        case .running:
+            // A restart ends where a start does. A STOP that observes `running`
+            // has not taken effect yet, which is exactly the stale state the
+            // operation-aware wait exists to reject.
+            return goal == .start || goal == .restart
+        case .starting, .stopping:
+            return false
+        }
+    }
+}
+
+/// The lifecycle goal a core operation is trying to reach.
+///
+/// Declared here rather than nested in the view model so `CoreState` — a
+/// protocol type — can reason about it without importing the frontend's state.
+enum CoreGoal: Equatable {
+    case start
+    case stop
+    case restart
 }
 
 struct CoreStatus: Decodable {
@@ -500,7 +544,17 @@ enum ByteFormat {
 /// overrides. See SubscriptionDTO in the Go protocol for the same reasoning.
 struct Subscription: Decodable, Identifiable, Hashable {
     let id: String
+    /// The resolved display label. The backend fills this with the custom name
+    /// when set, otherwise the provider's profile title, otherwise the URL host,
+    /// so it is never blank and the frontend never reimplements the fallback.
     let name: String
+    /// Whether `name` is a name the user set, rather than a derived label. The
+    /// edit screen offers "clear" only when true.
+    ///
+    /// Optional so a snapshot from an older backend still decodes; absent means
+    /// "cannot say", and the form falls back to comparing against the stored
+    /// value rather than claiming there is a custom name.
+    let has_custom_name: Bool?
     let url: String
     let enabled: Bool
     let node_count: Int
@@ -532,6 +586,9 @@ struct Subscription: Decodable, Identifiable, Hashable {
 
     /// True when this source came from a local file rather than a provider.
     var isLocalSnapshot: Bool { (input_kind ?? "remote") == "local_snapshot" }
+
+    /// True when the user has set a custom name that can be cleared.
+    var hasCustomName: Bool { has_custom_name ?? false }
 
     /// Whether a Refresh action may be offered.
     var isRefreshable: Bool { can_refresh ?? !isLocalSnapshot }

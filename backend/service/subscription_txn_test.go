@@ -53,7 +53,7 @@ func TestSubscriptionCRUDSerializedWithRefresh(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
 			on := i%2 == 0
-			_, _ = b.UpdateSubscription("s1", "", "", &on)
+			_, _ = b.UpdateSubscription("s1", "", "", &on, false)
 		}
 	}()
 
@@ -207,7 +207,7 @@ func TestEnableSubscriptionMarksConfigStale(t *testing.T) {
 	}
 
 	off := false
-	if _, err := b.UpdateSubscription("s1", "", "", &off); err != nil {
+	if _, err := b.UpdateSubscription("s1", "", "", &off, false); err != nil {
 		t.Fatalf("UpdateSubscription: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestChangingSubscriptionURLInvalidatesOldMaterialization(t *testing.T) {
 	_ = s
 	_ = path
 
-	if _, err := b.UpdateSubscription("s1", "", "https://example.invalid/b", nil); err != nil {
+	if _, err := b.UpdateSubscription("s1", "", "https://example.invalid/b", nil, false); err != nil {
 		t.Fatalf("UpdateSubscription: %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestUpdateSubscriptionRejectsDuplicateURL(t *testing.T) {
 		subSource("s2", "B", "https://example.invalid/b"),
 	)
 
-	if _, err := b.UpdateSubscription("s2", "", "https://example.invalid/a", nil); err == nil {
+	if _, err := b.UpdateSubscription("s2", "", "https://example.invalid/a", nil, false); err == nil {
 		t.Fatal("editing a subscription to a URL another source already uses was " +
 			"accepted; Add refuses this, so the invariant is only enforced on one of " +
 			"the two paths that can violate it")

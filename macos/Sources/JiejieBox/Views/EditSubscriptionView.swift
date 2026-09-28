@@ -11,9 +11,12 @@ struct EditSubscriptionView: View {
     let id: String
     @Environment(\.localization) private var language
 
-    private let nameField = FieldState()
-    private let urlField = FieldState()
-    private let confirmDelete = FieldState()
+    // Drafts live on the MODEL, keyed by subscription id: a stored property on a
+    // View struct is replaced on every parent body pass, and keying by id keeps
+    // one source's uncommitted edit from appearing in another's form.
+    private var nameField: TextDraft { model.drafts.draft(DraftStore.editName(id)) }
+    private var urlField: TextDraft { model.drafts.draft(DraftStore.editURL(id)) }
+    private var confirmDelete: TextDraft { model.drafts.draft(DraftStore.editConfirmDelete(id)) }
 
     /// The live record, so the screen reflects the backend after a refresh
     /// rather than the values it was opened with.
@@ -106,14 +109,24 @@ struct EditSubscriptionView: View {
                     Task {
                         let ok = await model.updateSubscription(
                             id: sub.id,
-                            name: nameField.text.trimmingCharacters(in: .whitespaces),
+                            // An emptied field means "clear the custom name",
+                            // which is a real edit the user can intend — sent as
+                            // an explicit flag, because an empty name on its own
+                            // means "leave the name alone".
+                            name: nameField.trimmed,
                             // A local snapshot keeps its stored URL (empty) and
                             // is not re-pointed by this form; sending the field
                             // would let a stale value overwrite it.
-                            url: sub.isLocalSnapshot
-                                ? sub.url
-                                : urlField.text.trimmingCharacters(in: .whitespaces))
-                        if ok { model.goBack() }
+                            url: sub.isLocalSnapshot ? sub.url : urlField.trimmed,
+                            // An emptied field means "clear the custom name",
+                            // which is a real edit the user can intend — sent as
+                            // an explicit flag, because an empty name on its own
+                            // means "leave the name alone".
+                            clearName: nameField.trimmed.isEmpty && sub.hasCustomName)
+                        if ok {
+                            model.clearEditDrafts(id: sub.id)
+                            model.popIfCurrent(.editSubscription(id))
+                        }
                     }
                 }
                 .disabled(model.pending != nil || !hasEdits)
@@ -162,7 +175,10 @@ struct EditSubscriptionView: View {
             Button(L.delete.tr(language), role: .destructive) {
                 confirmDelete.text = ""
                 Task {
-                    if await model.removeSubscription(sub.id) { model.goBack() }
+                    if await model.removeSubscription(sub.id) {
+                        model.clearEditDrafts(id: sub.id)
+                        model.popIfCurrent(.editSubscription(sub.id))
+                    }
                 }
             }
             Button(L.cancel.tr(language), role: .cancel) { confirmDelete.text = "" }
@@ -177,19 +193,35 @@ struct EditSubscriptionView: View {
     /// reload cannot overwrite an edit in progress.
     private func primeFields() {
         guard let sub else { return }
-        if nameField.text.isEmpty { nameField.text = sub.name }
+        // Seeded only once per draft: `isEmpty` is the guard, so a user who has
+        // deliberately cleared the name is not re-seeded with the stored one on
+        // the next reload — which would undo the edit they are in the middle of.
+        if !model.drafts.hasContent(DraftStore.editName(id)) {
+            model.drafts.set(DraftStore.editName(id), sub.name)
+        }
         // The URL field is not shown for a local snapshot, so seeding it would
         // leave a value that only exists to be compared against.
-        if urlField.text.isEmpty && !sub.isLocalSnapshot { urlField.text = sub.url }
+        if !sub.isLocalSnapshot, !model.drafts.hasContent(DraftStore.editURL(id)) {
+            model.drafts.set(DraftStore.editURL(id), sub.url)
+        }
     }
 
     /// True when a field differs from the stored record.
+    ///
+    /// An EMPTIED name counts as an edit, because clearing a custom name is a real
+    /// intention: it hands the source back to its provider/default title. The
+    /// previous version required `!name.isEmpty` and so could never express it —
+    /// with a custom name set, deleting the text left Save disabled and the user
+    /// had no way back to the default. The backend now takes an emptied name as
+    /// an explicit clear (see `UpdateSubscription`).
+    ///
+    /// An emptied URL is still not an edit: a subscription must have a URL, so
+    /// there is nothing to save and the backend would reject it.
     private var hasEdits: Bool {
         guard let sub else { return false }
-        let name = nameField.text.trimmingCharacters(in: .whitespaces)
-        if name != sub.name && !name.isEmpty { return true }
+        if nameField.trimmed != sub.name { return true }
         guard !sub.isLocalSnapshot else { return false }
-        let url = urlField.text.trimmingCharacters(in: .whitespaces)
+        let url = urlField.trimmed
         return url != sub.url && !url.isEmpty
     }
 }

@@ -42,6 +42,25 @@ final class AppModel {
     /// Navigation inside the menu-bar window.
     var path: [Screen] = []
 
+    /// Drop the edit drafts for one subscription.
+    ///
+    /// Called when an edit is committed or the source is deleted, so reopening
+    /// the form shows the stored record rather than a submitted draft. Without
+    /// it, `primeFields` would see a non-empty draft and skip re-seeding — which
+    /// is what keeps an in-progress edit safe, and what would keep a FINISHED one
+    /// on screen forever.
+    func clearEditDrafts(id: String) {
+        drafts.clear(DraftStore.editName(id))
+        drafts.clear(DraftStore.editURL(id))
+        drafts.clear(DraftStore.editConfirmDelete(id))
+    }
+
+    /// Stable owner of every in-progress text field.
+    ///
+    /// Lives on the model, not on a View, so a re-render cannot discard what the
+    /// user has typed — see DraftStore's header for the defect this fixes.
+    let drafts = DraftStore()
+
     /// Which long-running operation the backend is performing, if any.
     ///
     /// Presentation only: the UI shows a spinner while a command is in
@@ -69,6 +88,24 @@ final class AppModel {
         case importingCore
         case configuringDaemon
         case pairingDaemon
+
+        /// The lifecycle goal, for the three core commands.
+        ///
+        /// Nil for every other operation, which is how the settle rule knows
+        /// not to apply to them.
+        ///
+        /// The goal has to travel WITH the operation because the finish line
+        /// differs: a stop ends at `stopped`, while a restart passes THROUGH
+        /// `stopped` and is not finished until `running` again. A single
+        /// "is it settled" predicate cannot express that.
+        var coreKind: CoreGoal? {
+            switch self {
+            case .startingCore: return .start
+            case .stoppingCore: return .stop
+            case .restarting: return .restart
+            default: return nil
+            }
+        }
     }
 
     /// A specific boolean setting, so pending feedback can name it.
@@ -267,6 +304,30 @@ final class AppModel {
     /// Return to the root screen.
     func goHome() { path.removeAll() }
 
+    /// Leave the given screen, but only if the user is STILL on it.
+    ///
+    /// THE BUG THIS EXISTS TO PREVENT. An operation that navigates on success
+    /// used to call `goBack()` unconditionally when its request returned. If the
+    /// user pressed Back while that request was in flight, the two popped
+    /// DIFFERENT screens: the user's own Back moved them one level, and the
+    /// operation's completion then moved them another. One save sent the user
+    /// two screens away from where they were.
+    ///
+    /// The operation must therefore express WHERE it expects to be, and give up
+    /// the pop if the user has already left. That is this method: the same pop on
+    /// the happy path, and a no-op once the user has taken their own exit.
+    ///
+    /// The check is by screen IDENTITY rather than by depth, so it stays correct
+    /// when an intervening navigation changed the stack shape.
+    ///
+    /// `path.last == screen` also implies `canGoBack`, so an empty stack is safe.
+    @discardableResult
+    func popIfCurrent(_ screen: Screen) -> Bool {
+        guard path.last == screen else { return false }
+        path.removeLast()
+        return true
+    }
+
     /// Current screen, or nil at the root.
     var currentScreen: Screen? { path.last }
 
@@ -420,6 +481,14 @@ final class AppModel {
     /// stops updating core state, traffic, selections and subscriptions until
     /// the new helper has emitted more events than the previous one ever did.
     private var appliedSeq: Int64 = 0
+    /// The highest sequence the model has applied.
+    ///
+    /// A core operation compares against this to tell a state it CAUSED from a
+    /// state that was already true. Exposed read-only: the only legitimate
+    /// writer is the event/snapshot application path, which is what makes the
+    /// number mean "the backend has published this much".
+    var observedSeq: Int64 { appliedSeq }
+
     /// The backend session `appliedSeq` belongs to.
     ///
     /// `nil` before the first snapshot. A sequence number is only comparable
@@ -532,6 +601,7 @@ final class AppModel {
                 Task { @MainActor in
                     // Only ever reported for an exit we did not ask for; the
                     // client filters intentional quits and restarts.
+                    self?.abandonCoreOperation()
                     self?.connection = .failed("The backend stopped unexpectedly (code \(code)).")
                 }
             }
@@ -1010,10 +1080,15 @@ final class AppModel {
         return added
     }
 
-    func updateSubscription(id: String, name: String, url: String) async -> Bool {
+    /// Edit one source. `clearName` requests removal of a custom name.
+    func updateSubscription(id: String,
+                            name: String,
+                            url: String,
+                            clearName: Bool = false) async -> Bool {
         var saved = false
         await withPending(.savingSubscription, success: nil) {
-            _ = try await self.client.updateSubscription(id: id, name: name, url: url)
+            _ = try await self.client.updateSubscription(
+                id: id, name: name, url: url, clearName: clearName)
             saved = true
             self.showTransient(L.subscriptionSaved.tr(self.resolvedLanguage))
         }
@@ -1175,9 +1250,23 @@ final class AppModel {
         daemonCommand?.operation == "fresh_invite" && daemonCommand?.available == true
     }
 
+    /// The outcome of the most recent PAIR attempt, for this screen's own
+    /// warning about a spent invite.
+    ///
+    /// Held on the model because the toolchain cannot compile `@State` (see the
+    /// header), and because it must describe the ATTEMPT rather than the app's
+    /// general error line: reading `lastError` meant any unrelated failure made
+    /// the Pair screen claim the user's invite had been used.
+    ///
+    /// Nil until a pair is attempted, so a freshly opened screen shows no warning.
+    private(set) var lastPairAttemptFailed: Bool?
+
     func pairDaemon(invite: String) async -> Bool {
         var paired = false
-        await withPending(.pairingDaemon, success: nil) {
+        // Cleared before the attempt so a previous failure cannot describe this
+        // one, and so the value always belongs to the click that produced it.
+        lastPairAttemptFailed = nil
+        await withPending(.pairingDaemon, success: nil, recordsPairFailure: true) {
             self.daemon = try await self.client.pairDaemon(invite: invite)
             paired = self.daemon?.paired ?? false
             if paired {
@@ -1302,9 +1391,43 @@ final class AppModel {
             lastError = L.anotherOperationRunning.tr(resolvedLanguage)
             return
         }
+
+        // THE OPERATION IS IDENTIFIED BEFORE THE COMMAND, NOT AFTER IT.
+        //
+        // What settles a core operation is a lifecycle transition THAT THIS
+        // OPERATION CAUSED. The sequence counter is what makes that decidable:
+        // every published state change carries a new `seq`, so a state observed
+        // at a sequence below this one was already true when the command was
+        // sent and says nothing about whether the command has finished.
+        //
+        // The previous version asked only "is the core in a non-transitioning
+        // state?", which the state BEFORE the operation satisfies immediately:
+        //
+        //   Stop,  core running: `stop_core` returns as soon as the stop is
+        //          accepted; the `stopping` event has not arrived yet;
+        //          `waitForCoreToSettle` sees `running` — not transitioning —
+        //          and clears the marker at once. The button returns to "Stop"
+        //          while the stop is still running.
+        //
+        //   Start, core stopped: identical, with `stopped` as the stale answer.
+        //
+        //   Restart: the old `running` is read as the restart's own success.
+        //
+        // The fix is to require a state change that came AFTER the command.
+        // Only the three lifecycle commands reach here, and a missing goal
+        // would silently settle on the wrong predicate, so it is a hard
+        // failure rather than a default.
+        guard let goal = op.coreKind else {
+            assertionFailure("withCorePending used for a non-lifecycle operation")
+            return
+        }
+        let opID = UUID()
+        let startSeq = observedSeq
+        coreOperation = CoreOperation(id: opID, kind: goal, startSeq: startSeq)
         pending = op
         lastError = nil
         coreOpDeadline = Date().addingTimeInterval(Self.coreOperationTimeout)
+
         do {
             try await body()
         } catch {
@@ -1312,13 +1435,47 @@ final class AppModel {
             // marker must go and the reason must be shown.
             pending = nil
             coreOpDeadline = nil
+            coreOperation = nil
             lastError = error.localizedDescription
             return
         }
-        // Hold the marker until a lifecycle event settles it. If no event ever
-        // arrives (a lost notification, a backend that died mid-operation), the
-        // deadline releases it rather than leaving the UI permanently busy.
-        await waitForCoreToSettle()
+
+        // Hold the marker until THIS operation's outcome is observed. If no
+        // event ever arrives (a lost notification, a backend that died
+        // mid-operation), the deadline reconciles against an authoritative
+        // snapshot rather than pretending the operation vanished.
+        await waitForCoreToSettle(opID)
+    }
+
+    /// The lifecycle operation currently holding the UI, and what would end it.
+    private struct CoreOperation {
+        let id: UUID
+        let kind: CoreGoal
+        /// Sequence at the moment the command was sent. Any state at or below
+        /// this describes the world BEFORE the operation.
+        let startSeq: Int64
+    }
+
+    private var coreOperation: CoreOperation?
+
+    /// True when the observed state has moved past the operation's start.
+    ///
+    /// The transition check and the sequence check are both required, and the
+    /// sequence is what the old version was missing entirely:
+    ///
+    ///   * `stateChanged` alone is not enough — the pre-existing `running` is
+    ///     itself an observation, so the very first poll would settle a stop.
+    ///   * A sequence bump alone is not enough — an unrelated event (a settings
+    ///     save, a traffic sample) also advances the counter while the core is
+    ///     still mid-transition, and settling on that would clear the spinner
+    ///     during the slow part of the work.
+    ///
+    /// Both together mean: the backend has published a state that is BOTH new
+    /// and finished.
+    private func coreOperationSettled(_ op: CoreOperation) -> Bool {
+        guard observedSeq > op.startSeq else { return false }
+        guard let state = core?.state else { return false }
+        return state.isTerminal(for: op.kind)
     }
 
     /// How long a core operation may hold the UI before the marker is released.
@@ -1328,25 +1485,138 @@ final class AppModel {
     /// release a UI that would otherwise spin forever.
     private static let coreOperationTimeout: TimeInterval = 75
 
-    /// Wait until the backend reports a settled core state, or the deadline passes.
-    private func waitForCoreToSettle() async {
-        while Date() < (coreOpDeadline ?? .distantPast) {
-            if let state = core?.state, !state.isTransitioning {
-                // The backend has finished transitioning: running, stopped or
-                // error. Either way the operation is over and the marker goes.
-                break
+    /// Wait until THIS operation's outcome is observed, or the deadline passes.
+    ///
+    /// Polls the LOCAL snapshot while the deadline holds, because the state
+    /// arrives through the event stream that is already running and a request
+    /// per tick would add load without adding information.
+    ///
+    /// THE DEADLINE DOES NOT DECIDE THE OUTCOME. When it passes we do not know
+    /// whether the operation finished and its event was lost, or is still
+    /// running, or the backend is gone — so the previous code's response
+    /// ("clear the marker, keep whatever state we have") was a guess presented
+    /// as a fact. It reopened the buttons on an operation that might still be
+    /// running, and the user could then send a second lifecycle command against
+    /// a core mid-transition.
+    ///
+    /// The timeout therefore RECONCILES against an authoritative snapshot:
+    ///
+    ///   * the reply settles the operation -> release, as normal;
+    ///   * the reply shows it is still running -> keep the busy marker, because
+    ///     that is the truth, and say the backend is slow;
+    ///   * the request fails -> the backend is unreachable, which is a
+    ///     connection failure the user must see, not a silent release.
+    private func waitForCoreToSettle(_ opID: UUID) async {
+        while !Task.isCancelled {
+            if let op = coreOperation, op.id == opID, coreOperationSettled(op) {
+                finishCoreOperation(opID)
+                return
             }
-            // Poll the LOCAL snapshot rather than the backend: the state arrives
-            // through the event stream that is already running, and issuing a
-            // request here would add load without adding information.
+            guard Date() < (coreOpDeadline ?? .distantPast) else { break }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
-        pending = nil
+        guard coreOperation?.id == opID else { return }
+        await reconcileTimedOutCoreOperation(opID)
+    }
+
+    /// Ask the backend what is actually true after the wait gave up.
+    ///
+    /// The question the timeout cannot answer locally is "did my event get
+    /// lost, or is this still running?" — and only the backend knows. Asking
+    /// it is what turns an unknown into a decision:
+    ///
+    ///   * `running` / `stopped` consistent with the operation's goal, or an
+    ///     `error` -> the operation did complete and the event was lost, so
+    ///     adopt the snapshot and release.
+    ///   * still `starting` / `stopping`, or a state that contradicts the goal
+    ///     -> the work is genuinely unfinished. The marker STAYS, with an
+    ///     explanation, so the user is not offered a control that would collide
+    ///     with it.
+    ///   * the request fails -> the backend is unreachable. That is reported as
+    ///     a connection failure instead of a silent release.
+    ///
+    /// Only a snapshot that genuinely ends the operation releases the marker;
+    /// every other path keeps it and says why.
+    private func reconcileTimedOutCoreOperation(_ opID: UUID) async {
+        guard let op = coreOperation, op.id == opID else { return }
+
+        do {
+            let snapshot = try await client.snapshot()
+            guard coreOperation?.id == opID else { return }
+
+            // Read the state from the SNAPSHOT, not from `core` after applying
+            // it: `apply` advances `appliedSeq` to the snapshot's own sequence,
+            // which would make the freshness test below trivially true — the
+            // reply would always look "newer than the command" even when it
+            // reports the very state the command started from.
+            let authoritative = snapshot.core.state
+            let settledHere = authoritative.isTerminal(for: op.kind)
+
+            apply(snapshot)
+            guard coreOperation?.id == opID else { return }
+
+            if settledHere {
+                // The work finished; only the notification was lost. This is
+                // the case the deadline exists for, and it releases cleanly and
+                // silently because the user's operation did succeed.
+                finishCoreOperation(opID)
+                return
+            }
+
+            // Still in flight. The marker stays — releasing it here is what
+            // let a second lifecycle command race the first.
+            lastError = L.coreOperationStillRunning.tr(resolvedLanguage)
+        } catch {
+            // The backend could not be reached. Releasing the marker would make
+            // the UI claim an operation ended when we cannot see the backend at
+            // all, so the failure is reported and the marker is kept until the
+            // connection is re-established (which resets it — see `apply`
+            // of a snapshot during reconnect).
+            lastError = L.coreOperationUnconfirmed.tr(resolvedLanguage)
+        }
+    }
+
+    /// Give up on a lifecycle operation whose outcome can never be confirmed.
+    ///
+    /// Called when the backend that accepted the command is gone: a new session,
+    /// a failed connection, a crash. Distinct from `finishCoreOperation`, which
+    /// means "the operation completed and we observed it" — this one means "we
+    /// will never know", so it must not be confused with success.
+    ///
+    /// Stated once and called from every such point, because leaving any one of
+    /// them out produces the same symptom: a UI that stays busy forever with no
+    /// operation behind it.
+    private func abandonCoreOperation() {
+        guard coreOperation != nil else { return }
+        coreOperation = nil
         coreOpDeadline = nil
+        pending = nil
+    }
+
+    /// Clear the busy marker if it still belongs to this operation.
+    ///
+    /// Guarded by identity so a stale completion cannot release a NEWER
+    /// operation's marker — the same class of bug as a stale proxy response
+    /// overwriting the current screen.
+    private func finishCoreOperation(_ opID: UUID) {
+        guard coreOperation?.id == opID else { return }
+        coreOperation = nil
+        coreOpDeadline = nil
+        pending = nil
     }
 
     private func withPending(_ op: PendingOperation,
                              success: String?,
+                             /// Record the outcome as this screen's pair attempt.
+                             ///
+                             /// Set by `pairDaemon` only: the Pair screen's "your
+                             /// invite may be spent" warning must describe a PAIR
+                             /// failure, and sharing the app-wide error line made
+                             /// it appear after unrelated failures. Recorded here
+                             /// because this is the single place that observes
+                             /// whether the command succeeded, so a caller cannot
+                             /// forget to set it.
+                             recordsPairFailure: Bool = false,
                              _ body: @escaping () async throws -> Void) async {
         // Overlap is prevented in the UI by disabling controls while an
         // operation is in flight; this guard is the second line of defence
@@ -1364,8 +1634,10 @@ final class AppModel {
         defer { pending = nil }
         do {
             try await body()
+            if recordsPairFailure { lastPairAttemptFailed = false }
             if let success { showTransient(success) }
         } catch {
+            if recordsPairFailure { lastPairAttemptFailed = true }
             lastError = error.localizedDescription
         }
     }
@@ -1697,6 +1969,19 @@ final class AppModel {
             // A new session invalidates any events buffered against the old
             // one: they describe a process that has been replaced.
             pendingEvents.removeAll()
+
+            // A lifecycle operation belongs to the process that accepted it.
+            // Once that process is gone its event can never arrive, so an
+            // operation still holding the UI would hold it forever — and the
+            // timeout's reconciliation would keep asking a backend that has
+            // already been replaced. The operation is abandoned HERE, at the
+            // one moment we learn the old process no longer exists, rather than
+            // left to expire.
+            //
+            // Abandoned is not the same as succeeded: `core` is replaced by the
+            // new snapshot immediately below, and any error of the old
+            // operation was already reported when it happened.
+            abandonCoreOperation()
         }
 
         handshake = snapshot.handshake

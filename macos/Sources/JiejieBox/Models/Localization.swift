@@ -454,6 +454,12 @@ enum L: CaseIterable {
 
     // Status and errors
     case anotherOperationRunning
+    /// The backend is still working on a lifecycle command after the local wait
+    /// gave up, confirmed by an authoritative snapshot.
+    case coreOperationStillRunning
+    /// The lifecycle command's outcome could not be confirmed because the
+    /// backend could not be reached.
+    case coreOperationUnconfirmed
     case operationFailed
     case notAvailable
     case unknown
@@ -865,6 +871,8 @@ extension L {
         case .aboutBlurb: return "A menu bar client for sing-box."
 
         case .anotherOperationRunning: return "Another operation is still running. Wait for it to finish."
+        case .coreOperationStillRunning: return "The backend is still working on this. The controls stay unavailable until it settles."
+        case .coreOperationUnconfirmed: return "The backend could not be reached to confirm whether this finished. Reconnecting…"
         case .operationFailed: return "The operation failed."
         case .notAvailable: return "Not available"
         case .unknown: return "Unknown"
@@ -1247,6 +1255,8 @@ extension L {
         case .aboutBlurb: return "一个 sing-box 菜单栏客户端。"
 
         case .anotherOperationRunning: return "还有操作正在进行，请等待完成。"
+        case .coreOperationStillRunning: return "后端仍在处理该操作，完成前相关按钮保持不可用。"
+        case .coreOperationUnconfirmed: return "无法连接后端确认该操作是否完成，正在重连…"
         case .operationFailed: return "操作失败。"
         case .notAvailable: return "不可用"
         case .unknown: return "未知"

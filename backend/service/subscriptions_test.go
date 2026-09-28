@@ -65,7 +65,7 @@ func TestSubscriptionLifecycle(t *testing.T) {
 	}
 
 	// Rename.
-	renamed, err := b.UpdateSubscription(added.ID, "My Provider", "", nil)
+	renamed, err := b.UpdateSubscription(added.ID, "My Provider", "", nil, false)
 	if err != nil {
 		t.Fatalf("UpdateSubscription: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestAddSubscriptionValidation(t *testing.T) {
 func TestSubscriptionUnknownID(t *testing.T) {
 	b := backendWithConfig(t)
 
-	if _, err := b.UpdateSubscription("nope", "x", "", nil); err == nil {
+	if _, err := b.UpdateSubscription("nope", "x", "", nil, false); err == nil {
 		t.Error("UpdateSubscription accepted an unknown id")
 	} else if pe, ok := err.(*protocol.Error); !ok || pe.Code != "not_found" {
 		t.Errorf("update error = %v, want not_found", err)

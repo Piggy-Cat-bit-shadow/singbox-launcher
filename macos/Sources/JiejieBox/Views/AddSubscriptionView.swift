@@ -10,10 +10,14 @@ struct AddSubscriptionView: View {
     let model: AppModel
     @Environment(\.localization) private var language
 
-    // Plain stored properties rather than @State: this toolchain cannot
-    // compile the SwiftUI macro plugin (see AppModel's header comment).
-    private let urlField = FieldState()
-    private let nameField = FieldState()
+    // The drafts come from the MODEL, never from a stored property here.
+    //
+    // A `private let urlField = FieldState()` on a View struct is replaced every
+    // time the parent body runs, so a model update arriving while the user types
+    // could hand this body a fresh, empty draft and the URL would vanish. The
+    // model owns them and hands back the same instance by key — see DraftStore.
+    private var urlField: TextDraft { model.drafts.draft(DraftStore.addSubscriptionURL) }
+    private var nameField: TextDraft { model.drafts.draft(DraftStore.addSubscriptionName) }
 
     var body: some View {
         PanelScaffold(model: model, title: L.addSubscriptionTitle.tr(language),
@@ -61,39 +65,45 @@ struct AddSubscriptionView: View {
 
     /// Valid only with a plausible URL — the same rule the backend enforces, so
     /// the button and the error cannot disagree.
+    ///
+    /// Case-insensitively, because the backend lowercases before checking
+    /// (`strings.ToLower` in `looksLikeURL`). The previous case-sensitive prefix
+    /// test meant `HTTPS://example.com/sub` was ACCEPTED by the backend but left
+    /// the Add button permanently disabled: the user could see a valid URL in the
+    /// field and had no way to submit it.
+    ///
+    /// Whitespace is trimmed with the same set the backend uses, so trailing
+    /// newlines from a paste do not disable the button either.
     private var canAdd: Bool {
         guard model.pending == nil else { return false }
-        let url = urlField.text.trimmingCharacters(in: .whitespaces)
-        return url.hasPrefix("http://") || url.hasPrefix("https://")
+        return SubscriptionURLInput.looksValid(urlField.text)
     }
 
     private func add() {
-        let url = urlField.text.trimmingCharacters(in: .whitespaces)
-        let name = nameField.text.trimmingCharacters(in: .whitespaces)
+        let url = urlField.trimmed
+        let name = nameField.trimmed
         Task {
             // Pop only on success: leaving the form open on failure keeps the
-            // user's typed URL available to correct.
+            // user's typed URL available to correct, and the draft is owned by
+            // the model so it genuinely survives the re-render that the failure
+            // causes.
             if await model.addSubscription(name: name, url: url) {
-                model.goBack()
+                // The work is done, so the draft must not be restored next time.
+                model.drafts.clear(DraftStore.addSubscriptionURL)
+                model.drafts.clear(DraftStore.addSubscriptionName)
+                // Only if the user is STILL here: pressing Back while the add was
+                // in flight must not be followed by a second, automatic pop.
+                model.popIfCurrent(.addSubscription)
             }
         }
     }
-}
-
-/// Editable text state for a field.
-///
-/// A reference type so the field can be a plain property on the view; the
-/// Observation macro is available even though the SwiftUI one is not.
-@Observable
-final class FieldState {
-    var text: String = ""
 }
 
 /// A labelled text field sized for the panel.
 struct LabeledField: View {
     let label: String
     var placeholder: String = ""
-    let state: FieldState
+    let state: TextDraft
     /// Rendered as a secure field when true (used for the pairing invite when
     /// the user prefers not to see it on screen).
     var secure: Bool = false

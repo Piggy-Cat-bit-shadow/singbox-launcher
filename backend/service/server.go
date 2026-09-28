@@ -497,7 +497,21 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) (resp prot
 				enabled = &b
 			}
 		}
-		dto, err := s.backend.UpdateSubscription(id, name, url, enabled)
+		// Clearing a custom name is an explicit request, not an empty string.
+		//
+		// The same absence-vs-empty distinction as `enabled`, and for the same
+		// reason: `name: ""` also means "this edit does not mention the name", so
+		// without a separate flag there was NO way to express "remove my custom
+		// name and go back to the provider's title". The frontend had no such
+		// action and the backend had no such input, so the operation the user
+		// wanted did not exist anywhere in the product.
+		clearName := false
+		if v, present := req.Params["clear_name"]; present {
+			if b, ok := v.(bool); ok {
+				clearName = b
+			}
+		}
+		dto, err := s.backend.UpdateSubscription(id, name, url, enabled, clearName)
 		if err != nil {
 			return protocol.Response{ID: req.ID, Error: toProtocolError(err)}
 		}

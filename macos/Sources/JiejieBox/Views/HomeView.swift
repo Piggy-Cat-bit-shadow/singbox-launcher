@@ -27,10 +27,13 @@ struct HomeView: View {
     /// AND OVERWRITE config.json, so it must be a deliberate act that names the
     /// consequence, never a side effect of dismissing a warning.
     ///
-    /// A reference-type holder rather than `@State`: this toolchain (Swift 6.4
-    /// command-line, SwiftUI macros unavailable) cannot compile `@State`, and
-    /// the rest of the app already uses this pattern for transient UI state.
-    private let adoptPrompt = FieldState()
+    /// Owned by the MODEL, not by a stored property here: this toolchain cannot
+    /// compile `@State` (Swift 6.4 command-line, SwiftUI macros unavailable), and
+    /// a `private let` holder on a View struct is replaced whenever the parent
+    /// body runs — which would dismiss a confirmation dialog the user is reading.
+    private var adoptPrompt: TextDraft {
+        model.drafts.draft(DraftStore.homeAdoptConfig)
+    }
 
     var body: some View {
         PanelScaffold(model: model, title: "JiejieBox") {
@@ -46,7 +49,7 @@ struct HomeView: View {
         }
         .confirmationDialog(L.adoptConfig.tr(language),
                             isPresented: Binding(
-                                get: { adoptPrompt.text == "confirm" },
+                                get: { adoptPrompt.text == DraftStore.confirmWord },
                                 set: { if !$0 { adoptPrompt.text = "" } }),
                             titleVisibility: .visible) {
             Button(L.adoptConfig.tr(language)) {
@@ -398,7 +401,7 @@ struct HomeView: View {
                     Button(L.openConfig.tr(language)) { model.revealConfig() }
                         .controlSize(.small)
                     Button(L.adoptConfig.tr(language)) {
-                        adoptPrompt.text = "confirm"
+                        adoptPrompt.text = DraftStore.confirmWord
                     }
                     .controlSize(.small)
                 case .external:

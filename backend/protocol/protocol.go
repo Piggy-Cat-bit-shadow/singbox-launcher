@@ -545,8 +545,17 @@ type TrafficRate struct {
 type SubscriptionDTO struct {
 	// ID is the source ULID, used for every edit and refresh call.
 	ID string `json:"id"`
-	// Name is the user-visible label; auto-derived from the URL when blank.
+	// Name is the user-visible label, already resolved by the backend: the
+	// custom name if one is set, otherwise the provider's profile title, and
+	// otherwise the URL's host. Never blank for a subscription with a URL, so no
+	// screen has to reimplement the fallback.
 	Name string `json:"name"`
+	// HasCustomName reports whether the user set a name, as opposed to Name
+	// holding a derived label. The edit screen uses it to offer "clear" only when
+	// there is a custom name to clear — without it, the button would either
+	// always show or the UI would have to guess by comparing Name to a host it
+	// would have to derive itself.
+	HasCustomName bool `json:"has_custom_name,omitempty"`
 	// URL is the subscription address.
 	URL string `json:"url"`
 	// Enabled excludes the source from the build when false.

@@ -128,15 +128,31 @@ func toSubscriptionDTO(src *state.Source) protocol.SubscriptionDTO {
 		return protocol.SubscriptionDTO{}
 	}
 	inputKind := state.SubscriptionInputKindOf(src)
+	// An absent name means "no custom name", so the display name falls back to
+	// the provider's profile title and then to the URL's host. Resolved here, at
+	// the one place a DTO is built, so every consumer sees the same label and no
+	// screen has to reimplement the fallback — and so clearing a custom name
+	// produces a USABLE name rather than a blank row.
+	displayName := src.Name
+	if displayName == "" && src.Meta != nil && src.Meta.ProfileTitle != "" {
+		displayName = src.Meta.ProfileTitle
+	}
+	if displayName == "" {
+		displayName = displayNameFromURL(src.URL)
+	}
 	dto := protocol.SubscriptionDTO{
-		ID:         src.ID,
-		Name:       src.Name,
-		URL:        src.URL,
-		Enabled:    src.Enabled,
-		MaxNodes:   src.MaxNodes,
-		InputKind:  string(inputKind),
-		CanRefresh: state.CanRefreshSubscription(src),
-		Filename:   src.LocalFilename,
+		ID:   src.ID,
+		Name: displayName,
+		// Whether the stored name is a CUSTOM one. The edit form needs this to
+		// tell "the user has a custom name" from "this is the derived label", so
+		// it can offer a clear only when there is something to clear.
+		HasCustomName: src.Name != "",
+		URL:           src.URL,
+		Enabled:       src.Enabled,
+		MaxNodes:      src.MaxNodes,
+		InputKind:     string(inputKind),
+		CanRefresh:    state.CanRefreshSubscription(src),
+		Filename:      src.LocalFilename,
 		// Only enabled, non-unsupported nodes count: reporting every record
 		// would advertise nodes the build will not emit.
 		NodeCount: countUsableNodes(src),
@@ -257,7 +273,7 @@ func findSourceByURL(s *state.State, url, excludeID string) *state.Source {
 //
 // Only the fields the caller actually sends are changed, so an edit that does
 // not touch the URL cannot silently blank it.
-func (b *Backend) UpdateSubscription(id, name, url string, enabled *bool) (protocol.SubscriptionDTO, error) {
+func (b *Backend) UpdateSubscription(id, name, url string, enabled *bool, clearName bool) (protocol.SubscriptionDTO, error) {
 	if b.ac == nil {
 		return protocol.SubscriptionDTO{}, &protocol.Error{
 			Code: "not_ready", Message: "backend not initialised", Recoverable: true,
@@ -277,7 +293,7 @@ func (b *Backend) UpdateSubscription(id, name, url string, enabled *bool) (proto
 	// The whole load-modify-save runs under the shared lock, so a refresh cannot
 	// replace the file in the middle of the edit.
 	var updated *state.Source
-	var enabledChanged, urlChanged bool
+	var enabledChanged, urlChanged, nameChanged bool
 	err := b.withStateLocked(func(s *state.State, path string) error {
 		src := s.FindSource(id)
 		if src == nil || src.Kind != state.SourceKindSubscription {
@@ -313,8 +329,17 @@ func (b *Backend) UpdateSubscription(id, name, url string, enabled *bool) (proto
 			src.UpdateStatus = nil
 			urlChanged = true
 		}
-		if trimmedName != "" {
+		// An explicit clear falls back to the provider/default title rather than
+		// storing an empty name, so the source keeps a usable label everywhere it
+		// is displayed. `clearName` is a separate input because `name == ""` also
+		// means "this edit does not mention the name" — the two cannot share one
+		// representation without making the clear impossible to request.
+		if clearName {
+			src.Name = ""
+			nameChanged = true
+		} else if trimmedName != "" && trimmedName != src.Name {
 			src.Name = trimmedName
+			nameChanged = true
 		}
 		if enabled != nil && *enabled != src.Enabled {
 			src.Enabled = *enabled
@@ -337,6 +362,11 @@ func (b *Backend) UpdateSubscription(id, name, url string, enabled *bool) (proto
 	// Home screen showed no Reload prompt and the core kept running the old config.
 	if enabledChanged || urlChanged {
 		b.noteBuildInputsChanged()
+	} else if nameChanged {
+		// A display-name edit changes no build input, so the config is NOT stale
+		// and the Reload prompt must not appear for it. The subscriptions list is
+		// still announced, because the sidebar shows the name.
+		b.emit(protocol.EventSubscriptionsChanged, nil)
 	}
 
 	debuglog.InfoLog("backend: subscription %q updated", id)
@@ -409,7 +439,7 @@ func (b *Backend) RemoveSubscription(id string) error {
 
 // SetSubscriptionEnabled turns one source on or off.
 func (b *Backend) SetSubscriptionEnabled(id string, enabled bool) (protocol.SubscriptionDTO, error) {
-	return b.UpdateSubscription(id, "", "", &enabled)
+	return b.UpdateSubscription(id, "", "", &enabled, false)
 }
 
 // RefreshSubscription fetches one source.

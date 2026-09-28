@@ -872,12 +872,25 @@ actor BackendClient {
                           as: Subscription.self)
     }
 
-    func updateSubscription(id: String, name: String, url: String) async throws -> Subscription {
-        try await request(BackendMethod.updateSubscription,
-                          params: ["id": .string(id),
-                                   "name": .string(name),
-                                   "url": .string(url)],
-                          as: Subscription.self)
+    /// Edit one source.
+    ///
+    /// `clearName` is a SEPARATE input from an empty `name`, because an empty
+    /// string already means "this edit does not mention the name". Without the
+    /// flag there is no way to ask for a custom name to be removed — the request
+    /// and the operation would both be inexpressible.
+    func updateSubscription(id: String,
+                            name: String,
+                            url: String,
+                            clearName: Bool = false) async throws -> Subscription {
+        var params: [String: JSONValue] = ["id": .string(id),
+                                           "name": .string(name),
+                                           "url": .string(url)]
+        if clearName {
+            params["clear_name"] = .bool(true)
+        }
+        return try await request(BackendMethod.updateSubscription,
+                                 params: params,
+                                 as: Subscription.self)
     }
 
     func removeSubscription(id: String) async throws -> [Subscription] {

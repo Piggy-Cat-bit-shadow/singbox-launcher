@@ -16,7 +16,10 @@ struct DaemonPairView: View {
     let model: AppModel
     @Environment(\.localization) private var language
 
-    private let inviteField = FieldState()
+    /// Owned by the model so a re-render cannot discard a pasted invite — the
+    /// value the user is most likely to lose and least likely to have kept a
+    /// copy of.
+    private var inviteField: TextDraft { model.drafts.draft(DraftStore.daemonInvite) }
 
     var body: some View {
         PanelScaffold(model: model, title: L.pairService.tr(language),
@@ -65,7 +68,7 @@ struct DaemonPairView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if needsFreshInvite {
+                    if pairAttemptFailed {
                         Text(L.inviteOneTime.tr(language))
                             .font(Typography.rowSubtitle)
                             .foregroundStyle(.secondary)
@@ -78,7 +81,7 @@ struct DaemonPairView: View {
                     Button {
                         Task {
                             model.clearDaemonCommand()
-                            model.goBack()
+                            model.popIfCurrent(.daemonPair)
                             await model.prepareDaemonPairing()
                         }
                     } label: {
@@ -92,33 +95,56 @@ struct DaemonPairView: View {
             .padding(.top, Metrics.contentTopPadding)
             .padding(.bottom, Metrics.contentBottomPadding)
         }
-        // A successful pair returns to the Daemon screen, which now shows the
-        // updated status — the point of pairing is to change that page.
-        .onChange(of: model.daemon?.paired) { _, paired in
-            if paired == true { model.goBack() }
-        }
+        // NAVIGATION IS DRIVEN BY THE ATTEMPT, NOT BY THE FLAG.
+        //
+        // This was `.onChange(of: model.daemon?.paired) { if paired { goBack() } }`,
+        // which silently does nothing on the one path that matters most: RE-PAIRING.
+        // The daemon is already paired when the screen opens, so a successful
+        // re-pair produces no value CHANGE — `true` to `true` — and the screen
+        // stayed put while the user waited for a return that never came.
+        //
+        // The attempt's own result is the correct trigger, and `pairDaemon`
+        // already returns it. Using it also means the pop is owned by the
+        // operation rather than by an unrelated state observation, which is what
+        // let a user who pressed Back mid-pair be popped a second time.
     }
 
-    /// True once a pair attempt has failed, which is when a fresh invite is
+    /// True once a PAIR attempt has failed, which is when a fresh invite is
     /// likely needed.
-    private var needsFreshInvite: Bool {
-        model.lastError != nil
-    }
+    ///
+    /// Previously `model.lastError != nil`, which is the app-wide error line:
+    /// any unrelated failure (a proxy switch, a settings save) left this warning
+    /// on screen the moment the Pair page was opened, telling the user their
+    /// invite was spent when they had not tried one. The signal has to belong to
+    /// this attempt, so it is recorded when this screen's pair call fails.
+    private var pairAttemptFailed: Bool { model.lastPairAttemptFailed == true }
 
     private var canPair: Bool {
         guard model.pending == nil else { return false }
         // The backend owns the real validation; this only keeps the button
         // honest about obvious non-invites, matching the same shape check the
         // backend applies so the two cannot disagree.
-        let trimmed = inviteField.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = inviteField.trimmed
         guard !trimmed.isEmpty else { return false }
         return trimmed.filter { $0 == "#" }.count >= 2
     }
 
     private func pair() {
-        let invite = inviteField.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let invite = inviteField.trimmed
         // No navigation on failure: the user stays here with the error visible
         // and the invite still in the field, so a typo can be corrected.
-        Task { _ = await model.pairDaemon(invite: invite) }
+        Task {
+            let paired = await model.pairDaemon(invite: invite)
+            if paired {
+                // The invite has been redeemed, so the draft must not be restored
+                // if the user opens this screen again.
+                model.drafts.clear(DraftStore.daemonInvite)
+                // Leave only if the user is STILL here. Without this check,
+                // pressing Back while the pair was in flight let the completion
+                // pop a second screen — the user's manual exit plus the
+                // operation's automatic one, moving two levels at once.
+                model.popIfCurrent(.daemonPair)
+            }
+        }
     }
 }

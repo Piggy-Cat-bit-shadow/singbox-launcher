@@ -171,7 +171,7 @@ func TestLocalImportSurvivesRename(t *testing.T) {
 	b := backendWithConfig(t)
 	id := importFixture(t, b)
 
-	updated, err := b.UpdateSubscription(id, "Renamed", "", nil)
+	updated, err := b.UpdateSubscription(id, "Renamed", "", nil, false)
 	if err != nil {
 		t.Fatalf("UpdateSubscription: %v", err)
 	}
