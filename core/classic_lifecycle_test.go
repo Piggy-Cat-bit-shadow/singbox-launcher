@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -761,5 +762,136 @@ func TestAdoptedCoreIsOwnedWithIdentity(t *testing.T) {
 	}
 	if !privileged {
 		t.Fatal("the adopted core is privileged and Stop must know that")
+	}
+}
+
+// --- readiness -------------------------------------------------------------
+
+// aliveChecker is a scripted process table: the nth call returns the nth entry,
+// and the last entry repeats once the script is exhausted.
+type aliveChecker struct {
+	mu     sync.Mutex
+	script []bool
+	calls  int
+}
+
+func (c *aliveChecker) alive(int, string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	i := c.calls
+	c.calls++
+	if i >= len(c.script) {
+		i = len(c.script) - 1
+	}
+	return c.script[i], nil
+}
+
+func (c *aliveChecker) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func withAliveScript(t *testing.T, script ...bool) *aliveChecker {
+	t.Helper()
+	c := &aliveChecker{script: script}
+	prev := readinessChecker
+	readinessChecker = c
+	t.Cleanup(func() { readinessChecker = prev })
+	return c
+}
+
+// TestReadinessPromotesALiveCore — a core that survives its startup becomes
+// running.
+func TestReadinessPromotesALiveCore(t *testing.T) {
+	ac := newTestController()
+	withAliveScript(t, true) // alive on every probe
+	gen, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("the start claim must be accepted")
+	}
+	svc := &ProcessService{ac: ac}
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cannot start the stand-in process: %v", err)
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	svc.promoteToRunningWhenReady(gen, cmd, testExe)
+
+	if got := ac.classic.currentPhase(); got != ClassicRunning {
+		t.Fatalf("a core that survived startup must be running, got %q", got)
+	}
+}
+
+// TestReadinessReportsAnEarlyExitAsAStartFailure is the §15 fix.
+//
+// Before it, a core that died during startup was reported as RUNNING and the
+// state only corrected when the crash monitor noticed — so the user saw
+// "Connected" flash and then "Stopped", and the real reason (bad config,
+// occupied port) was classified as a crash to be restarted.
+func TestReadinessReportsAnEarlyExitAsAStartFailure(t *testing.T) {
+	ac := newTestController()
+	// Dead on the first probe: the core exited during startup.
+	withAliveScript(t, false)
+	gen, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("the start claim must be accepted")
+	}
+	svc := &ProcessService{ac: ac}
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cannot start the stand-in process: %v", err)
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	svc.promoteToRunningWhenReady(gen, cmd, testExe)
+
+	if got := ac.classic.currentPhase(); got != ClassicFailed {
+		t.Fatalf("an early exit must settle the runtime as failed, got %q", got)
+	}
+	if !ac.HasLifecycleError() {
+		t.Fatal("an early exit must leave a lifecycle error the frontend can show")
+	}
+	snap := ac.LifecycleError()
+	if snap.Code == "" {
+		t.Fatal("the recorded failure has no code")
+	}
+	if snap.Operation != "start" {
+		t.Fatalf("the failure belongs to the start operation, got %q", snap.Operation)
+	}
+}
+
+// TestReadinessNeverPromotesAStaleGeneration — the readiness wait is a window in
+// which the runtime can move on, and promoting a generation that no longer owns
+// the runtime would report a core that is not ours as running.
+func TestReadinessNeverPromotesAStaleGeneration(t *testing.T) {
+	ac := newTestController()
+	withAliveScript(t, true)
+	gen, _, ok := ac.classic.beginOperation(ClassicStarting, false)
+	if !ok {
+		t.Fatal("the start claim must be accepted")
+	}
+	svc := &ProcessService{ac: ac}
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cannot start the stand-in process: %v", err)
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	// The runtime moves on while the readiness window is open.
+	before := ac.classic.currentGeneration()
+	ac.classic.renewGeneration()
+	if ac.classic.currentGeneration() == before {
+		t.Fatal("renewGeneration must produce a new generation")
+	}
+
+	svc.promoteToRunningWhenReady(gen, cmd, testExe)
+
+	if got := ac.classic.currentPhase(); got == ClassicRunning {
+		t.Fatal("a superseded generation must never be promoted to running")
 	}
 }

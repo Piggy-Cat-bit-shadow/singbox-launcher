@@ -547,6 +547,26 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 	// Add log with PID
 	debuglog.DebugLog("startSingBox: Sing-Box started. PID=%d", cmd.Process.Pid)
 
+	// READINESS: stay "starting" until the process has survived its own startup.
+	//
+	// `exec.Start` succeeding means a process was created, not that a VPN is up.
+	// A core that rejects its config, fails to bind its API port or loses its
+	// privileges dies within milliseconds, and the old code reported `running`
+	// immediately — so the UI flashed "Connected" and then fell to "Stopped",
+	// which reads as a glitch rather than as a start failure with a cause.
+	//
+	// The phase is promoted by a watcher that waits a short, bounded window
+	// (readinessWindow) for the process to still be alive. This is not a magic
+	// sleep used as a substitute for a real readiness probe: it is the shortest
+	// interval that distinguishes "still starting up" from "already dead", and
+	// the authoritative signal remains the process's own exit. Where an API probe
+	// exists it runs alongside and its result is what the user ultimately needs.
+	//
+	// Crucially, a death inside the window is reported as a start FAILURE with
+	// the classified reason — the exit is not left to the crash monitor, which
+	// would treat a first-run config error as a crash to be restarted.
+	go svc.promoteToRunningWhenReady(startGen, cmd, corePath)
+
 	// Start auto-loading proxies after sing-box is running
 	go func() {
 		// Small delay to ensure API is ready
@@ -556,6 +576,101 @@ func (svc *ProcessService) StartContext(ctx context.Context, skipRunningCheck ..
 
 	go svc.Monitor(ac.SingboxCmd)
 	return nil
+}
+
+// readinessWindow is how long a freshly spawned core must stay alive before the
+// state is promoted from "starting" to "running".
+//
+// Chosen against the two failure shapes it must separate: a core that rejects
+// its config exits in tens of milliseconds, and a healthy core is past its
+// startup in well under a second. One second is comfortably outside both, and
+// short enough that a successful start does not feel slow.
+const readinessWindow = time.Second
+
+// promoteToRunningWhenReady promotes the phase once the core has survived startup.
+//
+// Ownership and generation are both re-checked after the wait: the runtime may
+// have been abandoned (mode switch, shutdown) or the process may have been
+// replaced, and promoting a stale generation to running is the same class of bug
+// as a stale monitor restarting a core.
+func (svc *ProcessService) promoteToRunningWhenReady(gen uint64, cmd *exec.Cmd, corePath string) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+
+	deadline := time.Now().Add(readinessWindow)
+	for time.Now().Before(deadline) {
+		if !processIsAlive(pid, corePath) {
+			// Died inside the window: this is a FAILED START, not a crash.
+			//
+			// The reason is classified from the core's own log, so the user gets
+			// "the port is occupied" or "the config was rejected" rather than a
+			// restart loop. The monitor will also observe the exit; it finds the
+			// generation still current but the phase already failed, and the
+			// start-failure record takes precedence in the reported state.
+			svc.reportEarlyExit(gen, pid)
+			return
+		}
+		// Polling rather than blocking on the process: the exit may arrive
+		// through the monitor at any moment, and a channel-based wait here would
+		// have to race it for the same event.
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Survived: promote, unless the runtime moved on.
+	if !svc.ac.classic.isCurrent(gen) {
+		debuglog.InfoLog("startSingBox: generation %d superseded before readiness; not promoting to running", gen)
+		return
+	}
+	if svc.ac.classic.setPhase(gen, ClassicRunning) {
+		debuglog.InfoLog("startSingBox: core is ready (PID=%d, generation=%d)", pid, gen)
+		svc.ac.EmitCoreStateChange()
+	}
+}
+
+// reportEarlyExit records a core that died during startup as a start failure.
+func (svc *ProcessService) reportEarlyExit(gen uint64, pid int) {
+	debuglog.WarnLog("startSingBox: core (PID=%d) exited during startup", pid)
+	if !svc.ac.classic.isCurrent(gen) {
+		return
+	}
+	reason := svc.ac.classifyCoreExitReason()
+	code := LifecycleErrFastExit
+	recoverable := true
+	switch reason {
+	case exitReasonPortInUse:
+		code, recoverable = LifecycleErrPortInUse, false
+	case exitReasonPermission:
+		code, recoverable = LifecycleErrPermission, false
+	case exitReasonConfigInvalid, exitReasonMissingResource:
+		code, recoverable = LifecycleErrConfigCheck, false
+	}
+	svc.ac.RecordLifecycleError(code, "start",
+		"the core exited immediately after starting", reason.String(), recoverable)
+	svc.ac.classic.setPhase(gen, ClassicFailed)
+}
+
+// readinessChecker is the liveness probe the readiness gate uses.
+//
+// A package-level variable so tests can supply a deterministic process table:
+// the question "did the core survive its first second" must be answerable
+// without spawning real processes, and the seam keeps the test honest — it
+// exercises the same code path production takes.
+var readinessChecker processChecker = platformChecker{}
+
+// processIsAlive reports whether a process is still the core we started.
+func processIsAlive(pid int, expected string) bool {
+	if pid <= 0 {
+		return false
+	}
+	alive, err := readinessChecker.alive(pid, expected)
+	if err != nil {
+		// Cannot verify: assume alive rather than reporting a death that may not
+		// have happened. Liveness is confirmed by the monitor on real exit.
+		return true
+	}
+	return alive
 }
 
 // errPrivilegedCopyNotReady — гейт привилегированного старта отказал по
