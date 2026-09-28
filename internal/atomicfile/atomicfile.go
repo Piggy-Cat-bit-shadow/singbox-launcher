@@ -137,8 +137,10 @@ func SyncDir(dir string) {
 //
 // A process killed between create and rename leaves a dot-file behind. Nothing depends on
 // them, but a directory that accumulates them is a directory whose owner has stopped
-// noticing what is in it — so the writer that owns the target tidies up first. Called by
-// `WriteWith` before staging, which is what makes that sentence true.
+// noticing what is in it — so cleaning them up is worth doing by whoever can do it safely.
+//
+// **NOTHING CALLS THIS.** `WriteWith` does not, and must not; see the last paragraph. Read the
+// whole comment before wiring it anywhere.
 //
 // ONLY FILES OLDER THAN staleStagingAge ARE REMOVED, and that bound is what makes it safe to
 // call next to live writers.
@@ -154,12 +156,10 @@ func SyncDir(dir string) {
 // file is written, fsynced and renamed within one operation, so one that has not been touched
 // for hours belongs to a process that is gone.
 //
-// IT HAS NO PRODUCTION CALLER, and this comment previously claimed otherwise — it said
-// "Called by `WriteWith` before staging", which was false and is exactly the failure mode
-// this codebase keeps producing. `WriteWith` does NOT call it and must not: a writer cannot
-// know whether another writer holds a staging file, which is how the name-only version came
-// to delete a live writer's file. Wiring it in requires establishing exclusivity first, which
-// nothing in this package can do on its own. It stays exported, correct and unused rather
+// WHY `WriteWith` MUST NOT CALL IT: a writer cannot know whether another writer holds a
+// staging file, which is how the name-only version came to delete a live writer's file.
+// Wiring it in requires establishing exclusivity first, which nothing in this package can do
+// on its own. It stays exported, correct and unused rather
 // than being given a call site that would be wrong.
 func SweepStale(target string) {
 	dir := filepath.Dir(target)

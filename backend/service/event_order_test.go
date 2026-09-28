@@ -368,6 +368,27 @@ func TestAFullQueueDoesNotFreezeTheBackend(t *testing.T) {
 
 	<-entered // the consumer is now stuck and the backlog is growing
 
+	// WAIT FOR THE QUEUE TO ACTUALLY BE FULL, which is the entire precondition.
+	//
+	// The first version asserted only that the subscriber had been entered, and then read.
+	// Filling 65536 slots takes noticeably longer than entering the first subscriber, so it
+	// checked the backend with roughly 100 of 65536 events queued — nowhere near the
+	// condition. Verified: it PASSED with `b.mu` held across the blocking send, which is the
+	// exact defect it is named for. A test whose precondition has not happened yet cannot
+	// observe the behaviour that precondition causes.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if len(b.eventQueueCh) == cap(b.eventQueueCh) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the queue never filled (len %d of %d), so the saturated-queue "+
+				"condition this test is about was never reached",
+				len(b.eventQueueCh), cap(b.eventQueueCh))
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	// READERS MUST STILL WORK. This is the assertion the fix is about: with `mu` held across
 	// the send, this call never returns.
 	readDone := make(chan struct{})

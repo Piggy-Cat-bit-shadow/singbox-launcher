@@ -151,6 +151,17 @@ func hashConfigBytes(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HashConfigBytes exposes the config digest so the cross-layer consistency test in
+// `internal/digestguard` can compare it against `core`'s.
+//
+// The duplication itself is forced: `core` is the lower layer and this package imports it, so
+// there is no package both can share a helper from. But the two digests ARE compared against
+// each other — the build-revision marker is written from one layer and interpreted in the
+// context of the other — so a divergence would make the staleness check silently report every
+// config as changed, or as unchanged. A named duplicate with a test that pins the agreement
+// is the honest version of that; this export is what makes the test possible.
+func HashConfigBytes(data []byte) string { return hashConfigBytes(data) }
+
 // sameConfigContent compares two config snapshots for identity.
 func sameConfigContent(a, b []byte) bool {
 	if len(a) == 0 || len(b) == 0 {

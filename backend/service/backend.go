@@ -120,8 +120,12 @@ type Backend struct {
 	// eventQueueOnce starts the dispatcher on the first emit, so a Backend that never
 	// emits never starts a goroutine.
 	eventQueueOnce sync.Once
-	// flushSignals maps the sequence a flush is waiting for to the closure that releases it,
-	// under eventQueueMu. A MAP RATHER THAN A SINGLE SLOT: with one slot two concurrent
+	// flushMu guards flushSignals and flushToken, and NOTHING ELSE, so the dispatcher can
+	// release a waiter without taking the lock an emitter may hold while blocked on a full
+	// queue.
+	flushMu sync.Mutex
+	// flushSignals maps the call a flush is waiting for to the closure that releases it,
+	// under flushMu. A MAP RATHER THAN A SINGLE SLOT: with one slot two concurrent
 	// flushes overwrote each other, the earlier one's sentinel fired the later one's closure,
 	// and the earlier one waited forever.
 	flushSignals map[uint64]func()
@@ -1012,13 +1016,17 @@ func (b *Backend) FlushEventsForTest() {
 	//
 	// `enqueueEvent` takes the same lock, so holding it across both makes the sentinel and
 	// its registration atomic with respect to the dispatcher's read.
-	b.eventQueueMu.Lock()
+	// Registration and the sentinel's ENQUEUE are one step under `eventQueueMu`, but the
+	// waiter itself lives under `flushMu` — the only lock the dispatcher takes. See
+	// `signalFlush`.
+	b.flushMu.Lock()
 	if b.flushSignals == nil {
 		b.flushSignals = map[uint64]func(){}
 	}
 	b.flushToken++
 	token := b.flushToken
 	b.flushSignals[token] = release
+	b.flushMu.Unlock()
 	// NOT through `emit`: the sentinel must not consume a sequence number, or it would move
 	// the counter a test is inspecting and the synchronisation would corrupt what it
 	// synchronises.
@@ -1029,13 +1037,14 @@ func (b *Backend) FlushEventsForTest() {
 	// a `want`, so the first sentinel is processed before the second call has registered at
 	// all — the second waiter is then released by nothing, because the sentinel that would
 	// have released it is still queued behind work that has already been declared done.
+	b.eventQueueMu.Lock()
 	b.enqueueEventLocked(protocol.Event{Event: eventFlushSentinel, Seq: want, Payload: token})
 	b.eventQueueMu.Unlock()
 
 	defer func() {
-		b.eventQueueMu.Lock()
+		b.flushMu.Lock()
 		delete(b.flushSignals, token)
-		b.eventQueueMu.Unlock()
+		b.flushMu.Unlock()
 	}()
 
 	<-done
@@ -1049,9 +1058,20 @@ func (b *Backend) FlushEventsForTest() {
 // before it registered, and its own sentinel then finds nobody waiting: the call hangs on an
 // empty queue. The token makes the release belong to the call that asked for it.
 func (b *Backend) signalFlush(token uint64) {
-	b.eventQueueMu.Lock()
+	// THE WAITER MAP HAS ITS OWN LOCK, AND THIS IS WHY.
+	//
+	// `signalFlush` runs ON the dispatcher goroutine, which is the queue's ONLY consumer.
+	// With the waiters under `eventQueueMu`, a saturated queue deadlocked the dispatcher
+	// against itself: an emitter held that lock while blocked sending to the full channel, so
+	// the dispatcher could neither take the lock to release the waiter nor drain the channel —
+	// releasing the waiter is the step that lets it continue. The dispatcher was blocked on a
+	// lock held by a goroutine waiting for the dispatcher.
+	//
+	// A separate, short-lived lock removes the cycle: it is taken only around a map lookup,
+	// and never while a send is in flight.
+	b.flushMu.Lock()
 	fn := b.flushSignals[token]
-	b.eventQueueMu.Unlock()
+	b.flushMu.Unlock()
 
 	// Called outside the lock: the closure only closes a channel, but a signal that runs
 	// user code while holding a lock is a habit worth not forming.
@@ -1178,6 +1198,7 @@ func (b *Backend) Shutdown() {
 			time.Since(started).Round(time.Millisecond),
 			watchersDone.Sub(started).Round(time.Millisecond),
 			time.Since(watchersDone).Round(time.Millisecond))
+
 	})
 }
 

@@ -311,37 +311,80 @@ func TestAReassertedRunningStateDoesNotClearTheDivergence(t *testing.T) {
 	b := newTestBackendWithConfig(t, string(configA))
 	b.ac.FileService.ConfigPath = configPath
 
-	// The core starts on A.
-	b.handleCoreStateEvent(events.Event{
-		Kind: events.VpnStateChanged,
-		Payload: events.VpnStateChangedPayload{
-			Running: true, StartedHere: true,
-		},
-	})
-	if b.RuntimeConfigDiverged() {
-		t.Fatal("the fixture diverged immediately; the test would prove nothing")
+	// Now the LOAD-BEARING part: the daemon stop could not be confirmed, so the running
+	// state is RE-ASSERTED.
+	//
+	// THE EVENT IS PRODUCED BY THE REAL CONTROLLER, NOT HAND-BUILT. The first version
+	// constructed `{Running: true, StartedHere: false}` itself and asserted the consumer's
+	// behaviour — so it PASSED with `StartedHere: value` restored in `set` AND
+	// `lifecycle_error.go` back on `Set(true)`, i.e. with the entire bug present. A test that
+	// supplies the correct input cannot observe a bug in the code that produces it.
+	//
+	// This drives the actual publisher: a core is recorded as running, then a daemon stop
+	// fails to confirm, and whatever the controller PUBLISHES is what the backend receives.
+	bus := b.ac.EventBus
+	if bus == nil {
+		t.Fatal("the controller has no event bus, so the publisher cannot be driven")
 	}
 
-	// A rebuild promotes B while the core keeps serving A. The core is still recorded as
-	// running here, which is the state the unconfirmed-stop path has to deal with: it does
-	// not know the core is gone, so it restates the running truth rather than clearing it.
+	// A REAL transition is required, and `set` DEDUPS a no-op write — it returns early when
+	// `running` already equals the new value and publishes nothing. That dedup is why an
+	// earlier version of this test proved nothing: it set the running flag to `true` and then
+	// asked for another `true`, so `SetReasserted` did nothing at all and the assertion below
+	// held regardless of what the publisher would have said.
+	//
+	// The real sequence: the core is up and on A, the running flag is CLEARED (a stop that
+	// then failed to confirm), and the re-assertion restores it. That is exactly when the
+	// daemon path calls `SetReasserted`, and unlike the no-op it publishes.
+	b.ac.RunningState.Set(true)
+	b.ac.RunningState.Set(false)
+
+	// The backend must have recorded A, so the fixture is the real one: a live core serving
+	// A. `StartedHere: true` is the start claim the SDK makes on a genuine load.
+	b.handleCoreStateEvent(events.Event{
+		Kind:    events.VpnStateChanged,
+		Payload: events.VpnStateChangedPayload{Running: true, StartedHere: true},
+	})
 	if err := os.WriteFile(configPath, configB, 0o644); err != nil {
 		t.Fatalf("write config B: %v", err)
 	}
 	if !b.RuntimeConfigDiverged() {
-		t.Fatal("the fixture is wrong: the promoted config was not seen as diverged " +
-			"before the re-assertion, so the test could not observe the bug regardless")
+		t.Fatal("the fixture is wrong: no divergence before the re-assertion")
 	}
 
-	// Now the LOAD-BEARING part: the daemon stop could not be confirmed, so the running
-	// state is RE-ASSERTED. This publishes `Running: true` without `StartedHere`, which is
-	// exactly what `SetReasserted` exists to express — and what a raw `Set(true)` got wrong.
-	b.handleCoreStateEvent(events.Event{
-		Kind: events.VpnStateChanged,
-		Payload: events.VpnStateChangedPayload{
-			Running: true, StartedHere: false,
-		},
+	// The backend subscribes to this bus ITSELF (`backend.go`, `cancelCoreWatch`), and it is
+	// registered BEFORE this observer. That is deliberate and load-bearing for the test: the
+	// backend's own reaction must be what the assertion reads, not a replay. The previous
+	// version replayed the recorded payload through `handleCoreStateEvent` — but the reverted
+	// backend had ALREADY cleared the divergence when the bus delivered, and replaying a
+	// corrected payload afterwards could not resurrect it. The test therefore passed against
+	// the bug. Observing is not participating.
+	var published []events.VpnStateChangedPayload
+	cancel := bus.Subscribe(events.VpnStateChanged, func(ev events.Event) {
+		if p, ok := ev.Payload.(events.VpnStateChangedPayload); ok {
+			published = append(published, p)
+		}
 	})
+	defer cancel()
+
+	// `EndDaemonStop(owner, confirmed=false)` is what a failed daemon stop calls.
+	b.ac.EndDaemonStop(nil, false)
+
+	if len(published) == 0 {
+		t.Fatal("the unconfirmed daemon stop published no state change at all; the path " +
+			"under test was not exercised")
+	}
+	for _, p := range published {
+		if p.StartedHere {
+			t.Fatalf("the unconfirmed daemon stop published StartedHere=true. Nothing "+
+				"started: the flag records a BELIEF that the core is still up, and claiming "+
+				"a start here lets the backend re-read config.json and clear the divergence "+
+				"(published: %+v)", p)
+		}
+	}
+
+	// NO REPLAY. The backend already consumed the event through its own subscription when the
+	// bus delivered it, so the state below is the state the shipped code produced.
 
 	if !b.RuntimeConfigDiverged() {
 		t.Error("a re-asserted running state cleared the divergence. Nothing started and " +
@@ -388,4 +431,14 @@ func TestOnlyARealStartClaimsStartedHere(t *testing.T) {
 	if contains(lifecycle, "RunningState.Set(true)") {
 		t.Error("the unconfirmed daemon stop still calls `Set(true)`, which claims a start")
 	}
+}
+
+// drainPublished converts the recorded payloads into events and empties the slice.
+func drainPublished(ps *[]events.VpnStateChangedPayload) []events.Event {
+	out := make([]events.Event, 0, len(*ps))
+	for _, p := range *ps {
+		out = append(out, events.Event{Kind: events.VpnStateChanged, Payload: p})
+	}
+	*ps = nil
+	return out
 }

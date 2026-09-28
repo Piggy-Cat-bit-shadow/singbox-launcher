@@ -348,13 +348,20 @@ func configRevision(configPath string) string {
 	return configContentDigest(b)
 }
 
-// configContentDigest is THE identity of a config's bytes.
+// configContentDigest is core's identity for a config's bytes.
 //
-// There were three implementations of "hash this config" — one here, one in
-// `backend/service`, and one inline in the provenance marker — which is exactly the drift
-// that makes a comparison report divergence where there is none: two digests of the same
-// bytes disagree about nothing observable, and the only way to find out is to compare them.
-// One function, so agreement is by construction.
+// There were THREE implementations of "hash this config": two in this package (here and
+// inline in `writeBuildRevision`) and one inline in `backend/service`'s provenance marker.
+// The two in this package are now one, so the build-revision marker and the on-disk check
+// cannot disagree with each other — which is the pair that matters, because they are compared
+// against each other on every staleness check.
+//
+// `backend/service` KEEPS ITS OWN, and that duplication is deliberate rather than an
+// oversight: `core` is the lower layer, `backend/service` imports it and not the reverse, so
+// there is no package both can share without inverting the dependency. The two must produce
+// the same digest for the same bytes, and they do — both are `sha256` rendered as lowercase
+// hex. That agreement is by CONVENTION, not by construction, and it is stated here so that
+// changing one is visibly a change to both. `TestConfigDigestsAgreeAcrossPackages` pins it.
 func configContentDigest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -932,3 +939,7 @@ func noteConfigPromoted(configPath string, promoted []byte) {
 func NoteConfigPromotedForTest(configPath string, promoted []byte) {
 	noteConfigPromoted(configPath, promoted)
 }
+
+// ConfigContentDigest exposes the package digest to the cross-layer consistency test
+// in , which cannot reach the unexported function.
+func ConfigContentDigest(data []byte) string { return configContentDigest(data) }

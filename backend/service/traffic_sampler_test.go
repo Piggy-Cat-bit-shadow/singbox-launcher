@@ -68,7 +68,10 @@ func TestTrafficSamplerRefusesAnUnverifiedEndpoint(t *testing.T) {
 	}
 }
 
-// TestTrafficSamplerFallsBackWhenNoProviderIsInstalled is the other half of the same rule.
+// TestTrafficSamplerFallsBackWhenNoProviderIsInstalled is the RESOLUTION RULE half of the
+// same rule: an uninstalled provider must fall through to the configured endpoint.
+//
+// It is not the `Close` test. See the body for why that distinction is written down.
 //
 // ENGINE-SPECIFIC VERIFICATION IS AUTHORITATIVE ONLY WHILE THAT ENGINE IS PRESENT. The daemon
 // installs a provider when it starts and the transport when it starts; `Close` removed the
@@ -90,7 +93,22 @@ func TestTrafficSamplerFallsBackWhenNoProviderIsInstalled(t *testing.T) {
 	b.ac.APIService.BaseURL = "http://127.0.0.1:9090"
 	b.ac.APIService.Token = "configured-token"
 
-	// No engine-specific provider: the state after a daemon backend has closed.
+	// Confirm the fixture: with a provider installed it IS decisive and the configured
+	// endpoint is NOT consulted.
+	//
+	// This test covers the RESOLUTION RULE — an uninstalled provider falls through — and
+	// says so. It does NOT cover what `Close` leaves behind: an earlier version was named
+	// after `Close`, installed the removal itself, and therefore PASSED with the removal
+	// deleted from `Close` (verified). What `Close` must do is asserted by
+	// `TestClosingADaemonBackendUninstallsItsEndpointProvider` in `core`, where the field
+	// lives and the real `Close` can be run.
+	b.ac.APIService.SetVerifiedClashEndpoint(func() coreservices.ClashTransport {
+		return coreservices.ClashTransport{BaseURL: "http://127.0.0.1:9091", Token: "daemon"}
+	})
+	if url, _, ok := b.trafficEndpoint(); !ok || url != "http://127.0.0.1:9091" {
+		t.Fatalf("the fixture is wrong: with a provider installed the sampler resolved "+
+			"(%q, ok=%v), so this test cannot show what removing it changes", url, ok)
+	}
 	b.ac.APIService.SetVerifiedClashEndpoint(nil)
 
 	url, _, ok := b.trafficEndpoint()
