@@ -275,7 +275,9 @@ struct ProxiesView: View {
                 title: L.couldNotLoadProxies.tr(language),
                 detail: model.proxyError ?? L.backendDidNotAnswer.tr(language),
                 tone: .error,
-                action: (L.tryAgain.tr(language), { Task { await model.loadGroups() } }))
+                action: (L.tryAgain.tr(language), { Task { await model.loadGroups() } }),
+                actionEnabled: !model.proxiesLoading,
+                actionIsPending: model.proxiesLoading)
 
         case .configStale:
             // The offered action depends on who owns the config. Pointing an
@@ -287,7 +289,9 @@ struct ProxiesView: View {
                     title: "Configuration needs reload",
                     detail: "Subscriptions changed, so the node list is out of date.",
                     tone: .warning,
-                    action: ("Reload Config", { reloadConfig() }))
+                    action: (L.reloadConfigAction.tr(language), { reloadConfig() }),
+                    actionEnabled: model.canReloadConfig,
+                    actionIsPending: model.pending == .reloadingConfig)
             } else {
                 ProxyNotice(
                     symbol: "doc.text",
@@ -330,19 +334,63 @@ struct ProxiesView: View {
                 tone: .neutral,
                 action: model.subscriptions.isEmpty
                     ? (L.openSubscriptions.tr(language), { model.path.append(.subscriptions) })
-                    : ("Update Subscriptions", { updateAndReload() }))
+                    : (L.updateSubscriptionsAction.tr(language), { updateAndReload() }),
+                actionEnabled: model.subscriptions.isEmpty || model.canUpdateAllSubscriptions,
+                actionIsPending: model.pending == .updatingSubscriptions,
+                actionDisabledReason: L.noRefreshableSubscriptions.tr(language))
 
         case .ready:
-            if model.filteredProxies.isEmpty {
-                ProxyNotice(
-                    symbol: "magnifyingglass",
-                    title: "No matching nodes",
-                    detail: "Nothing matches “\(model.proxySearch)”.",
-                    tone: .neutral,
-                    action: ("Clear Search", { model.proxySearch = "" }))
-            } else {
-                nodeList
+            VStack(alignment: .leading, spacing: Metrics.groupSpacing) {
+                // STALENESS IS SHOWN IN THE READY STATE TOO.
+                //
+                // This is the case that used to hide it. With nodes cached, the
+                // list looked completely healthy while the running config no
+                // longer matched the sources — so a node the user had just
+                // deleted still appeared switchable, with nothing on screen
+                // saying the list was out of date. The banner sits ABOVE the
+                // list: the nodes stay usable (they are the best information
+                // available until a reload) but they are labelled for what they
+                // are.
+                if model.proxyListIsStale {
+                    staleBanner
+                }
+                if model.filteredProxies.isEmpty {
+                    ProxyNotice(
+                        symbol: "magnifyingglass",
+                        title: "No matching nodes",
+                        detail: "Nothing matches “\(model.proxySearch)”.",
+                        tone: .neutral,
+                        action: ("Clear Search", { model.proxySearch = "" }))
+                } else {
+                    nodeList
+                }
             }
+        }
+    }
+
+    /// The out-of-date notice shown above a cached node list.
+    ///
+    /// Its action depends on config ownership for the same reason the
+    /// `.configStale` state does: offering Reload to a user whose config is
+    /// managed by another tool leads only to a refusal.
+    @ViewBuilder
+    private var staleBanner: some View {
+        if model.configRebuildable {
+            ProxyNotice(
+                symbol: "arrow.triangle.2.circlepath",
+                title: L.nodeListOutOfDate.tr(language),
+                detail: L.nodeListOutOfDateDetail.tr(language),
+                tone: .warning,
+                action: (L.reloadConfigAction.tr(language), { reloadConfig() }),
+                actionEnabled: model.canReloadConfig,
+                actionIsPending: model.pending == .reloadingConfig)
+        } else {
+            ProxyNotice(
+                symbol: "doc.text",
+                title: L.configManagedExternally.tr(language),
+                detail: L.configManagedExternallyDetail.tr(language),
+                tone: .warning,
+                action: (L.openConfigPlain.tr(language), { model.revealConfig() }))
         }
     }
 
@@ -515,6 +563,20 @@ struct ProxyNotice: View {
     var tone: Tone = .neutral
     /// Label and action for the way forward, when there is one.
     var action: (String, () -> Void)?
+    /// Whether the action can run right now.
+    ///
+    /// A notice action is a real command (Reload Config, Update Subscriptions,
+    /// Try Again) and is subject to the same one-operation-at-a-time rule as
+    /// every other control. Nothing enforced that here, so while a reload or an
+    /// update was in flight these buttons still looked live and the click was
+    /// refused by the model — with the reason going to a banner this screen does
+    /// not draw. The caller passes the model's own answer rather than each notice
+    /// re-deriving it.
+    var actionEnabled: Bool = true
+    /// Shown while this notice's action is the operation in flight.
+    var actionIsPending: Bool = false
+    /// Why the action is unavailable, when it is.
+    var actionDisabledReason: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -530,10 +592,17 @@ struct ProxyNotice: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let action {
-                Button(action: action.1) {
-                    Text(action.0)
+                HStack(spacing: 6) {
+                    Button(action: action.1) {
+                        Text(action.0)
+                    }
+                    .controlSize(.small)
+                    .disabled(!actionEnabled)
+                    .help(actionEnabled ? "" : (actionDisabledReason ?? ""))
+                    if actionIsPending {
+                        ProgressView().controlSize(.small)
+                    }
                 }
-                .controlSize(.small)
             }
         }
         .padding(.horizontal, Metrics.rowPaddingH)

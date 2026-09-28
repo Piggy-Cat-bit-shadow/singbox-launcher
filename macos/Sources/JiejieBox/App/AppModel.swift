@@ -185,6 +185,19 @@ final class AppModel {
     /// into the shared pending enum is what made the old state unmaintainable.
     enum ProxyGroupTestState: Equatable {
         case idle
+        /// The run has been REQUESTED but the backend has not reported it yet.
+        ///
+        /// This case is the fix for a real window: the button was guarded by
+        /// `isRunning`, which only becomes true when the backend's `started`
+        /// progress frame arrives. Between the click and that frame the button
+        /// still looked idle, so a quick second click started a second run.
+        /// Waiting for the backend to tell us what we just asked for is the wrong
+        /// direction — the click itself is the evidence the run is under way.
+        ///
+        /// `runID` is unknown until the backend names the run, which is why the
+        /// launching state carries the GROUP rather than the id: the group is
+        /// known at click time and is what the UI needs to keep showing.
+        case launching(runID: UInt64?, group: String)
         case running(GroupTestProgress)
 
         var progress: GroupTestProgress? {
@@ -192,7 +205,22 @@ final class AppModel {
             return nil
         }
 
-        var isRunning: Bool { progress != nil }
+        /// True from the click, not from the first backend frame.
+        var isRunning: Bool {
+            switch self {
+            case .idle: return false
+            case .launching, .running: return true
+            }
+        }
+
+        /// The group this run belongs to, in either state.
+        var group: String? {
+            switch self {
+            case .idle: return nil
+            case .launching(_, let g): return g
+            case .running(let p): return p.group
+            }
+        }
     }
 
     /// Progress of one running group test.
@@ -249,6 +277,9 @@ final class AppModel {
         if let _ = proxyError, proxies.isEmpty, !proxiesLoading { return .failed }
         if proxiesLoading && proxies.isEmpty { return .loading }
         if core?.state != .running { return .coreStopped }
+        // `.configStale` is returned ONLY when there is nothing else to show. It
+        // is not how staleness is reported — see `proxyListIsStale`, which is a
+        // separate fact about the LIST rather than a state of the screen.
         if core?.config_stale == true && proxies.isEmpty { return .configStale }
         if groups.isEmpty {
             // Distinguish "the config defines no groups" from "we have not
@@ -259,6 +290,30 @@ final class AppModel {
         if proxies.isEmpty { return .empty }
         return .ready
     }
+
+    /// True when the config the CORE is running no longer matches the sources.
+    ///
+    /// STALENESS AND CONTENT ARE TWO INDEPENDENT FACTS, and conflating them hid
+    /// the stale state exactly when it was most important. The screen only ever
+    /// reported it through `proxyListState == .configStale`, which is unreachable
+    /// once any nodes are loaded — so a user with a populated list who then
+    /// disabled a source, deleted one, or changed a URL saw an ordinary, healthy
+    /// node list. Nothing said those nodes describe the OLD config; they stayed
+    /// selectable, measurable, and switchable, including nodes that no longer
+    /// belong to any source.
+    ///
+    /// Keeping the cached list on screen is right — it is the best information
+    /// available until a reload — but presenting it as current is not. The list
+    /// may remain; it must be LABELLED.
+    var proxyListIsStale: Bool { core?.config_stale == true }
+
+    /// True when the node list can be trusted as a description of the running
+    /// config.
+    ///
+    /// The view uses this to decide whether acting on a node is meaningful.
+    /// Switching is still permitted — the node may well still exist — but the
+    /// user is told why the list may not match.
+    var proxyListIsAuthoritative: Bool { !proxyListIsStale }
 
     /// Free-text filter over the node list. Purely a view concern, kept here
     /// because two views (the list and its empty state) must agree on it.
@@ -896,16 +951,28 @@ final class AppModel {
     /// already on screen, because losing the visible proxies to a transient
     /// API hiccup is worse than showing slightly stale ones.
     func loadProxies(group: String? = nil) async {
+        let target = group ?? selectedGroup
+        // The request is stamped BEFORE it is sent, so a reply can be recognised
+        // as superseded even if a newer request is issued while this one is in
+        // flight. Without it, whichever response happened to arrive last won,
+        // which is not the same as the last group the user chose.
+        let generation = beginProxyListRequest()
         proxiesLoading = true
         proxyError = nil
-        defer { proxiesLoading = false }
+        defer {
+            // Only the current request may clear the spinner: an older reply
+            // finishing late must not report the screen as loaded.
+            if generation == proxyListGeneration { proxiesLoading = false }
+        }
         do {
-            let target = group ?? selectedGroup
             // An empty group means "the config default", which the backend
             // resolves; asking for "" is deliberate, not a bug.
             let list = try await client.proxies(group: target)
-            apply(list)
+            apply(list, forGroup: target, generation: generation)
         } catch {
+            // A superseded failure is not this screen's problem: reporting it
+            // would put an error on screen for a group the user has left.
+            guard generation == proxyListGeneration else { return }
             // Feature-level by policy: recorded for THIS screen to explain
             // inline, and deliberately NOT copied into `lastError`.
             //
@@ -957,27 +1024,56 @@ final class AppModel {
 
         proxiesLoading = true
         defer { proxiesLoading = false }
+        let group = selectedGroup
+        let generation = beginProxyListRequest()
         do {
-            let nodes = try await client.proxies(group: selectedGroup)
-            apply(nodes)
+            let nodes = try await client.proxies(group: group)
+            apply(nodes, forGroup: group, generation: generation)
         } catch {
+            guard generation == proxyListGeneration else { return }
             proxyError = error.localizedDescription
         }
     }
 
+    /// Switch which group's nodes are listed.
+    ///
+    /// THE SELECTION IS COMMITTED ONLY WHEN THE NEW LIST ARRIVES.
+    ///
+    /// This used to set `selectedGroup = name` first and then request, leaving
+    /// the screen in a state that described two different groups at once when the
+    /// request failed: the header said B while the rows below were still A's
+    /// nodes and A's selection checkmark. Showing one group's name over another
+    /// group's nodes is worse than showing the previous group, because the user
+    /// then acts on rows that are labelled as something they are not.
+    ///
+    /// The requested group is therefore tracked separately as the PENDING
+    /// selection, and becomes the committed selection only alongside the list
+    /// that belongs to it.
     func selectGroup(_ name: String) async {
         guard name != selectedGroup else { return }
-        selectedGroup = name
         proxySearch = ""
+        pendingSelectedGroup = name
         await loadProxies(group: name)
+        // Success committed the group inside `apply`; on failure the previous
+        // selection stands, so the name and the rows still agree.
+        if selectedGroup != name {
+            pendingSelectedGroup = nil
+        }
     }
+
+    /// The group a switch is in flight to, if any.
+    ///
+    /// Lets the picker show where the user is going without the rest of the
+    /// screen pretending they have arrived.
+    private(set) var pendingSelectedGroup: String?
 
     /// Switch the active node. The backend re-reads the core, so the checkmark
     /// reflects what actually happened rather than what was clicked.
     func switchProxy(_ node: ProxyNode) async {
+        let generation = beginProxyListRequest()
         await withPending(.switchingProxy(node.name), success: nil) {
             let list = try await self.client.switchProxy(group: node.group, name: node.name)
-            self.apply(list)
+            self.apply(list, forGroup: node.group, generation: generation)
         }
     }
 
@@ -988,9 +1084,10 @@ final class AppModel {
     /// put a per-node failure on the Home banner, which is the policy this
     /// screen was fixed to follow.
     func testProxy(_ node: ProxyNode) async {
+        let generation = beginProxyListRequest()
         await withPending(.testingProxy(node.name), success: nil) {
             let list = try await self.client.testProxy(group: node.group, name: node.name)
-            self.apply(list)
+            self.apply(list, forGroup: node.group, generation: generation)
         }
     }
 
@@ -1004,15 +1101,31 @@ final class AppModel {
         guard !selectedGroup.isEmpty else { return }
         guard proxyActions.can_test_group else { return }
         let group = selectedGroup
+        // Claimed BEFORE the request, and never released on the way out: the
+        // "launching" state is what locks the button between the click and the
+        // backend's first progress frame.
+        groupTest = .launching(runID: nil, group: group)
+        let generation = beginProxyListRequest()
         do {
             let result = try await client.testProxyGroup(group)
             // The response is authoritative. It may arrive before or after the
             // finished event, so both paths clear the state — applying them in
             // either order must converge, never resume "running".
-            apply(result.proxies)
-            if result.group == selectedGroup {
-                groupTest = .idle
+            //
+            // A RESULT FOR A GROUP THE USER HAS LEFT MUST NOT DRAG THEM BACK.
+            //
+            // `apply` used to end with `selectedGroup = result.group`, so
+            // finishing a test of A after switching to B moved the screen back to
+            // A — mid-interaction, with no user action behind it. The group is
+            // now part of the commit check, so a result for another group is
+            // recorded as data without taking over the screen.
+            if result.group == group {
+                apply(result.proxies, forGroup: group, generation: generation)
             }
+            // The run is over either way. Whether the user is still looking at
+            // the tested group only decides whether the RESULT was applied above,
+            // not whether the run is finished.
+            groupTest = .idle
         } catch {
             // A transport-level failure is the one case that clears the UI
             // without a result; without this the panel would stay on "测速 12/36"
@@ -1030,6 +1143,21 @@ final class AppModel {
     /// that now belongs to a different test.
     func applyGroupTestProgress(_ p: ProxyTestProgress) {
         if p.isStarted {
+            // A `started` frame for a run we did not launch is not ours to
+            // display: another surface (or a previous session) may have begun a
+            // run, and adopting it would resurrect a test the user is not
+            // running. A launching state means WE asked, so its group matches.
+            if case .launching(_, let launchedGroup) = groupTest {
+                guard p.group == launchedGroup else { return }
+            } else if case .running(let running) = groupTest {
+                // Already tracking this run; a duplicate frame must not reset
+                // the counters the user is watching.
+                if running.id == p.run_id { return }
+            } else {
+                // Idle: no run of ours is outstanding, so a `started` frame can
+                // only describe someone else's run.
+                return
+            }
             groupTest = .running(GroupTestProgress(
                 id: p.run_id, group: p.group, total: p.total,
                 completed: 0, succeeded: 0, failed: 0, inFlight: []))
@@ -1085,23 +1213,79 @@ final class AppModel {
         if let error { proxies[idx].last_error = error }
     }
 
-    private func apply(_ list: ProxyList) {
+    /// Adopt a proxy list that the caller is entitled to commit.
+    ///
+    /// `forGroup` and `generation` are REQUIRED, because the previous signature
+    /// could not tell whose reply it was holding. That produced two defects from
+    /// one omission:
+    ///
+    ///   * `if !list.proxies.isEmpty || list.group == selectedGroup` — the `||`
+    ///     meant ANY reply carrying nodes overwrote the visible list, even one
+    ///     for a different group, and the line below then moved `selectedGroup`
+    ///     to match it. A slow reply for group A therefore dragged the user back
+    ///     out of group B.
+    ///   * Nothing checked whether a LATER request had since superseded this one,
+    ///     so the last response to arrive won rather than the last one requested.
+    ///
+    /// Now the reply states which request it answers, and only the current one may
+    /// change what the user sees.
+    private func apply(_ list: ProxyList, forGroup: String, generation: UInt64) {
+        guard generation == proxyListGeneration else {
+            // A superseded reply. Dropped silently and without touching the
+            // screen: the request that replaced it will commit its own result,
+            // and applying this one first would flash the wrong list.
+            return
+        }
         if let caps = list.capabilities {
             proxyActions = caps
         }
         if !list.groups.isEmpty { groups = list.groups }
         // A group-only reply must not wipe the visible nodes.
         if list.available || !list.proxies.isEmpty || !(list.group ?? "").isEmpty {
-            if !list.proxies.isEmpty || (list.group ?? "") == selectedGroup {
+            // COMMIT ONLY FOR THE GROUP THE USER IS LOOKING AT.
+            //
+            // The group this reply describes must match the request that asked
+            // for it; anything else is a reply for a group the user has left,
+            // and adopting it would move the selection back in time.
+            let replyGroup = list.group ?? forGroup
+            if replyGroup == forGroup {
                 proxies = list.proxies
             }
         }
-        if let g = list.group, !g.isEmpty { selectedGroup = g }
+        if let g = list.group, !g.isEmpty, g == forGroup {
+            // The list and the group name move TOGETHER. This is what makes
+            // `selectGroup` safe to write optimistically: the selection is
+            // committed here, next to the rows it describes.
+            selectedGroup = g
+            pendingSelectedGroup = nil
+        }
         proxiesAvailable = list.available
         // The node read carries the same capability answer as the group read,
         // so a `get_proxies` reply must not leave a stale "supported" behind.
         proxiesSupported = list.isSupported
         proxiesUnsupportedReason = list.unsupported_reason
+    }
+
+    /// Monotonic id for proxy-list requests. Only the newest may commit.
+    private var proxyListGeneration: UInt64 = 0
+
+    /// Begin a proxy-list request and return its generation.
+    ///
+    /// Every entry point that reads nodes goes through this, so "the newest
+    /// request wins" is a property of the screen rather than of one code path.
+    private func beginProxyListRequest() -> UInt64 {
+        proxyListGeneration &+= 1
+        return proxyListGeneration
+    }
+
+    /// Abandon in-flight proxy reads, e.g. when the engine changes underneath.
+    ///
+    /// Bumping the generation is enough: replies already in flight stop being
+    /// current and are dropped on arrival. Called when the core generation or the
+    /// config changes, because a list read from the previous engine describes a
+    /// different world.
+    func invalidateProxyListRequests() {
+        proxyListGeneration &+= 1
     }
 
     // MARK: - Subscriptions
@@ -1158,6 +1342,19 @@ final class AppModel {
     ///
     /// Stated on the model rather than inline in the view so the rule can be
     /// tested without a running UI.
+    /// True when a config reload can be started right now.
+    ///
+    /// Both halves matter: the backend must consider the config REBUILDABLE (a
+    /// hand-written config would be overwritten, so the backend refuses), and no
+    /// other operation may be in flight. Stated on the model so every control
+    /// that offers a reload — the notice, the proxy screen, the subscription
+    /// list — agrees, instead of each rediscovering that `withPending` will
+    /// refuse.
+    var canReloadConfig: Bool {
+        guard pending == nil else { return false }
+        return core?.config_rebuildable ?? false
+    }
+
     var canUpdateAllSubscriptions: Bool {
         guard pending == nil else { return false }
         return subscriptions.contains { $0.enabled && $0.isRefreshable }
@@ -1249,14 +1446,25 @@ final class AppModel {
     }
 
     /// Update every enabled source.
-    func updateAllSubscriptions() async {
+    ///
+    /// Returns whether the update SUCCEEDED, so a caller that chains further
+    /// steps can stop. The previous `Void` return made `updateSubscriptionsAndReload`
+    /// structurally unable to notice a failure: it re-built the config from
+    /// sources that had just failed to fetch, then reloaded on top of that, and
+    /// each step overwrote the previous step's error. The user's outcome was
+    /// decided by the LAST step rather than by the one that mattered.
+    @discardableResult
+    func updateAllSubscriptions() async -> Bool {
+        var ok = false
         await withPending(.updatingSubscriptions, success: nil) {
             let result = try await self.client.updateSubscriptions()
             self.lastMaintenance = result
+            ok = result.ok
             self.report(result, success: "Subscriptions updated.")
         }
         await loadSubscriptions()
         await refreshCoreState()
+        return ok
     }
 
     // MARK: - Daemon
@@ -1466,11 +1674,20 @@ final class AppModel {
 
     // MARK: - Maintenance
 
-    func reloadConfig() async {
+    /// Rebuild and activate the config. Returns whether it succeeded.
+    ///
+    /// A `Void` return here is what let the recovery chains carry on after a
+    /// failed rebuild — reloading the groups of a config that was never built,
+    /// and clearing the error the user needed to see.
+    @discardableResult
+    func reloadConfig() async -> Bool {
+        var ok = false
         await withPending(.reloadingConfig, success: nil) {
             let result = try await self.client.reloadConfig()
+            ok = result.ok
             self.report(result, success: "Configuration reloaded.")
         }
+        return ok
     }
 
     /// Take ownership of an UNKNOWN config after the user confirmed it.
@@ -1810,7 +2027,14 @@ final class AppModel {
     /// Task closure — a multi-statement `Task { }` is ambiguous against
     /// `Task.init(name:priority:operation:)` on newer Swift toolchains.
     func reloadAndReloadGroups() async {
-        await reloadConfig()
+        // STOP AT THE FIRST FAILURE.
+        //
+        // Reloading the groups after a failed rebuild asks the screen to
+        // describe a config that was never activated: the group list would be
+        // re-read against the OLD config while the error says the reload failed,
+        // and the second step's success line would replace the first step's
+        // failure. A chain is only meaningful while its steps are succeeding.
+        guard await reloadConfig() else { return }
         await loadGroups()
     }
 
@@ -1819,8 +2043,14 @@ final class AppModel {
     /// The full recovery path for "the node list is out of date": fetch, rebuild,
     /// reload. Named for the same reason as above.
     func updateSubscriptionsAndReload() async {
-        await updateAllSubscriptions()
-        await reloadConfig()
+        // Same rule: fetch, rebuild, re-read — but only while each step works.
+        //
+        // The order matters as much as the stopping. Rebuilding after a FAILED
+        // fetch would build the config from the nodes the fetch was unable to
+        // refresh, and then reload it, so the user would be told the recovery
+        // "succeeded" while their nodes were still stale.
+        guard await updateAllSubscriptions() else { return }
+        guard await reloadConfig() else { return }
         await loadGroups()
     }
 

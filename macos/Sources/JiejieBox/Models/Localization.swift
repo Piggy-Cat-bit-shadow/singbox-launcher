@@ -354,6 +354,8 @@ enum L: CaseIterable {
     case reloadPromptBody
     case externalPromptBody
     case reloadConfigAction
+    /// The Proxy screen's notice action that fetches then rebuilds.
+    case updateSubscriptionsAction
 
     // Core
     case core
@@ -457,6 +459,12 @@ enum L: CaseIterable {
     case dismiss
     /// Spoken label for a node's latency control: names the node and the action.
     case measureLatencyFor
+    /// Shown above a cached node list whose config has moved on.
+    case nodeListOutOfDate
+    case nodeListOutOfDateDetail
+    /// The same, for a config this app does not own.
+    case configManagedExternally
+    case configManagedExternallyDetail
     /// Explains a disabled Update All.
     case noRefreshableSubscriptions
     case anotherOperationRunning
@@ -784,6 +792,7 @@ extension L {
         case .reloadPromptBody: return "Reload the config to apply the new node list."
         case .externalPromptBody: return "These changes will not take effect until the external configuration is updated."
         case .reloadConfigAction: return "Reload Config"
+        case .updateSubscriptionsAction: return "Update Subscriptions"
 
         case .core: return "Core"
         case .restartCore: return "Restart Core"
@@ -878,6 +887,10 @@ extension L {
 
         case .dismiss: return "Dismiss"
         case .measureLatencyFor: return "Measure latency for %@, currently %@"
+        case .nodeListOutOfDate: return "This node list may be out of date"
+        case .nodeListOutOfDateDetail: return "Subscriptions changed since the configuration was built. The nodes below come from the previous configuration and may no longer be current."
+        case .configManagedExternally: return "This node list may be out of date"
+        case .configManagedExternallyDetail: return "Subscriptions changed, but this configuration is not built by JiejieBox, so it cannot be rebuilt here. Edit the file to apply the change."
         case .noRefreshableSubscriptions: return "No enabled remote subscriptions to update."
         case .anotherOperationRunning: return "Another operation is still running. Wait for it to finish."
         case .coreOperationStillRunning: return "The backend is still working on this. The controls stay unavailable until it settles."
@@ -1172,6 +1185,7 @@ extension L {
         case .reloadPromptBody: return "重新加载配置以应用新的节点列表。"
         case .externalPromptBody: return "在外部配置更新之前，这些改动不会生效。"
         case .reloadConfigAction: return "重新加载配置"
+        case .updateSubscriptionsAction: return "更新订阅"
 
         case .core: return "内核"
         case .restartCore: return "重启内核"
@@ -1265,6 +1279,10 @@ extension L {
 
         case .dismiss: return "忽略"
         case .measureLatencyFor: return "测量 %@ 的延迟，当前为 %@"
+        case .nodeListOutOfDate: return "该节点列表可能已过期"
+        case .nodeListOutOfDateDetail: return "订阅在上次构建配置之后发生了变更。下面的节点来自旧配置，可能已不再有效。"
+        case .configManagedExternally: return "该节点列表可能已过期"
+        case .configManagedExternallyDetail: return "订阅已变更，但该配置不是由 JiejieBox 构建的，无法在此重建。请直接编辑文件以应用变更。"
         case .noRefreshableSubscriptions: return "没有可更新的已启用远程订阅。"
         case .anotherOperationRunning: return "还有操作正在进行，请等待完成。"
         case .coreOperationStillRunning: return "后端仍在处理该操作，完成前相关按钮保持不可用。"
