@@ -133,19 +133,28 @@ cannot rescue the case it names.
 `Status string` (`idle | started | fatal`) — a synchronous snapshot, already
 implemented and already used for reachability. Nothing new is needed on the wire.
 
-### D2 — `Starting` is not representable in the authoritative state
+### D2 — the WIRE state is complete; the PROXIES screen collapses it
 
-`RunningState.running` is a `bool` with `Set(bool)`, `SetStopped(reason)` and
-`SetReasserted()`. There is no `Starting` or `Stopping`.
+Partly a correction. `RunningState.running` is a bare `bool`, but the wire state
+the frontend consumes is NOT: `backend/service/core_operation.go:437`
+`coreLifecycleState` derives all five states, and `phaseToWireState` maps the
+classic phase onto them. `Starting` and `Stopping` are representable, and the
+reasoning behind that derivation is thorough.
 
-The UI infers those from `pending`/`coreOperationBusy`, so:
-- the authoritative state cannot say "starting";
-- a start that never settles leaves the UI in a state the backend cannot
-  contradict;
-- the Proxies screen, which reads a different projection, concludes "not running"
-  and renders **"内核未运行"** while the core is up.
+So the authoritative state is sound. The defect is one consumer:
 
-That last one is the reported Proxies defect and it follows directly from this.
+```
+AppModel.proxyListState:  if core?.state != .running { return .coreStopped }
+```
+
+Five states collapse into one message, so a core that is STARTING — and a core
+that is RUNNING while its Clash API is still coming up — are both rendered as
+**"内核未运行"**. That is the reported Proxies defect, and it is a presentation
+bug in one derived property rather than a missing state.
+
+A second consequence followed from the same expression: it returned before the
+`config_stale` check, so a running core whose list had not arrived could not reach
+`.configStale` either.
 
 ### D3 — `finishOp` discards the settlement reason
 
@@ -155,12 +164,18 @@ maps that to a silent `return nil`. The caller cannot distinguish
 a completed one. This is the same class as D1: an operation that never reports,
 and therefore never releases the UI.
 
-### D4 — `-race` is not run over the lifecycle packages in the fast path
+### D4 — WITHDRAWN: `-race` already covers the lifecycle packages
 
-`ci.yml` runs `go test -race` on a package list; `macos.yml` runs it on a shorter
-one. Neither is obviously the superset, and the lifecycle code
-(`core`, `backend/service`) is exactly where an unsynchronised state write would
-hide. Not a runtime bug — a coverage gap in the evidence for "no race".
+There is one race run, not two: `macos.yml` (the only workflow) executes
+
+```
+go test -race ./core/... ./api/... ./internal/platform/... ./core/services/... ./backend/... ./internal/paths/... -count=1
+```
+
+`./core/...` and `./backend/...` are the lifecycle packages, so the exposure I
+suspected does not exist. Recorded as WITHDRAWN rather than deleted: the next
+reader of this audit would otherwise re-derive the same suspicion from the same
+absence of evidence.
 
 ## 7. Suspected defects that are NOT real
 
@@ -183,9 +198,9 @@ must stay degraded gracefully, which the existing probe already does.
 
 1. **D1** — reconcile the daemon's current state after `Apply`, instead of relying
    on a future edge. Subscribe-then-snapshot-then-reconcile.
-2. **D2** — make the authoritative state able to say `Starting`/`Stopping`, and
-   derive the Proxies screen's verdict from it rather than from the proxy list.
+2. **D2** — stop the Proxies screen collapsing every non-`running` state (and a
+   slow API) into "not running"; give the two conditions their own verdicts.
 3. **D3** — surface settlement (settled vs superseded vs joined) so a caller can
    tell the difference, and log duplicates as *joined* rather than as new requests.
-4. **D4** — add the lifecycle packages to the race run and cover the fifteen
-   required cases.
+4. **Cover the remaining required cases** (9, 11, 13, 14, 15) as executable
+   tests, and record which of the fifteen are already covered by existing suites.
