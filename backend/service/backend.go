@@ -96,6 +96,10 @@ func New(layout paths.Layout) (*Backend, error) {
 	b := &Backend{ac: ac}
 	b.installOwnershipPolicy()
 	b.watchCoreState()
+	// Let the runtime settle any operation still in flight as the app exits. The
+	// record lives here and the exit path lives in core, so core calls back
+	// through this registration rather than importing the IPC layer.
+	ac.RegisterExitSettler(b.settleOperationsAtExit)
 	return b, nil
 }
 
@@ -122,6 +126,26 @@ func (b *Backend) installOwnershipPolicy() {
 // dedups no-op calls and publishes VpnStateChanged on the actual transition, so
 // subscribing there makes the frontend event-driven rather than
 // command-driven, without inventing a polling loop or a second source of truth.
+// settleOperationsAtExit clears any operation record still in flight as the
+// application exits, so a stop cannot outlive the process that owns its record.
+//
+// Called from GracefulExit after every stop path has had its chance. It does NOT
+// touch the running state: whatever the stop paths established stands, so a core
+// that survived the stop is still reported as running to anyone who asks before
+// the process ends.
+func (b *Backend) settleOperationsAtExit() {
+	if b == nil {
+		return
+	}
+	if op := b.ops.snapshotOp(); op != nil {
+		debuglog.WarnLog("backend: exiting with %s (id=%d) still in flight; clearing the record",
+			op.kind, op.id)
+		if settled := b.ops.finishOp(op, nil); settled == settleCommitted {
+			b.EmitCoreState()
+		}
+	}
+}
+
 func (b *Backend) watchCoreState() {
 	if b.ac == nil || b.ac.EventBus == nil {
 		return

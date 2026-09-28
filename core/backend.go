@@ -741,6 +741,33 @@ func (ac *AppController) StopVPNContext(ctx context.Context) error {
 	return nil
 }
 
+// SettleOperationsAtExit clears any operation record that is still in flight as
+// the application exits.
+//
+// Called by GracefulExit after every stop path has had its chance. See the caller
+// for why an operation must not outlive the process that owns its record.
+func (ac *AppController) SettleOperationsAtExit() {
+	if ac == nil {
+		return
+	}
+	if h, ok := ac.exitSettler.Load().(func()); ok && h != nil {
+		h()
+	}
+}
+
+// RegisterExitSettler installs the callback that settles in-flight operations at
+// exit.
+//
+// A settler rather than a direct call because the operation record lives in the
+// IPC layer (above core) and core must not import it. The registration is
+// best-effort by design: with no backend attached there is no record to settle.
+func (ac *AppController) RegisterExitSettler(fn func()) {
+	if ac == nil {
+		return
+	}
+	ac.exitSettler.Store(fn)
+}
+
 // OwnedProcess reports the process identity this launcher currently owns.
 //
 // Exposed so the IPC layer can answer "is a core of ours alive" from OWNERSHIP

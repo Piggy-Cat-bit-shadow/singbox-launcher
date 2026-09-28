@@ -1479,8 +1479,7 @@ func (svc *ProcessService) ForceStopOwnedCore() bool {
 	gen := ac.classic.currentGeneration()
 	ac.classic.clearOwnership(gen)
 	ac.classic.setPhase(gen, ClassicStopped)
-	ac.noteTeardown(events.TeardownUserStop)
-	ac.RunningState.Set(false)
+	ac.RunningState.SetStopped(events.TeardownUserStop)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
 	}
@@ -1591,8 +1590,7 @@ func (svc *ProcessService) Stop() {
 	ac.SingboxPrivilegedSingboxPID = 0
 	ac.SingboxPrivilegedPIDFile = ""
 	ac.StoppedByUser = false
-	ac.noteTeardown(events.TeardownUserStop)
-	ac.RunningState.Set(false)
+	ac.RunningState.SetStopped(events.TeardownUserStop)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
 	}
@@ -1751,8 +1749,7 @@ func (svc *ProcessService) KillForRestart() {
 	ac.SingboxPrivilegedPID = 0
 	ac.SingboxPrivilegedSingboxPID = 0
 	ac.SingboxPrivilegedPIDFile = ""
-	ac.noteTeardown(events.TeardownRestart)
-	ac.RunningState.Set(false)
+	ac.RunningState.SetStopped(events.TeardownRestart)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
 	}
@@ -1833,6 +1830,9 @@ func (svc *ProcessService) RestartContext(ctx context.Context) error {
 		ac.classic.clearIntent(gen)
 		ac.RestartRequestedByUser = false
 		ac.CmdMutex.Unlock()
+		// Nothing has been torn down yet, so there is no state to correct: the core
+		// is exactly as it was. Returning without a transition is the honest
+		// outcome here, and the caller learns the operation was abandoned.
 		return err
 	}
 
@@ -1854,6 +1854,15 @@ func (svc *ProcessService) RestartContext(ctx context.Context) error {
 		debuglog.ErrorLog("RestartContext: could not confirm exit: %v", termErr)
 		ac.RecordLifecycleError(LifecycleErrStopFailed, "restart",
 			"the core could not be stopped for a restart", termErr.Error(), true)
+		// The termination attempt may have KILLED the process even though it could
+		// not be CONFIRMED gone, in which case the running flag is now a lie. It is
+		// relabelled as a restart teardown rather than left unlabelled: an
+		// unlabelled `false` would be read as a crash and could settle an unrelated
+		// stop operation, and the truth is that this teardown was deliberate.
+		//
+		// SetStopped is a no-op when the flag is already false, so this cannot
+		// invent a transition that did not happen.
+		ac.RunningState.SetStopped(events.TeardownRestart)
 		ac.CmdMutex.Unlock()
 		return NewStartFailure(StartErrSpawnFailed, termErr)
 	}
@@ -1868,8 +1877,7 @@ func (svc *ProcessService) RestartContext(ctx context.Context) error {
 	// readable as "the user's stop completed". Without the label, a stop that
 	// superseded this restart was settled as SUCCESS right here, and the restart
 	// then went on to spawn a new core (see the StartContext call at the end).
-	ac.noteTeardown(events.TeardownRestart)
-	ac.RunningState.Set(false)
+	ac.RunningState.SetStopped(events.TeardownRestart)
 	if pidFile != "" {
 		_ = os.Remove(pidFile)
 	}
@@ -2250,11 +2258,26 @@ func (svc *ProcessService) watchAdoptedCore(gen uint64, id ProcessIdentity) {
 			ac.SingboxPrivilegedMode = false
 			ac.SingboxPrivilegedPID = 0
 			ac.SingboxPrivilegedPIDFile = ""
-			ac.RunningState.Set(false)
+			// WHOSE DEATH IS THIS?
+			//
+			// Usually nobody's request: an adopted core is not our child, and its
+			// exit is classified from its log exactly as a crash would be. But the
+			// watcher polls on a timer, so it can observe the death DURING a user's
+			// Stop — after the process is gone and before Stop() reaches its own
+			// state write. Reporting that as an unlabelled `false` made it
+			// indistinguishable from a crash, so the stop operation was never
+			// settled and the record sat at `stopping` while the core was already
+			// down.
+			//
+			// The user's intent is recorded before the teardown begins, so it is
+			// the honest answer here.
+			if ac.StoppedByUser {
+				ac.RunningState.SetStopped(events.TeardownUserStop)
+			} else {
+				ac.RunningState.Set(false)
+			}
 			ac.CmdMutex.Unlock()
-			// The core was not our child and its exit was not requested, so the
-			// reason is classified from its log exactly as a crash would be. The
-			// state is corrected to stopped either way — an adopted core that is
+			// The state is corrected to stopped either way — an adopted core that is
 			// gone must never leave the UI claiming it runs.
 			return
 		}

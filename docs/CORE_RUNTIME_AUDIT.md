@@ -405,6 +405,45 @@ Two lessons the pass made concrete:
   drive the real chain — `Backend.StartCore` → `AppController.StartVPNContext` →
   `LegacyBackend` → the process operation — and fake only the process step.
 
+## 7b. Third pass, second round — the fixes audited in turn
+
+The third pass's own fix for the restart-versus-stop confusion (a "teardown reason"
+recorded on the controller and read when the running flag dropped) was itself
+audited adversarially, and it was **wrong by design**. The asymmetry that made it
+wrong is worth stating plainly: four call sites recorded a reason while seventeen
+flipped the flag, and the two steps were non-atomic on a single shared slot.
+
+The concrete failure it admitted, in order:
+
+1. a user stops the core, recording "user stop";
+2. the following state write is a **dedup no-op** — the flag is already false — so
+   nothing is published, and the recorded reason is left behind;
+3. the core later comes up and dies in a **crash**;
+4. the crash transition reads the leftover reason and is reported as a **completed
+   user stop** — settling an operation that never happened, and hiding the crash.
+
+On top of that, three paths where the user genuinely did ask for the core to go
+down carried **no** reason (the daemon's stop-on-exit; the adopted-core watcher,
+which polls on a timer and can observe a death during a `Stop`; and `GracefulExit`
+exiting with an operation still registered), so those stops could never settle. And
+`publishTeardown` — the helper written to clear the slot — was dead code whose
+non-atomic clear could silently destroy a concurrent write.
+
+The fix is structural rather than a patch: **the reason is a parameter of the state
+write** (`SetStopped(reason)`), so the note and the flip are one operation and there
+is no slot to go stale. A no-op write now records nothing because it records nothing
+at all. The three unlabelled paths were labelled or made to consult the user's
+recorded intent, and the exit path settles any operation still in flight.
+
+The audit's most useful criticism was of the tests. Four of them were **vacuous**:
+two were source greps that never execute a line, one injected the reason itself
+through a test-only seam (so it would pass with every production call deleted), and
+one re-implemented the production logic inside its own fake. Only one was
+load-bearing. The replacement includes a **behavioural** test that drives the real
+`RunningState` and the real subscriber through the exact four-step sequence above
+and fails on the original symptom when the shared slot is reintroduced —
+`a CRASH was reported as a completed USER STOP`.
+
 ## 8. Test strategy
 
 Every new test is deterministic: no public network, no real sing-box, no real
@@ -420,6 +459,7 @@ VPN, nothing that depends on machine speed.
 | Real call chain + faked process op | "Start awaits a real commit", refusal propagation, timeout reaching the work |
 | Cancel-injection at every boundary | `acquireWithContext` ownership (300 iterations each, under `-race`) |
 | In-process HTTP fixture | fallback identity proof (empty proof refused, members compared) |
+| Real `RunningState` + real subscriber | teardown-reason attribution, no-op-write leaks (behavioural) |
 
 The last row deserves a note. There is no XCTest harness in this environment, so
 Swift invariants are enforced from the Go side by reading the Swift sources: a

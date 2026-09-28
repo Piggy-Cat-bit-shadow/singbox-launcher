@@ -23,6 +23,8 @@ import (
 	"singbox-launcher/internal/lxdclient"
 	"singbox-launcher/internal/paths"
 	"singbox-launcher/internal/platform"
+
+	"singbox-launcher/core/events"
 )
 
 // DaemonBackend — движок daemon-режима: ядро живёт внутри долгоживущего
@@ -1116,7 +1118,11 @@ func (b *DaemonBackend) OnAppExit() bool {
 		return false
 	}
 	b.ac.clearDaemonSystemProxy("VPN stopped on exit")
-	b.ac.RunningState.Set(false)
+	// A USER STOP, on the app's way out. Labelling it matters for the same reason
+	// it matters anywhere else: an unlabelled `false` is indistinguishable from a
+	// crash, so the stop operation would never be settled and the record would sit
+	// at `stopping` while the app exits.
+	b.ac.RunningState.SetStopped(events.TeardownUserStop)
 	return true
 }
 

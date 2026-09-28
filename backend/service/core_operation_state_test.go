@@ -64,8 +64,7 @@ func TestStopOperationTerminatesAtStopped(t *testing.T) {
 	// stop. The transition must say so: a bare `false` is deliberately not enough
 	// to end a stop operation, because a restart's teardown also flips this flag
 	// and would otherwise be reported as a completed stop.
-	b.ac.NoteTeardownForTest(events.TeardownUserStop)
-	b.ac.RunningState.Set(false)
+	b.ac.RunningState.SetStopped(events.TeardownUserStop)
 
 	if op := b.ops.snapshotOp(); op != nil {
 		t.Fatalf("the stop operation is still registered as %s after the core went "+
@@ -174,8 +173,7 @@ func installStoppingLegacy(t *testing.T, b *Backend) {
 		Stop: func() {
 			// The real Stop() notes the reason before flipping the flag; the fake
 			// does the same, so the transition carries the same information.
-			b.ac.NoteTeardownForTest(events.TeardownUserStop)
-			b.ac.RunningState.Set(false)
+			b.ac.RunningState.SetStopped(events.TeardownUserStop)
 		},
 	})
 	b.ac.SetBackendForTest(lb)

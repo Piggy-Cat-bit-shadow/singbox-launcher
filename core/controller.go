@@ -135,12 +135,8 @@ type AppController struct {
 	// reads here, so the frontend has one authoritative source instead of
 	// depending on which UI happened to be attached.
 	lifecycleErr lifecycleErrors
-	// teardownReason carries WHY a deliberate teardown is happening, for the next
-	// state transition to publish (see noteTeardown/publishTeardown).
-	//
-	// Stored as a string because atomic.Value cannot hold a named string type
-	// consistently across Store/Load without a fixed concrete type.
-	teardownReason atomic.Value
+	// exitSettler settles in-flight IPC operations at exit; see RegisterExitSettler.
+	exitSettler atomic.Value
 
 	// --- Context for goroutine cancellation ---
 	ctx        context.Context    // Context for cancellation
@@ -518,6 +514,21 @@ func (ac *AppController) gracefulExit() {
 		debuglog.InfoLog("GracefulExit: daemon mode keeps the core running; skipping stop wait")
 	}
 
+	// A stop operation must not outlive the process that owns its record.
+	//
+	// Everything above has had its chance to stop the core and to report it. If a
+	// stop is STILL registered at this point, the app is about to exit with an
+	// operation that will never reach a terminal state — and the wire state it
+	// would have published no longer has a reader. Settling it here is not a
+	// cosmetic cleanup: it is what keeps "the record is only cleared by a real
+	// completion" from turning into "the record is never cleared", which is how the
+	// UI came to sit in `stopping` for the rest of a session.
+	//
+	// The state itself is NOT faked: RunningState keeps whatever truth the stop
+	// paths established, so a core that survived the stop is still reported as
+	// running to anyone who asks before the process ends.
+	ac.SettleOperationsAtExit()
+
 	if ac.FileService != nil {
 		api.SetAPILogFile(nil)
 		ac.FileService.CloseLogFiles()
@@ -632,11 +643,39 @@ func CheckLinuxCapabilities() {
 	}
 }
 
-// Set sets the new value for the 'running' state and triggers a UI update.
+// Set sets the new value for the 'running' state and triggers a UI update,
+// with no teardown reason: the transition is a crash, a routine refresh, or the
+// core coming up.
+//
+// USE SetStopped WHEN THE CORE WENT DOWN DELIBERATELY. `Running == false` has
+// several causes that are indistinguishable on the wire and need opposite
+// responses, so a deliberate teardown must say so AT THE MOMENT IT HAPPENS.
+//
+// WHY THE REASON IS A PARAMETER RATHER THAN A RECORDED FLAG. An earlier version of
+// this stored the reason in a slot on the controller and read it here. That was
+// wrong in a way that produced real bugs: the store and the flip are two separate
+// steps on a shared mutable slot, so a reason could survive a no-op write, outlive
+// the teardown it described, and later label an unrelated CRASH as a completed user
+// stop — settling a stop operation that never happened. Passing the reason makes
+// the note and the flip ONE operation, which removes the entire class.
 func (r *RunningState) Set(value bool) {
+	r.set(value, events.TeardownNone)
+}
+
+// SetStopped records that the core went down for a stated reason.
+func (r *RunningState) SetStopped(reason events.TeardownReason) {
+	r.set(false, reason)
+}
+
+// set is the single implementation: the value and its reason are applied and
+// published together, so no reader can observe one without the other.
+func (r *RunningState) set(value bool, reason events.TeardownReason) {
 	r.Lock()
 	if r.running == value {
 		r.Unlock()
+		// A no-op write changes nothing, and now it also records nothing: there is
+		// no slot to leave stale. This is precisely the leak the previous design
+		// admitted.
 		return
 	}
 	r.running = value
@@ -685,23 +724,22 @@ func (r *RunningState) Set(value bool) {
 	// this event; only the legacy UpdateCoreStatusFunc callback fired.
 	if ac != nil && ac.EventBus != nil {
 		// The reason travels WITH the transition, because `false` alone cannot
-		// distinguish the causes and they need opposite responses: a user stop
-		// ends a stop operation, while a restart's teardown must not — the core is
+		// distinguish the causes and they need opposite responses: a user stop ends
+		// a stop operation, while a restart's teardown must not — the core is
 		// coming back, and reporting the stop as complete would be a lie told
 		// moments before a new core appears.
 		//
-		// An unlabelled `false` is a crash or a routine refresh, and ends nothing.
-		reason := events.TeardownNone
+		// A `false` with no reason is a crash or a routine refresh, and ends
+		// nothing. The reason is this call's own argument, so it cannot belong to
+		// some other teardown.
+		publishReason := events.TeardownNone
 		if !value {
-			reason = ac.pendingTeardown()
+			publishReason = reason
 		}
 		ac.EventBus.Publish(events.Event{
 			Kind:    events.VpnStateChanged,
-			Payload: events.VpnStateChangedPayload{Running: value, Teardown: reason},
+			Payload: events.VpnStateChangedPayload{Running: value, Teardown: publishReason},
 		})
-		if !value {
-			ac.teardownReason.Store("")
-		}
 	}
 }
 
