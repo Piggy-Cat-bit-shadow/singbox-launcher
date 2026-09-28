@@ -640,6 +640,9 @@ final class AppModel {
 
         eventTask?.cancel()
         eventTask = nil
+        // The app is leaving, so a deferred reload has nobody to run it for — and running
+        // one during teardown means issuing requests to a backend that is on its way out.
+        cancelPendingReloads()
 
         // Best effort by design: shutdownGracefully never throws, so a backend
         // that already died cannot block the quit.
@@ -671,6 +674,12 @@ final class AppModel {
         appliedSeq = 0
         pendingEvents.removeAll()
         awaitingBaseline = false
+        // The deferred reloads belong to the session that is going away, for the same
+        // reason the buffered events do. A drain already in flight keeps issuing
+        // /groups, /proxies, /subscriptions and daemon-status requests against a backend
+        // that is shutting down — and a batch still queued would fire against the NEXT
+        // helper, applying one session's intent to another's data.
+        cancelPendingReloads()
         do {
             try await client.shutdown()
         } catch {
@@ -1841,6 +1850,18 @@ final class AppModel {
         }
     }
 
+    /// Drops any queued or running deferred reloads.
+    ///
+    /// Called from every teardown path, so the deferred work is bound to the session that
+    /// requested it. Leaving it would let a queued batch survive a stop/restart boundary and
+    /// run against a different helper — the same "apply a dead process's view of the world"
+    /// problem the buffered events are cleared to avoid.
+    private func cancelPendingReloads() {
+        reloadTask?.cancel()
+        reloadTask = nil
+        pendingReloads.removeAll()
+    }
+
     /// Records that a resource needs reloading, and starts the drain if idle.
     ///
     /// A SET, so repeated events collapse into one reload. Ten subscription changes during a
@@ -1868,6 +1889,12 @@ final class AppModel {
     /// drain rather than being silently dropped by a clear at the end.
     private func runPendingReloads() async {
         while !pendingReloads.isEmpty {
+            // A stop() during a reload cancels the task; the remaining requests belong to a
+            // session that no longer exists.
+            if Task.isCancelled {
+                reloadTask = nil
+                return
+            }
             let batch = pendingReloads
             pendingReloads.removeAll()
 
@@ -1894,8 +1921,10 @@ final class AppModel {
         reloadTask = nil
 
         // A request that arrived between the loop's last check and the task ending would
-        // otherwise sit in the set with nothing to run it.
-        if !pendingReloads.isEmpty {
+        // otherwise sit in the set with nothing to run it. Guarded on cancellation: after a
+        // stop() the set is empty by construction, but a request must never re-arm a drain
+        // for a session that is gone.
+        if !pendingReloads.isEmpty && !Task.isCancelled {
             drainPendingReloads()
         }
     }

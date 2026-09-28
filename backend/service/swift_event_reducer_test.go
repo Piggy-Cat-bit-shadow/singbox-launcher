@@ -184,3 +184,63 @@ func swiftFunctionBody(src, signature string) string {
 	}
 	return src[idx:]
 }
+
+// TestDeferredReloadsAreBoundToTheirSession — the teardown half of the coalescing fix.
+//
+// Introducing deferred work introduced a new thing that outlives a session. Every other piece
+// of session state is cleared carefully on teardown, with comments explaining that leaving it
+// "would apply a dead process's view of the world" — but the reload set and its task were
+// added without being added to that list.
+//
+// Two concrete consequences: a drain already in flight keeps issuing /groups, /proxies,
+// /subscriptions and daemon-status requests against a backend that is shutting down; and a
+// batch still queued survives the stop/restart boundary and fires against the NEXT helper,
+// applying one session's intent to another's data.
+func TestDeferredReloadsAreBoundToTheirSession(t *testing.T) {
+	root := repoRootForTest(t)
+	data, err := os.ReadFile(filepath.Join(root, "macos/Sources/JiejieBox/App/AppModel.swift"))
+	if err != nil {
+		t.Fatalf("read AppModel.swift: %v", err)
+	}
+	src := stripSwiftComments(string(data))
+
+	for _, teardown := range []string{
+		"func stop() async",
+		"func quit() async",
+	} {
+		body := swiftFunctionBody(src, teardown)
+		if body == "" {
+			t.Fatalf("could not find %s", teardown)
+		}
+		if !strings.Contains(body, "cancelPendingReloads()") {
+			t.Errorf("%s does not cancel the deferred reloads, so work requested by one "+
+				"session runs against the next one — or against a backend that is "+
+				"shutting down", teardown)
+		}
+	}
+
+	// And the cancel must actually cancel, not merely forget: a task already inside a
+	// reload would otherwise keep going.
+	cancel := swiftFunctionBody(src, "private func cancelPendingReloads()")
+	if cancel == "" {
+		t.Fatal("could not find cancelPendingReloads()")
+	}
+	if !strings.Contains(cancel, ".cancel()") {
+		t.Error("cancelPendingReloads() forgets the task without cancelling it, so a " +
+			"reload already in flight keeps running")
+	}
+	if !strings.Contains(cancel, "removeAll()") {
+		t.Error("cancelPendingReloads() leaves the queued batch in place")
+	}
+
+	// The drain must not re-arm itself after a cancellation, or a stopped session
+	// restarts its own work.
+	drain := swiftFunctionBody(src, "private func runPendingReloads() async")
+	if drain == "" {
+		t.Fatal("could not find runPendingReloads()")
+	}
+	if !strings.Contains(drain, "Task.isCancelled") {
+		t.Error("runPendingReloads() never checks for cancellation, so a drain cancelled by " +
+			"stop() continues and can re-arm itself")
+	}
+}

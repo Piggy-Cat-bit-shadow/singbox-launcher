@@ -242,6 +242,9 @@ func TestProgressEventSequence(t *testing.T) {
 	if _, err := b.RunGroupTest(context.Background(), "g"); err != nil {
 		t.Fatalf("RunGroupTest: %v", err)
 	}
+	// Delivery is asynchronous: the frame list is complete only after the dispatcher
+	// drains, and every count below is computed from it.
+	b.FlushEventsForTest()
 
 	mu.Lock()
 	defer mu.Unlock()

@@ -538,6 +538,10 @@ func TestShutdownConcurrentIsExactlyOnce(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	// Delivery is asynchronous, so the counter is only final once the dispatcher has
+	// drained. Without this the assertion depends on scheduling rather than on how many
+	// times Shutdown ran its body.
+	b.FlushEventsForTest()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -662,6 +666,10 @@ func TestShutdownOnceBlocksUntilFirstCompletes(t *testing.T) {
 		go func() { defer wg.Done(); b.Shutdown() }()
 	}
 	wg.Wait()
+	// Delivery is asynchronous, so the count is only final once the dispatcher has
+	// drained. Asserting on `wg.Wait()` alone made this depend on how quickly the
+	// delivery goroutine was scheduled — which is how it failed under load.
+	b.FlushEventsForTest()
 	mu.Lock()
 	defer mu.Unlock()
 	if events != 1 {
