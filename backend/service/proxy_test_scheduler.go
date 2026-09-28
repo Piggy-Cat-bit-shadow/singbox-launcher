@@ -150,7 +150,9 @@ type proxyTestRun struct {
 type groupTestManager struct {
 	mu     sync.Mutex
 	nextID uint64
-	active *proxyTestRun
+	// nextSingle numbers single-node tests, in a space disjoint from group-run ids.
+	nextSingle uint64
+	active     *proxyTestRun
 	// cancelHook observes cancellations in tests; nil in production.
 	cancelHook func()
 }
@@ -210,6 +212,33 @@ func (m *groupTestManager) ActiveRunID() uint64 {
 	}
 	return m.active.id
 }
+
+// NextSingleTestGeneration allocates an identity for a SINGLE-node test.
+//
+// It draws from its own space, high above the group-run ids, and that separation is the
+// point. A single test previously stored its measurement under `ActiveRunID()`, which is
+// either 0 or the id of a group test that is currently running — so a node the user tested
+// by hand was recorded as if it were a result of that group run. The two are different
+// events with different lifetimes: the group run's results are dropped when it is
+// superseded, while the user's deliberate single test must survive.
+//
+// It does NOT touch the active run, so testing one node never cancels a group test in
+// progress.
+func (m *groupTestManager) NextSingleTestGeneration() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextSingle++
+	// Offset so a single-test generation can never collide with a group-run id, no matter
+	// how many of either have happened. The high bit is set.
+	return singleTestGenerationBase | m.nextSingle
+}
+
+// singleTestGenerationBase separates single-test generations from group-run ids.
+//
+// Group-run ids start at 1 and increment, so setting the top bit means the two spaces
+// cannot overlap for any realistic number of runs, and the distinction is visible in a log
+// line or a stored generation.
+const singleTestGenerationBase = 1 << 62
 
 // CancelActive cancels the active group test, if any.
 //
@@ -357,10 +386,16 @@ func (b *Backend) executeGroupTest(
 				// previous value. Emitted from the WORKER for this, and only
 				// this: it is per-node state that no counter needs, and routing
 				// it through the coordinator would reorder it behind results.
-				b.emit(protocol.EventProxyTestProgress, ProxyGroupTestProgress{
-					RunID: run.id, Group: run.group, Phase: ProxyTestPhaseNodeStarted,
-					Total: len(nodes), Node: node.Name,
-				})
+				//
+				// Guarded by the same currency check as the coordinator: a worker can
+				// pick up a job after the run was superseded, and its spinner would
+				// otherwise appear on a screen showing a different group.
+				if b.groupTests.isCurrent(run.id) {
+					b.emit(protocol.EventProxyTestProgress, ProxyGroupTestProgress{
+						RunID: run.id, Group: run.group, Phase: ProxyTestPhaseNodeStarted,
+						Total: len(nodes), Node: node.Name,
+					})
+				}
 				// A panic in a transport must not take the backend down: this
 				// path is driven directly by a UI click.
 				outcome := safeMeasure(ctx, transport, node)
@@ -398,6 +433,21 @@ func (b *Backend) executeGroupTest(
 	// collect consumes one outcome, updating counters, the store and progress.
 	// It runs only on this goroutine.
 	collect := func(outcome measurementOutcome) {
+		// THE GUARD THAT MAKES `isCurrent` MEAN SOMETHING.
+		//
+		// A run can be superseded while a probe is in flight — the user switches groups,
+		// switches engine, or the core stops — and that probe still returns, possibly
+		// seconds later. Writing its result would paint the OLD run's numbers onto rows
+		// the UI is now showing for the NEW run, and emitting its progress would move the
+		// completed counter for a run the user has already abandoned.
+		//
+		// Cancelling the run's context stops most in-flight work, but it cannot stop a
+		// result that has ALREADY been produced and is sitting in the results channel,
+		// and it cannot stop a transport that ignores cancellation. This check is what
+		// covers those, and it is why `isCurrent` exists.
+		if !b.groupTests.isCurrent(run.id) {
+			return
+		}
 		completed++
 		outstanding--
 		switch outcome.Status {
@@ -466,11 +516,21 @@ func (b *Backend) executeGroupTest(
 		}
 	}
 
-	b.emit(protocol.EventProxyTestProgress, ProxyGroupTestProgress{
-		RunID: run.id, Group: run.group, Phase: ProxyTestPhaseFinished,
-		Total: len(nodes), Completed: completed,
-		Succeeded: summary.succeeded, Failed: summary.failed,
-	})
+	// The terminal event is guarded like every other one.
+	//
+	// A superseded run reaching this point is the NORMAL case, not an exceptional one:
+	// superseding cancels the run, the cancellation ends this loop, and control arrives
+	// here on the way out. Emitting "finished" then would tell the UI that a run it has
+	// already replaced is complete, and the finished phase is what the UI uses to clear
+	// its progress state — so the NEW run's progress would be wiped by the OLD run's
+	// teardown.
+	if b.groupTests.isCurrent(run.id) {
+		b.emit(protocol.EventProxyTestProgress, ProxyGroupTestProgress{
+			RunID: run.id, Group: run.group, Phase: ProxyTestPhaseFinished,
+			Total: len(nodes), Completed: completed,
+			Succeeded: summary.succeeded, Failed: summary.failed,
+		})
+	}
 	return summary
 }
 

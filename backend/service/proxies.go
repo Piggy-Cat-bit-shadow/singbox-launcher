@@ -364,9 +364,19 @@ func (b *Backend) TestProxy(group, name string) (protocol.ProxyList, error) {
 		}
 	}
 
-	// One measurement primitive for single and group tests, so timeout handling
-	// and error classification cannot drift between them.
-	outcome := measureProxy(context.Background(), transport, proxyNode{Group: group, Name: name})
+	// ONE measurement primitive for single and group tests, so timeout handling and error
+	// classification cannot drift between them — but under the backend's own context, not
+	// `context.Background()`.
+	//
+	// Background was uncancellable: nothing could stop this measurement, so a wedged
+	// socket held the request — and therefore Quit — open indefinitely. The group test was
+	// carefully cancellable on core stop, engine switch and shutdown; this path, the one a
+	// user reaches by clicking a single row, was outside that tree entirely.
+	//
+	// `testContext()` is the shared run context: it is cancelled when teardown BEGINS, so
+	// this measurement stops with everything else rather than outliving the transport it
+	// is talking to.
+	outcome := measureProxy(b.testContext(), transport, proxyNode{Group: group, Name: name})
 
 	// STORE the result. The previous version measured, discarded the number and
 	// re-read the list hoping the core would echo it back — which Classic
@@ -377,7 +387,14 @@ func (b *Backend) TestProxy(group, name string) (protocol.ProxyList, error) {
 		Status:     outcome.Status,
 		Error:      outcome.Error,
 		MeasuredAt: outcome.MeasuredAt,
-		Generation: b.groupTests.ActiveRunID(),
+		// Its OWN generation, not the active group run's.
+		//
+		// `ActiveRunID()` returned either 0 or a group test's id, so a node the user
+		// tested by hand was stored as a result of that group run — and the
+		// superseded-run logic then treated the user's deliberate test as a late result
+		// of a run they had replaced. The single test gets an identity from its own
+		// space, and asking for one does not disturb a group test in progress.
+		Generation: b.groupTests.NextSingleTestGeneration(),
 	})
 	if outcome.Status != coreservices.MeasurementSuccess {
 		debuglog.DebugLog("backend: latency test for %q: %s (%s)",
