@@ -531,8 +531,30 @@ func (b *DaemonBackend) retryCoreReject(errText string) bool {
 	return true
 }
 
+// retryAfterCoreFatal reacts to a core FATAL reported by the daemon: it disables
+// the node the core named and re-applies, then records the outcome.
+//
+// THE SILENT PATH THIS FIXES. When retryCoreReject declined — the retry cap was
+// reached, or the FATAL named something that is not a node (the real case was
+// `default outbound not found: proxy-out`, a route.final pointing at an outbound
+// that does not exist) — this function simply returned. Nothing was recorded,
+// nothing was shown, and the core stayed down: the user pressed Connect and the
+// app went quiet. That is how a config-integrity bug turned into "the VPN just
+// does not start".
+//
+// The failure is now recorded with the daemon's own message, which is the only
+// place the true cause exists — it comes from the core, not from the launcher.
 func (b *DaemonBackend) retryAfterCoreFatal(msg string) {
 	if !b.retryCoreReject(msg) {
+		if b == nil || b.ac == nil {
+			return
+		}
+		// Not a node problem, or we are out of retries. Either way the core is
+		// down for a reason the user needs to see, verbatim: the message names
+		// the offending tag, which is what makes it actionable.
+		debuglog.ErrorLog("daemon: core FATAL could not be resolved by disabling a node: %s", msg)
+		b.ac.RecordLifecycleError(LifecycleErrCoreStart, "start",
+			"the core refused the configuration", msg, false)
 		return
 	}
 	b.applyCurrentConfig("core-reject-fatal", true)
@@ -546,8 +568,14 @@ func (b *DaemonBackend) StopVPN() {
 		ac := b.ac
 		if err := b.admin.Stop(); err != nil {
 			debuglog.ErrorLog("daemon.StopVPN: %v", err)
+			// Recorded before the UI branch. A stop that FAILED is not a cosmetic
+			// problem: the tunnel is still up, and the user must be told so rather
+			// than left believing it is down. The headless backend has no uiPort,
+			// so the Fyne dialog alone reached nobody.
+			msg := fmt.Errorf("daemon stop: %w", err).Error()
+			ac.RecordLifecycleError(LifecycleErrStopFailed, "stop", msg, "", true)
 			if ac.hasUI() {
-				b.ac.uiPort.ShowError(locale.T("Error"), fmt.Errorf("daemon stop: %w", err).Error())
+				b.ac.uiPort.ShowError(locale.T("Error"), msg)
 			}
 			return
 		}
