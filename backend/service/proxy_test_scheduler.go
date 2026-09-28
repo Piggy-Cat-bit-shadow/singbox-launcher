@@ -466,15 +466,19 @@ func (b *Backend) executeGroupTest(
 		// THROUGH THE SUPERSESSION GUARD, LIKE EVERY OTHER MEASUREMENT.
 		//
 		// This used `SetMeasurement`, which writes unconditionally, while the single-test path
-		// used `RecordMeasurementIfNewer`. The asymmetry defeated the guard in both
-		// directions: a group result always overwrote a hand test's result — the exact
-		// clobbering the guard exists to prevent — and a hand test's own generation
-		// (`singleTestGenerationBase+n`, far above any group id) could never be superseded by
-		// a later group run, so a stale hand result outlived every refresh of it.
+		// used `RecordMeasurementIfNewer` — so a scheduled run landing just after the user
+		// pressed "test" replaced their result, which is the exact clobbering the guard exists
+		// to prevent. The fix that made `Generation` load-bearing had covered one writer of two.
 		//
-		// A group id is a small counter and a single test's is above the base, so the ordering
-		// between the two spaces is total and the same comparison is correct for both. The
-		// outcome is logged when discarded rather than silently dropped.
+		// The two generation spaces are deliberately ordered with hand tests far ABOVE every
+		// group id, and that precedence EXPIRES rather than being permanent — see
+		// `handTestAdvantageExpired` in `core/services`. A permanent advantage would make a
+		// group run unable to ever update a node the user had once tested by hand, freezing
+		// the row on a number that may describe a node which has since died.
+		//
+		// `MeasuredAt` is therefore REQUIRED for the rule to work, and every producer sets it:
+		// the group worker stamps `now` on each of its three outcomes. The outcome is logged
+		// when discarded rather than silently dropped.
 		if !b.ac.APIService.RecordMeasurementIfNewer(outcome.Node.Name, coreservices.ProxyMeasurementState{
 			Delay:      outcome.Delay,
 			Status:     outcome.Status,
