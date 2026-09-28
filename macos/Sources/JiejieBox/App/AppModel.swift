@@ -1903,19 +1903,47 @@ final class AppModel {
             // in place and the list empty.
             if batch.contains(.groups) {
                 await loadGroups()
+                // RE-CHECKED AFTER EVERY AWAIT, NOT ONLY AT THE TOP OF THE LOOP.
+                //
+                // `stop()` cancels this task while it is suspended in `await`, and the top of
+                // the loop is not reached again until the whole batch has run. So a stop()
+                // arriving during `loadGroups()` still let `.proxies`, `.subscriptions` and
+                // `.daemonStatus` fire — every request in the batch except the one that
+                // happened to be suspended — against a backend the user has just stopped.
+                //
+                // The requests are cheap and mostly harmless individually, which is why this
+                // went unnoticed; what makes it wrong is that they belong to a session that no
+                // longer exists, and a later one of them can land AFTER a newer session has
+                // already loaded, overwriting fresh state with the old session's.
+                if Task.isCancelled {
+                    reloadTask = nil
+                    return
+                }
             }
             for case let .proxies(group) in batch {
                 // Skip a group selection that a later event has already replaced: only the
                 // most recent request is worth a round-trip.
                 if group == selectedGroup {
                     await loadProxies(group: group)
+                    if Task.isCancelled {
+                        reloadTask = nil
+                        return
+                    }
                 }
             }
             if batch.contains(.subscriptions) {
                 await loadSubscriptions()
+                if Task.isCancelled {
+                    reloadTask = nil
+                    return
+                }
             }
             if batch.contains(.daemonStatus) {
                 await loadDaemonStatus()
+                if Task.isCancelled {
+                    reloadTask = nil
+                    return
+                }
             }
         }
         reloadTask = nil

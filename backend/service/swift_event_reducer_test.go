@@ -182,7 +182,17 @@ func swiftFunctionBody(src, signature string) string {
 			}
 		}
 	}
-	return src[idx:]
+	// UNBALANCED BRACES ARE A FAILURE, NOT A WIDER RESULT.
+	//
+	// This returned `src[idx:]` — the rest of the FILE — when the braces never balanced. Every
+	// caller then asserted `strings.Contains` against a body that extended to the end of the
+	// file, so a scan that failed silently turned every assertion into "does this appear
+	// ANYWHERE below this point", which is nearly always true. The failure mode is a test that
+	// passes while measuring nothing, and it is invisible in the test's own output.
+	//
+	// An empty result makes the caller's existing `if body == ""` guard fire, which is the
+	// honest outcome: the function could not be located.
+	return ""
 }
 
 // TestDeferredReloadsAreBoundToTheirSession — the teardown half of the coalescing fix.
@@ -239,8 +249,53 @@ func TestDeferredReloadsAreBoundToTheirSession(t *testing.T) {
 	if drain == "" {
 		t.Fatal("could not find runPendingReloads()")
 	}
-	if !strings.Contains(drain, "Task.isCancelled") {
-		t.Error("runPendingReloads() never checks for cancellation, so a drain cancelled by " +
-			"stop() continues and can re-arm itself")
+	// AND THE CHECK MUST FOLLOW EVERY AWAIT.
+	//
+	// The top-of-loop check alone is not enough, and this is the assertion the previous version
+	// was missing: `stop()` cancels the task while it is SUSPENDED in an `await`, and the loop
+	// head is not reached again until the whole batch has run. So a stop arriving during
+	// `loadGroups()` still let `.proxies`, `.subscriptions` and `.daemonStatus` fire against a
+	// backend the user has just stopped.
+	//
+	// A bare `Contains(drain, "Task.isCancelled")` cannot see this: one occurrence anywhere
+	// satisfies it, including one inside a comment (comments are stripped here, but the check
+	// was still a single substring test over the whole body). Every suspension point has to be
+	// followed by a re-check, so that is what is asserted.
+	lines := strings.Split(drain, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "await ") {
+			continue
+		}
+		// The re-check may not be literally the next line: the awaited call can be the last
+		// statement of a branch, so closing braces and comments intervene. Look ahead past
+		// them, and stop at the next STATEMENT — anything is acceptable in between, but the
+		// check has to arrive before the following statement runs.
+		found := false
+		for j := i + 1; j < len(lines); j++ {
+			next := strings.TrimSpace(lines[j])
+			if next == "" || next == "}" || strings.HasPrefix(next, "//") {
+				continue
+			}
+			if strings.Contains(next, "Task.isCancelled") {
+				found = true
+			}
+			break
+		}
+		if !found {
+			t.Errorf("runPendingReloads() awaits %q without re-checking cancellation "+
+				"afterwards (line %d of its body). A stop() arriving while that call is "+
+				"suspended lets every remaining request in the batch run against a backend "+
+				"the user has stopped — and a late one can land after a NEWER session has "+
+				"already loaded, overwriting fresh state with the old session's",
+				trimmed, i+1)
+		}
+	}
+
+	// Guard the guard: the scan must have found the awaits at all, or the loop above is
+	// vacuous in exactly the way `swiftFunctionBody` used to make possible.
+	if !strings.Contains(drain, "await ") {
+		t.Fatal("the drain body contains no `await` at all, so the per-await cancellation " +
+			"check above proved nothing — the function was probably not located correctly")
 	}
 }
