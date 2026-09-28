@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"singbox-launcher/internal/atomicfile"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,13 +46,11 @@ func WriteFile10(path string, b *Backup10) error {
 
 // writeFileAtomic — общая запись через временный файл и rename.
 func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename to %s: %w", path, err)
+	// Delegates to the shared primitive so the staging name is unique per writer. The
+	// local version used a fixed `.tmp`, which two concurrent backups would share — and a
+	// backup is precisely the file whose corruption loses the data it exists to protect.
+	if err := atomicfile.Write(path, data, 0o600); err != nil {
+		return fmt.Errorf("backup: write %s: %w", path, err)
 	}
 	return nil
 }

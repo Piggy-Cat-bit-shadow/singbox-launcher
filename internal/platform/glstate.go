@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"singbox-launcher/internal/atomicfile"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,15 +114,11 @@ func SaveGLState(d paths.DataDir, s GLState) error {
 	if err != nil {
 		return fmt.Errorf("gl: marshal state: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, DefaultFileMode); err != nil {
-		return fmt.Errorf("gl: write temp state: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("gl: rename state: %w", err)
-	}
-	return nil
+	// Shared atomic writer: the staging name is unique per writer, so two saves cannot
+	// blend. The comment above already states the stakes — a torn file reads as "first
+	// run" and triggers an extra probe on every start — and a fixed `.tmp` allowed exactly
+	// that under concurrency.
+	return atomicfile.Write(path, data, DefaultFileMode)
 }
 
 // MarkGLStarting штампует «идём на инициализацию GL в режиме mode».
@@ -303,16 +300,16 @@ func copyMesaFromBundle(a paths.AppDir) ([]string, error) {
 		if ent.IsDir() || !strings.EqualFold(filepath.Ext(base), ".dll") {
 			continue
 		}
-		tmpPath := filepath.Join(string(a), base+".tmp")
-		if copyErr := copyFileGL(filepath.Join(srcDir, base), tmpPath); copyErr != nil {
-			_ = os.Remove(tmpPath)
-			return names, fmt.Errorf("gl: copy %s: %w", base, copyErr)
-		}
+		// A DLL is a FILE to replace, so the shared primitive stages a unique sibling
+		// and renames it into place. The previous version removed the destination first
+		// and then renamed — a window in which the DLL simply did not exist, which on
+		// Windows means any process that loads it during that window fails to find it.
+		// Rename-over-existing has no such window.
 		finalPath := filepath.Join(string(a), base)
-		_ = os.Remove(finalPath)
-		if renameErr := os.Rename(tmpPath, finalPath); renameErr != nil {
-			_ = os.Remove(tmpPath)
-			return names, fmt.Errorf("gl: install %s: %w", base, renameErr)
+		if copyErr := atomicfile.WriteWith(finalPath, DefaultFileMode, func(w io.Writer) error {
+			return copyFileGLInto(filepath.Join(srcDir, base), w)
+		}); copyErr != nil {
+			return names, fmt.Errorf("gl: copy %s: %w", base, copyErr)
 		}
 		// Отключённая копия того же файла осталась бы висеть мусором и
 		// сбивала бы IsMesaDisabled на следующем старте.
@@ -350,6 +347,21 @@ func copyFileGL(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// copyFileGLInto streams a source file into an already-open writer.
+//
+// The writer variant exists for `atomicfile.WriteWith`, which owns the destination handle,
+// the permissions and the rename. The older `copyFileGL(src, dst)` opened the destination
+// itself, which forced callers to remove the target before renaming over it.
+func copyFileGLInto(src string, w io.Writer) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close() //nolint:errcheck // read-only source
+	_, err = io.Copy(w, in)
+	return err
 }
 
 // probeResult — исход пробы OpenGL. Таймаут вынесен в отдельное поле

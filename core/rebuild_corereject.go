@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"singbox-launcher/internal/atomicfile"
 	"strings"
 	"sync"
 
@@ -314,15 +315,11 @@ func buildRevisionPath(configPath string) string {
 func writeBuildRevision(configPath string, data []byte) error {
 	sum := sha256.Sum256(data)
 	path := buildRevisionPath(configPath)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(hex.EncodeToString(sum[:])), platform.DefaultFileMode); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	// Through the shared atomic writer, like the config it describes. This marker's whole
+	// job is to be TRUSTWORTHY about the config's content, so a marker that can be left
+	// half-written — or blended with a concurrent writer's — defeats its own purpose: a
+	// torn digest matches nothing and reports the config as unverifiable.
+	return atomicfile.Write(path, []byte(hex.EncodeToString(sum[:])), platform.DefaultFileMode)
 }
 
 // readBuildRevision returns the recorded digest, or "" when none was recorded.

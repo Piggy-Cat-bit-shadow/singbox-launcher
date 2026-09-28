@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"singbox-launcher/internal/atomicfile"
 	"sort"
 	"strings"
 	"sync"
@@ -136,12 +137,11 @@ func (r *RemoteRegistry) saveLocked(list []RemoteDaemon) error {
 	}
 	// Атомарно: tmp + rename, иначе обрыв записи оставит битый JSON и
 	// пользователь потеряет ВСЕ сопряжения разом.
-	tmp := r.path() + ".tmp"
-	if err := os.WriteFile(tmp, raw, platform.DefaultFileMode); err != nil {
+	// The comment above says an interrupted write must not cost the user EVERY pairing at
+	// once — which is exactly what a fixed staging name allows: two writers share `.tmp`,
+	// interleave, and the rename that lands carries a blend of both registries.
+	if err := atomicfile.Write(r.path(), raw, platform.DefaultFileMode); err != nil {
 		return fmt.Errorf("remote registry: write: %w", err)
-	}
-	if err := os.Rename(tmp, r.path()); err != nil {
-		return fmt.Errorf("remote registry: rename: %w", err)
 	}
 	return nil
 }
@@ -391,12 +391,8 @@ func (r *RemoteRegistry) CopyProfileFrom(srcID, dstID string) error {
 		return fmt.Errorf("remote profile copy: mkdir %s: %w", dstDir, err)
 	}
 	dstPath := platform.GetWizardStatePathFor(r.dataDir, constants.ConfigTargetRemote, dstID)
-	tmp := dstPath + ".tmp"
-	if err := os.WriteFile(tmp, patched, platform.DefaultFileMode); err != nil {
+	if err := atomicfile.Write(dstPath, patched, platform.DefaultFileMode); err != nil {
 		return fmt.Errorf("remote profile copy: write: %w", err)
-	}
-	if err := os.Rename(tmp, dstPath); err != nil {
-		return fmt.Errorf("remote profile copy: rename: %w", err)
 	}
 	debuglog.InfoLog("remote profile copy: %q → %q (%d bytes, retargeted to %s/%s)",
 		srcID, dstID, len(patched), dst.Target().GOOS, dst.Target().GOARCH)

@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singbox-launcher/internal/atomicfile"
 	"strings"
 	"time"
 	"unsafe"
@@ -915,23 +916,15 @@ func extractDLLs(zipPath, destDir string) ([]string, error) {
 				return err
 			}
 			defer src.Close() //nolint:errcheck // read-only entry
-			tmpPath := filepath.Join(destDir, base+".tmp")
-			dst, err := os.Create(tmpPath)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(dst, src); err != nil {
-				_ = dst.Close()
-				_ = os.Remove(tmpPath)
-				return err
-			}
-			if err := dst.Close(); err != nil {
-				_ = os.Remove(tmpPath)
-				return err
-			}
+			// Staged through the shared writer: a unique sibling temp, then a rename over
+			// the existing DLL. The previous version removed the destination FIRST and
+			// then renamed, leaving a window in which the DLL did not exist — and these
+			// are the very DLLs Mesa loads, so a concurrent load during that window fails.
 			finalPath := filepath.Join(destDir, base)
-			_ = os.Remove(finalPath)
-			return os.Rename(tmpPath, finalPath)
+			return atomicfile.WriteWith(finalPath, DefaultFileMode, func(w io.Writer) error {
+				_, cerr := io.Copy(w, src)
+				return cerr
+			})
 		}(); err != nil {
 			return names, fmt.Errorf("%s: %w", base, err)
 		}

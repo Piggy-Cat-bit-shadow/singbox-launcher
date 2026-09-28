@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"singbox-launcher/internal/atomicfile"
 	"strings"
 	"time"
 
@@ -112,45 +113,32 @@ func DownloadSRS(ctx context.Context, url string, destPath string) error {
 		return fmt.Errorf("DownloadSRS: HTTP %d", resp.StatusCode)
 	}
 
-	// Пишем во временный файл, затем переименовываем атомарно
-	dir := filepath.Dir(destPath)
-	if err := os.MkdirAll(dir, platform.DefaultDirMode); err != nil {
-		return fmt.Errorf("DownloadSRS: failed to create directory: %w", err)
-	}
-
-	tmpPath := destPath + ".tmp"
-	destFile, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("DownloadSRS: failed to create file: %w", err)
-	}
-
-	// defer гарантирует закрытие файла и удаление tmp при любом выходе (включая панику)
-	closed := false
-	defer func() {
-		if !closed {
-			_ = destFile.Close()
+	// Staged and renamed through the shared atomic writer.
+	//
+	// The local version used a FIXED `destPath + ".tmp"`. Two rule-set downloads racing
+	// on the same destination — a refresh overlapping a manual retry is enough — shared
+	// that staging file, interleaved their bodies, and the rename that landed produced a
+	// rule-set that is the concatenation of two different downloads. sing-box then fails
+	// to parse it, and the failure surfaces as "the core rejects my config" rather than
+	// as the download that caused it.
+	//
+	// `WriteWith` streams, so the body is never held in memory, and it removes the staging
+	// file on every failure path — including a cancelled context, which the local version
+	// had to check for explicitly.
+	var written int64
+	err = atomicfile.WriteWith(destPath, platform.DefaultFileMode, func(w io.Writer) error {
+		// The context is checked before the copy rather than during it, matching the
+		// previous behaviour: the HTTP request itself carries the timeout, so a stalled
+		// body is already bounded by the client.
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	written, err := io.Copy(destFile, resp.Body)
+		n, cerr := io.Copy(w, resp.Body)
+		written = n
+		return cerr
+	})
 	if err != nil {
-		return fmt.Errorf("DownloadSRS: write error: %w", err)
-	}
-
-	if err := destFile.Close(); err != nil {
-		return fmt.Errorf("DownloadSRS: failed to close file: %w", err)
-	}
-	closed = true
-
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		return fmt.Errorf("DownloadSRS: failed to save file: %w", err)
+		return fmt.Errorf("DownloadSRS: %w", err)
 	}
 
 	debuglog.DebugLog("DownloadSRS: downloaded %d bytes to %s", written, destPath)
