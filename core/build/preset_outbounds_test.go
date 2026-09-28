@@ -160,7 +160,16 @@ func TestClean_DanglingFallback(t *testing.T) {
 	}
 }
 
-func TestClean_DanglingDropWhenNoFallback(t *testing.T) {
+// A dangling outbound with no usable fallback must FAIL the build, not silently
+// delete the user's rule.
+//
+// The old behaviour dropped the rule and logged a warning. That quietly rerouted
+// traffic the user had deliberately directed at one outbound — "bank.com via
+// ru-out" simply stopped applying and fell through to route.final — with nothing
+// in the UI to say so. It also contradicted this project's own fail-closed rule
+// for a dangling `detour`, which drops the node instead of silently rerouting.
+// Failing names the offending rule so it can actually be fixed.
+func TestClean_DanglingWithoutFallbackFailsTheBuild(t *testing.T) {
 	routeRaw := json.RawMessage(`{
 		"rules": [
 			{"domain": "example.com", "outbound": "missing"},
@@ -168,15 +177,17 @@ func TestClean_DanglingDropWhenNoFallback(t *testing.T) {
 		]
 	}`)
 	finalTags := map[string]bool{"direct-out": true}
-	out, warns, _ := CleanDanglingOutboundsInRouteRules(routeRaw, finalTags, "")
-	if len(warns) != 1 || !strings.Contains(warns[0], "rule dropped") {
-		t.Fatalf("expected drop warning, got %v", warns)
+	out, _, err := CleanDanglingOutboundsInRouteRules(routeRaw, finalTags, "")
+	if err == nil {
+		t.Fatalf("expected a build error for an unresolvable dangling outbound, got rule %s", string(out))
 	}
-	var got map[string]interface{}
-	_ = json.Unmarshal(out, &got)
-	rules := got["rules"].([]interface{})
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule kept (only good one), got %d", len(rules))
+	// The message must locate the rule: an error the user cannot act on is only
+	// marginally better than the silent drop it replaced.
+	if !strings.Contains(err.Error(), "example.com") && !strings.Contains(err.Error(), "route.rules[0]") {
+		t.Errorf("the error must name the offending rule, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("the error must name the dangling tag, got: %v", err)
 	}
 }
 

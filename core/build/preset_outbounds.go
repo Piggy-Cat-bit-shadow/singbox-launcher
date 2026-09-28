@@ -290,24 +290,15 @@ func CleanDanglingOutboundsInRouteRules(routeRaw json.RawMessage, finalTags map[
 	}
 
 	var warnings []string
-	kept := make([]interface{}, 0, len(rulesRaw))
-	for _, item := range rulesRaw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			// Не-объект rule — пропускаем как есть (defensive).
-			kept = append(kept, item)
-			continue
-		}
-		cleaned, drop, warn := cleanDanglingOutboundRefInRule(m, finalTags, fallback)
-		if warn != "" {
-			warnings = append(warnings, warn)
-		}
-		if !drop {
-			kept = append(kept, cleaned)
-		}
+	// Recursive: logical rules nest arbitrarily, and a dangling target one level
+	// down was previously invisible to both this cleaner and the validator — the
+	// incident class surviving one nesting level deeper.
+	cleanedRules, err := cleanRuleList(rulesRaw, "route.rules", finalTags, fallback, &warnings)
+	if err != nil {
+		return nil, warnings, err
 	}
-	if len(kept) > 0 {
-		route["rules"] = kept
+	if len(cleanedRules) > 0 {
+		route["rules"] = cleanedRules
 	} else {
 		delete(route, "rules")
 	}
@@ -319,43 +310,92 @@ func CleanDanglingOutboundsInRouteRules(routeRaw json.RawMessage, finalTags map[
 	return out, warnings, nil
 }
 
-// cleanDanglingOutboundRefInRule — per-rule cleanup. Возвращает:
-//   - (rule, false, "")            — rule keep'ается без изменений (no outbound,
-//     sentinel, или outbound ∈ finalTags)
-//   - (clonedRule, false, warning) — rule keep'ается, outbound подменён на fallback
-//   - (nil, true, warning)         — rule drop'ается (fallback пуст или сам dangling)
+// cleanRuleList — рекурсивная очистка списка правил (включая logical-подправила).
+//
+// Возвращает очищенный список; warning'и копятся в *warnings.
+func cleanRuleList(rules []interface{}, path string, finalTags map[string]bool, fallback string, warnings *[]string) ([]interface{}, error) {
+	kept := make([]interface{}, 0, len(rules))
+	for i, item := range rules {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			// Не-объект rule — пропускаем как есть (defensive).
+			kept = append(kept, item)
+			continue
+		}
+		rulePath := fmt.Sprintf("%s[%d]", path, i)
+		cleaned, err := cleanDanglingOutboundRefInRule(m, rulePath, finalTags, fallback, warnings)
+		if err != nil {
+			return nil, err
+		}
+		// Recurse into logical sub-rules, preserving any rewrite of the parent.
+		if sub, ok := cleaned["rules"].([]interface{}); ok {
+			subCleaned, err := cleanRuleList(sub, rulePath+".rules", finalTags, fallback, warnings)
+			if err != nil {
+				return nil, err
+			}
+			cleaned = cloneRule(cleaned)
+			cleaned["rules"] = subCleaned
+		}
+		kept = append(kept, cleaned)
+	}
+	return kept, nil
+}
+
+// cleanDanglingOutboundRefInRule — per-rule cleanup.
+//
+// Returns the rule to keep, or an error when the rule cannot be made valid.
+//
+// A dangling target with NO valid fallback used to DROP the rule and log a
+// warning. That silently deleted a routing decision the user had made — traffic
+// meant for one outbound quietly fell through to route.final instead — and it
+// contradicted the project's own fail-closed policy for a dangling `detour`,
+// which drops the node rather than silently rerouting it. A warning in a log is
+// not informed consent, so the situation is now a build error the user can act
+// on, exactly like an unrepairable route.final.
 //
 // Pure: не мутирует rule на месте — clone'ит когда нужно подменить outbound.
-func cleanDanglingOutboundRefInRule(rule map[string]interface{}, finalTags map[string]bool, fallback string) (map[string]interface{}, bool, string) {
+func cleanDanglingOutboundRefInRule(rule map[string]interface{}, path string, finalTags map[string]bool, fallback string, warnings *[]string) (map[string]interface{}, error) {
 	outRaw, has := rule["outbound"]
 	if !has {
-		return rule, false, "" // action-based rule (reject/block через "action") — не трогаем
+		return rule, nil // action-based rule (reject/block через "action") — не трогаем
 	}
 	outStr, _ := outRaw.(string)
 	if outStr == "" {
-		return rule, false, ""
+		return rule, nil
 	}
 	if outboundSentinelLiterals[outStr] {
-		return rule, false, "" // reject/block/direct/dns-out literal — преобразуется upstream
+		return rule, nil // reject/block/direct/dns-out literal — преобразуется upstream
 	}
 	if finalTags[outStr] {
-		return rule, false, "" // valid
+		return rule, nil // valid
 	}
 
 	// Dangling. Подменяем на fallback если он сам валидный.
 	if fallback != "" && finalTags[fallback] {
-		cloned := make(map[string]interface{}, len(rule))
-		for k, v := range rule {
-			cloned[k] = v
+		warn := fmt.Sprintf(
+			"%s: dangling outbound %q → replaced with fallback %q",
+			path, outStr, fallback)
+		if warnings != nil {
+			*warnings = append(*warnings, warn)
 		}
+		cloned := cloneRule(rule)
 		cloned["outbound"] = fallback
-		return cloned, false, fmt.Sprintf(
-			"route.rules: dangling outbound %q → replaced with fallback %q",
-			outStr, fallback)
+		return cloned, nil
 	}
-	return nil, true, fmt.Sprintf(
-		"route.rules: dangling outbound %q → rule dropped (no valid fallback)",
-		outStr)
+	// No fallback can stand in. Failing beats silently rerouting the user's
+	// traffic; the message names the rule so it can be found and fixed.
+	return nil, fmt.Errorf(
+		"%s targets outbound %q, which does not exist, and no valid fallback is available to replace it with",
+		path, outStr)
+}
+
+// cloneRule — поверхностная копия rule, чтобы правки не текли в исходный объект.
+func cloneRule(rule map[string]interface{}) map[string]interface{} {
+	cloned := make(map[string]interface{}, len(rule))
+	for k, v := range rule {
+		cloned[k] = v
+	}
+	return cloned
 }
 
 // collectAllFinalOutboundTags — set всех outbound-тегов, которые попадут

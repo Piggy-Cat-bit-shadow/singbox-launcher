@@ -53,6 +53,8 @@ const (
 	RefEmptyGroup RefIssueKind = "empty_group"
 	// RefDuplicateTag — two entities share a tag, so references are ambiguous.
 	RefDuplicateTag RefIssueKind = "duplicate_tag"
+	// RefReservedTag — a user tag collides with a name the core itself resolves.
+	RefReservedTag RefIssueKind = "reserved_tag"
 )
 
 // RefIssue is one broken reference, located well enough to act on.
@@ -140,6 +142,23 @@ var directTypes = map[string]bool{
 	"block":  true,
 }
 
+// reservedOutboundTags are names the core itself resolves. A user outbound must
+// not reuse one: doing so makes references ambiguous, and the failure mode is
+// silent (the core picks one meaning, the user expects the other).
+var reservedOutboundTags = map[string]bool{
+	"direct":  true,
+	"block":   true,
+	"dns-out": true,
+	"reject":  true,
+	"drop":    true,
+}
+
+// outboundsForReservedCheck returns the declared outbound list for tag checks.
+func outboundsForReservedCheck(cfg map[string]interface{}) []interface{} {
+	outbounds, _ := cfg["outbounds"].([]interface{})
+	return outbounds
+}
+
 // buildRefIndex walks the outbound list once and records its tags.
 func buildRefIndex(cfg map[string]interface{}) *refIndex {
 	idx := newRefIndex()
@@ -210,6 +229,27 @@ func ValidateConfigReferences(cfg map[string]interface{}) RefReport {
 	}
 	sort.Slice(rep.Issues, func(a, b int) bool { return rep.Issues[a].Tag < rep.Issues[b].Tag })
 
+	// A user outbound reusing a core-reserved tag silently changes what every
+	// `"outbound":"direct"` in the config means: the reference becomes ambiguous
+	// between the built-in and the user's node, and the config still validates as
+	// reference-clean. Deterministic, so it is a build error rather than a guess.
+	for i, raw := range outboundsForReservedCheck(cfg) {
+		ob, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		tag, _ := ob["tag"].(string)
+		if tag == "" {
+			continue
+		}
+		if reservedOutboundTags[tag] {
+			rep.Issues = append(rep.Issues, RefIssue{
+				Kind: RefReservedTag, Path: fmt.Sprintf("outbounds[%d]", i), Tag: tag,
+				Detail: "tag collides with a reserved outbound name built into the core, " +
+					"which makes every reference to it ambiguous",
+			})
+		}
+	}
 	// An empty group is broken regardless of whether anything points at it:
 	// sing-box refuses to load a selector/urltest with no members, and it is
 	// always a build error rather than something to repair silently.
@@ -268,6 +308,18 @@ func ValidateConfigReferences(cfg map[string]interface{}) RefReport {
 	// (lx pass-through, DNS rule_set handling) assert on other sections
 	// entirely — reporting their rule tags as dangling would reject configs that
 	// are not what this check is for.
+	// Inbound tags: `route.rules[*].inbound` names one, and template #if branches
+	// can drop an inbound, so it is a genuinely removable target.
+	inboundTags := map[string]bool{}
+	if inbounds, ok := cfg["inbounds"].([]interface{}); ok {
+		for _, raw := range inbounds {
+			if inb, ok := raw.(map[string]interface{}); ok {
+				if tag, ok := inb["tag"].(string); ok && tag != "" {
+					inboundTags[tag] = true
+				}
+			}
+		}
+	}
 	if route, ok := cfg["route"].(map[string]interface{}); ok {
 		if final, ok := route["final"].(string); ok && final != "" {
 			// Only a problem when outbounds exist to point AT. With none, the
@@ -279,22 +331,14 @@ func ValidateConfigReferences(cfg map[string]interface{}) RefReport {
 				})
 			}
 		}
+		// Rules are a TREE, not a flat list: {"type":"logical","rules":[...]} nests
+		// arbitrarily, and this repo generates such rules. Iterating only the top
+		// level meant a dangling `outbound` one level down was invisible to every
+		// check the launcher had — the same defect class as the original incident,
+		// just one nesting level deeper.
 		rules, _ := route["rules"].([]interface{})
 		for i, raw := range rules {
-			rule, ok := raw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if ob, ok := rule["outbound"].(string); ok && ob != "" && idx.count > 0 {
-				if !idx.defined[ob] {
-					rep.Issues = append(rep.Issues, RefIssue{
-						Kind: RefMissingTarget, Path: fmt.Sprintf("route.rules[%d].outbound", i), Tag: ob,
-						Detail: "the rule targets an outbound that does not exist",
-					})
-				}
-			}
-			// rule_set references must resolve to a declared rule_set tag.
-			// Checked in checkRuleSets, which needs the rule_set list.
+			walkRuleRefs(raw, fmt.Sprintf("route.rules[%d]", i), idx, inboundTags, cfg, &rep)
 		}
 	}
 
@@ -313,7 +357,9 @@ func ValidateConfigReferences(cfg map[string]interface{}) RefReport {
 			rep.Issues = append(rep.Issues, checkDetour(srv, fmt.Sprintf("dns.servers[%d]", i), idx)...)
 		}
 		if final, ok := dns["final"].(string); ok && final != "" {
-			if !serverTags[final] {
+			// Mirrors route.final: only meaningful when DNS servers are declared
+			// at all. A minimal template may name a final with no server list.
+			if !serverTags[final] && len(serverTags) > 0 {
 				rep.Issues = append(rep.Issues, RefIssue{
 					Kind: RefMissingTarget, Path: "dns.final", Tag: final,
 					Detail: "the final DNS server does not exist",
@@ -322,19 +368,8 @@ func ValidateConfigReferences(cfg map[string]interface{}) RefReport {
 		}
 		dnsRules, _ := dns["rules"].([]interface{})
 		for i, raw := range dnsRules {
-			rule, ok := raw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if srv, ok := rule["server"].(string); ok && srv != "" {
-				if !serverTags[srv] {
-					rep.Issues = append(rep.Issues, RefIssue{
-						Kind: RefMissingTarget, Path: fmt.Sprintf("dns.rules[%d].server", i), Tag: srv,
-						Detail: "the DNS rule targets a server that does not exist",
-					})
-				}
-			}
-			rep.Issues = append(rep.Issues, checkRuleSetRefs(rule, fmt.Sprintf("dns.rules[%d]", i), cfg)...)
+			path := fmt.Sprintf("dns.rules[%d]", i)
+			walkDNSRuleRefs(raw, path, serverTags, cfg, &rep)
 		}
 		// Second pass: `domain_resolver` names a SERVER tag, and server tags are
 		// only fully known once the loop above has seen them all. Doing it inline
@@ -362,6 +397,77 @@ func ValidateConfigReferences(cfg map[string]interface{}) RefReport {
 		}
 	}
 	return rep
+}
+
+// isSentinelOutbound reports whether tag is one of the literals sing-box resolves
+// without a matching outbound declaration.
+//
+// This MUST be the same predicate the cleaner uses (outboundSentinelLiterals).
+// The two halves of the build previously disagreed: the cleaner deliberately
+// left `"outbound":"direct"` alone as a legal literal, while the validator had no
+// sentinel concept and rejected it — so a config the core accepts failed to
+// build, and the failure looked like a dangling reference.
+func isSentinelOutbound(tag string) bool {
+	return outboundSentinelLiterals[tag]
+}
+
+// walkRuleRefs validates every tag reference in a route rule, recursing into
+// logical sub-rules.
+//
+// A rule body is a tree: {"type":"logical","mode":"or","rules":[...]} nests
+// arbitrarily. Checking only the top level is what let a dangling target hide one
+// level down, so the walk is the single place rule references are understood.
+func walkRuleRefs(raw interface{}, path string, idx *refIndex, inboundTags map[string]bool, cfg map[string]interface{}, rep *RefReport) {
+	rule, ok := raw.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if ob, ok := rule["outbound"].(string); ok && ob != "" && idx.count > 0 {
+		if !idx.defined[ob] && !isSentinelOutbound(ob) {
+			rep.Issues = append(rep.Issues, RefIssue{
+				Kind: RefMissingTarget, Path: path + ".outbound", Tag: ob,
+				Detail: "the rule targets an outbound that does not exist",
+			})
+		}
+	}
+	if inb, ok := rule["inbound"].(string); ok && inb != "" && len(inboundTags) > 0 {
+		if !inboundTags[inb] {
+			rep.Issues = append(rep.Issues, RefIssue{
+				Kind: RefMissingTarget, Path: path + ".inbound", Tag: inb,
+				Detail: "the rule targets an inbound that does not exist",
+			})
+		}
+	}
+	rep.Issues = append(rep.Issues, checkRuleSetRefs(rule, path, cfg)...)
+	// Nested logical rules.
+	if sub, ok := rule["rules"].([]interface{}); ok {
+		for j, child := range sub {
+			walkRuleRefs(child, fmt.Sprintf("%s.rules[%d]", path, j), idx, inboundTags, cfg, rep)
+		}
+	}
+}
+
+// walkDNSRuleRefs is walkRuleRefs for DNS rules: same tree shape, but targets are
+// DNS server tags rather than outbounds.
+func walkDNSRuleRefs(raw interface{}, path string, serverTags map[string]bool, cfg map[string]interface{}, rep *RefReport) {
+	rule, ok := raw.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if srv, ok := rule["server"].(string); ok && srv != "" {
+		if !serverTags[srv] {
+			rep.Issues = append(rep.Issues, RefIssue{
+				Kind: RefMissingTarget, Path: path + ".server", Tag: srv,
+				Detail: "the DNS rule targets a server that does not exist",
+			})
+		}
+	}
+	rep.Issues = append(rep.Issues, checkRuleSetRefs(rule, path, cfg)...)
+	if sub, ok := rule["rules"].([]interface{}); ok {
+		for j, child := range sub {
+			walkDNSRuleRefs(child, fmt.Sprintf("%s.rules[%d]", path, j), serverTags, cfg, rep)
+		}
+	}
 }
 
 // checkDetour validates an outbound-valued `detour` reference.
