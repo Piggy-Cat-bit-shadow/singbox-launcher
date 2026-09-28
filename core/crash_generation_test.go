@@ -220,3 +220,121 @@ func TestRevisionMarkerIsStableAcrossRereads(t *testing.T) {
 		t.Fatalf("a freshly recorded config reported stale=%v known=%v", stale, known)
 	}
 }
+
+// --- R: an unreadable config must not silently start unprivileged ----------
+
+// TestConfigHasTunParseFailureDoesNotStartUnprivileged is claim R.
+//
+// The TUN probe's failure branch logged a warning and set `hasTun = false`, which
+// silently chose the UNPRIVILEGED launch path. If the config does contain a TUN
+// inbound — exactly the case where the probe could not run — the core starts
+// without the privileges it needs and fails in a way that points nowhere near the
+// cause, or appears to start and does not route.
+//
+// "I could not tell" is not "there is no TUN".
+func TestConfigHasTunParseFailureDoesNotStartUnprivileged(t *testing.T) {
+	src := stripCommentsForTest(readCoreSource(t, "core/process_service.go"))
+
+	// The PRIVILEGE decision is the one that matters: `hasTun` here selects the
+	// privileged launch. There is a second ConfigHasTun call used only to choose
+	// which LOG FILE to read, where the safe default is the user log — that one is
+	// not a privilege decision and is deliberately left alone.
+	// Anchored on CODE, not on a comment: the strip above removes comments, so a
+	// comment-based anchor would silently stop matching. The privilege decision is
+	// the one guarded by the darwin check; the other ConfigHasTun call site sits
+	// earlier in the file and merely picks a log file, so a bare search would find
+	// the wrong one — which is exactly what happened when this test was first
+	// written, and it reported a false failure against correct code.
+	const anchor = `runtime.GOOS == "darwin"`
+	base := strings.Index(src, anchor)
+	if base < 0 {
+		t.Fatal("the darwin privilege decision is gone; this test needs updating")
+	}
+	// NOTE THE OFFSET ARITHMETIC. Index returns a position relative to the slice
+	// it was given, so the base has to be added back. Omitting it does not fail
+	// loudly — it silently searches a window near the START of the file, which is
+	// how the first version of this test reported a false failure against code that
+	// was already correct.
+	rel := strings.Index(src[base:], "hasTun, err := config.ConfigHasTun(")
+	if rel < 0 {
+		t.Fatal("the privilege-deciding TUN probe is gone; this test needs updating")
+	}
+	idx := base + rel
+	end := idx + 2500
+	if end > len(src) {
+		end = len(src)
+	}
+	branch := src[idx:end]
+
+	if strings.Contains(branch, "hasTun = false") {
+		t.Error("the TUN probe's FAILURE path still sets hasTun = false, so an " +
+			"unreadable config is treated as \"no TUN\" and the core is launched " +
+			"without the privileges it may need")
+	}
+	if !strings.Contains(branch, "NewPreconditionRefusal") {
+		t.Error("the TUN probe's failure path does not refuse; it must fail closed with " +
+			"a structured reason rather than guessing")
+	}
+}
+
+// TestTunProbeFailureReachesTheFrontend — the refusal must be structured, so the
+// headless frontend learns the reason rather than seeing a start that did nothing.
+func TestTunProbeFailureReachesTheFrontend(t *testing.T) {
+	refusal := NewPreconditionRefusal(
+		StartErrConfigRebuildFailed,
+		"the configuration could not be read, so the launcher cannot tell whether it needs TUN privileges",
+		true, false, nil)
+
+	if refusal.Code != StartErrConfigRebuildFailed {
+		t.Fatalf("code = %q", refusal.Code)
+	}
+	if refusal.Message == "" {
+		t.Fatal("the refusal carries no message, so the user is told nothing")
+	}
+	if !refusal.Recoverable {
+		t.Fatal("an unreadable config is fixable by fixing the config, so it is recoverable")
+	}
+}
+
+// readCoreSource reads a repository file relative to the module root.
+func readCoreSource(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", rel))
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", rel, err)
+	}
+	return string(b)
+}
+
+// stripCommentsForTest removes Go comments so a source-shape assertion cannot be
+// satisfied by an explanatory comment (this happened once during development).
+func stripCommentsForTest(src string) string {
+	var out strings.Builder
+	lines := strings.Split(src, "\n")
+	inBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if inBlock {
+			if idx := strings.Index(line, "*/"); idx >= 0 {
+				line = line[idx+2:]
+				inBlock = false
+			} else {
+				continue
+			}
+		}
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if idx := strings.Index(line, "/*"); idx >= 0 {
+			if end := strings.Index(line[idx:], "*/"); end >= 0 {
+				line = line[:idx] + line[idx+end+2:]
+			} else {
+				line = line[:idx]
+				inBlock = true
+			}
+		}
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+	return out.String()
+}

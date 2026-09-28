@@ -350,6 +350,61 @@ them.
 
 ---
 
+## 7a. Third pass — adversarial re-audit of the state machine
+
+The second pass concluded that lifecycle paths were sound. That conclusion was too
+generous, and the way it was wrong is worth recording: the state machine's own
+bookkeeping was correct, but the **invariant failed at the boundaries it does not
+own** — process ownership, the running-state belief, and the runtime transitions it
+consumes.
+
+An adversarial pass was run against the shipped code with the instruction to
+disprove it. It found five real defects, all reproduced from the source before
+being fixed, each now pinned by a test that fails when the fix is reverted:
+
+1. **An engine released a live core.** `SwitchBackendMode` required
+   `!RunningState.IsRunning()`, which reads like "no core is running" and is not:
+   the crash path clears that flag when the exit is OBSERVED, and a process can
+   outlive the observation. `Close()` then only renewed the generation —
+   bookkeeping — so switching after a crash left a live classic core holding the
+   TUN while the daemon's core started beside it. Two engines, one VPN.
+2. **A retired backend repaired the config it no longer owned.**
+   `retryAfterCoreFatal` called `retryCoreReject` — which persists a node as
+   disabled — before checking `isActive()`, so a status frame arriving after an
+   engine switch still removed a node from the user's working set.
+3. **A stop trusted a single event.** `Running == false` is produced by a user
+   stop, a restart's teardown and a crash, and they need opposite responses. A
+   stop superseded by a restart was settled as SUCCESS moments before the restart
+   spawned a fresh core.
+4. **The reported state could say `stopped` for a running VPN.**
+   `coreLifecycleState` decided from a phase that does not describe whether a
+   *process* exists; an adopted root core records ownership without passing
+   through a start operation, so the UI drew a clean Start button over an actively
+   routed machine.
+5. **A classification read another generation's log window.** Every sibling
+   callback takes its generation as a parameter; `classifyCoreExitReason` looked up
+   the current one, so a monitor winning a race against a renew could classify a
+   transient crash as a deterministic failure — which stops auto-restart.
+
+A sixth finding was in the fixes themselves: the runtime transition began carrying
+its reason, which exposed that `RunningState.Set` dedups a no-op write. A stop
+completing while the flag was already false published no event, so the operation
+sat at `stopping` forever. Stressing the existing stop tests showed 13 failures in
+30 runs. A successful contextual stop now settles its own operation.
+
+Two lessons the pass made concrete:
+
+- **A test that cannot distinguish the bug from the fix is not a test.** The first
+  version of the engine-abandonment test passed against the broken code, because a
+  fresh controller's generation is 0 and re-reading it happened to agree with the
+  argument. It became evidence only once the fixture made the two values differ.
+- **Substituting the wrong fake proves nothing.** The acceptance tests for the
+  original "Start reports success while nothing has spawned" defect replaced
+  `runCoreOp`'s closure, which shows only that `runCoreOp` awaits what it is given.
+  The actual bug was that the production closure returned immediately. They now
+  drive the real chain — `Backend.StartCore` → `AppController.StartVPNContext` →
+  `LegacyBackend` → the process operation — and fake only the process step.
+
 ## 8. Test strategy
 
 Every new test is deterministic: no public network, no real sing-box, no real
@@ -362,6 +417,9 @@ VPN, nothing that depends on machine speed.
 | Generation/ownership assertions | supersession, stale watchers, handover |
 | Fake daemon server | daemon FATAL, apply, stop |
 | Go tests reading Swift sources | pending lifecycle, error-code coverage |
+| Real call chain + faked process op | "Start awaits a real commit", refusal propagation, timeout reaching the work |
+| Cancel-injection at every boundary | `acquireWithContext` ownership (300 iterations each, under `-race`) |
+| In-process HTTP fixture | fallback identity proof (empty proof refused, members compared) |
 
 The last row deserves a note. There is no XCTest harness in this environment, so
 Swift invariants are enforced from the Go side by reading the Swift sources: a

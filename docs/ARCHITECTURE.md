@@ -229,7 +229,7 @@ bus.Publish(events.Event{Kind: events.ConfigBuilt, Payload: events.ConfigBuiltPa
 
 | Event | Payload | Publisher(s) | Subscriber(s) | Status |
 |-------|---------|--------------|---------------|--------|
-| **VpnStateChanged** | `VpnStateChangedPayload` | `core/controller.go` (on `RunningState.Set` running-bool transition) | `core/auto_update.go:71` (retry failed sources), `backend/service/backend.go` (**the menu bar backend**: republishes the core state to the SwiftUI frontend and starts/stops the traffic sampler) | **Wired on macOS** — the backend subscribes here rather than only emitting after a command, so the menu bar follows the core when it dies on its own. |
+| **VpnStateChanged** | `VpnStateChangedPayload{Running, Teardown}` | `core/controller.go` (on `RunningState.Set` running-bool transition; `Teardown` says WHY when it went false) | `core/auto_update.go:71` (retry failed sources), `backend/service/backend.go` (**the menu bar backend**: republishes the core state to the SwiftUI frontend and starts/stops the traffic sampler) | **Wired on macOS** — the backend subscribes here rather than only emitting after a command, so the menu bar follows the core when it dies on its own. |
 | **ConfigBuilt** | `ConfigBuiltPayload{OK bool}` | `core/rebuild.go:188` (OK=false on check failure), `core/rebuild.go:221` (OK=true on successful write+validate) | **none** | **Dead-subscribe** — published, never consumed via the bus. Config-status UI is currently driven by the `UpdateConfigStatusFunc` callback instead. |
 | **StateChanged** | `StateChangedPayload` | `core/services/state_service.go:207` (dirty-marker mutations), `ui/configurator/presentation/presenter_save.go:174` (on Configurator Save) | **none** | **Dead-subscribe** — published, never consumed via the bus. |
 
@@ -606,9 +606,27 @@ stopped ──beginOperation──▶ starting ──readiness window survived�
   write, so a superseded goroutine cannot change the phase, clear ownership or
   touch the crash counter. `beginOperation` refuses a start while one is in
   flight — concurrent starts are impossible by construction.
+- **A generation is a PARAMETER, never a lookup.** A handler that reads
+  `currentGeneration()` and then checks `isCurrent()` on that same value has a
+  guard that is true by construction and can never fire; this exact tautology
+  existed in `onPrivilegedScriptExited` and let a dead generation write ownership
+  and phase for the live one. Callbacks take the generation they belong to.
+- **Crash classification is scoped to its own generation.** The core log is
+  append-only across generations, so a fatal signature from a previous core could
+  be read as the current exit's cause and stop auto-restart for an unrelated
+  transient crash. Each generation records the log offset at start, and
+  classification reads only what follows.
 - **Readiness.** `exec.Start` succeeding means a process exists, not that the VPN
   is up. The phase stays `starting` until the process survives a bounded window;
   a death inside it is a failed START with a classified reason, not a crash.
+- **A timeout must be able to interrupt the wait it is timing.** The operation
+  deadline bounded nothing while the waits that actually take the time — the
+  template refresh, `CmdMutex`, the daemon's `applyMu`, and the daemon RPCs
+  themselves — could not be cancelled. `acquireWithContext` provides a
+  cancellable mutex acquisition; ownership is decided by a single buffered send so
+  there is no window where both sides wait and none where neither releases. Go
+  treats `sync: unlock of unlocked mutex` as an unrecoverable `fatal error`, so
+  the helper is tested directly under `-race` rather than argued about.
 - **No `defer Unlock` where a lock is released mid-body.** `Monitor` and
   `onPrivilegedScriptExited` release `CmdMutex` before a delay and then re-acquire
   it. Mixing that with a deferred `Unlock` produced an unrecoverable
@@ -622,6 +640,49 @@ stopped ──beginOperation──▶ starting ──readiness window survived�
 - **Adoption.** A core inherited from a previous session is not a child, so
   `watchAdoptedCore` polls its existence (identity-verified) and corrects the
   state on death. Adoption refuses a PID whose executable cannot be verified.
+
+### 6.3a-bis Operation state machine (`backend/service/core_operation.go`)
+
+The IPC layer records an in-flight start/stop/restart as an explicit operation
+rather than inferring one from a boolean plus a kind string plus a late callback.
+
+- **The invariant is "an old operation has no authority over the new world".**
+  Every operation carries an id; `finishOp` compares it against the current record
+  and a mismatch is a TOTAL no-op — it cannot reach the error store or publish
+  state. `beginOp` marks the outgoing operation superseded *and* cancels its
+  context under the same lock, so the flag and the cancel are both visible before
+  the new record is.
+- **Waiting is not succeeding.** `runCoreOp` returns the real outcome, and the UI
+  shows `starting` from the moment the request is accepted (the accepted-request
+  record covers the window before the runtime records anything).
+- **An operation must reach a terminal state without depending on one event.**
+  A stop is settled by the runtime transition *or* by its own contextual call
+  returning success. `RunningState.Set` dedups a no-op write, so a stop completing
+  while the flag is already false publishes no event at all; depending on that
+  event alone left the record at `stopping` forever.
+- **A transition carries WHY it happened.** `Running == false` is produced by a
+  user stop, a restart's teardown, a crash and an engine switch, and they need
+  opposite responses. `VpnStateChangedPayload.Teardown` distinguishes them, and
+  only a deliberate user stop ends a stop operation: a restart's teardown reported
+  as a completed stop was confirmed moments before a new core appeared.
+
+### 6.3a-ter Ownership is the source of truth for liveness
+(`core/classic_runtime.go`, `backend/service/backend.go`)
+
+`RunningState` is a BELIEF updated at transitions and can be false while a process
+is alive (the crash path clears it as soon as an exit is observed, and a process
+can outlive that observation). Ownership — the record of what this launcher
+launched and has not confirmed dead — is the honest answer to "is a core of ours
+running", and two things depend on it:
+
+- the reported lifecycle state consults ownership, so a live owned core is never
+  reported as `stopped` (the phase is not a statement about processes existing: an
+  adopted root core records its identity without passing through any start
+  operation);
+- closing an engine stops what it still owns before renewing the generation.
+  Renewing only invalidates bookkeeping and kills nothing, so an engine switch
+  after a crash could otherwise leave a live core holding the TUN while the new
+  engine's core started beside it.
 
 ### 6.3b Lifecycle errors (`core/lifecycle_error.go`)
 
