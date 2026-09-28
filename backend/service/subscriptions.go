@@ -239,6 +239,8 @@ func (b *Backend) AddSubscription(name, url string) (protocol.SubscriptionDTO, e
 		return protocol.SubscriptionDTO{}, err
 	}
 
+	// UI-30.
+	//
 	// Adding a source changes the BUILD INPUTS exactly as removing one does: the
 	// materialised config no longer matches what the tree would produce, so the
 	// cached config is stale and the user must be offered a reload.

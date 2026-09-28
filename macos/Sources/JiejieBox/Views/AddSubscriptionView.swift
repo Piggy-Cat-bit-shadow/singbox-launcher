@@ -51,6 +51,9 @@ struct AddSubscriptionView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canAdd)
 
+                    // UI-44: this used to promise a first fetch that never
+                    // happens. Adding a subscription only writes it to the list;
+                    // the copy now says so and names the action that fetches.
                     Text(L.subscriptionSavedNotYetFetched.tr(language))
                         .font(Typography.rowSubtitle)
                         .foregroundStyle(.secondary)
