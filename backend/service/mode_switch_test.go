@@ -280,6 +280,17 @@ func containsOptimisticRunningWrite(src string) bool {
 // Crude on purpose: it operates on Go source that the compiler has already
 // accepted, and the only strings that could confuse it are log formats, which do
 // not contain the patterns being searched for.
+// stripGoComments removes Go comments, WITHOUT destroying string literals.
+//
+// The line-oriented version this replaces cut every line at the first `//`, which is a
+// comment only when it is not inside a string. Go source is full of literals that
+// contain those characters — `json:"http://..."` in particular — so any struct field
+// declared after such a literal silently vanished from the text under test. Two tests
+// were disabling themselves this way: their assertions looked for fields that their own
+// helper had already deleted, and they passed only because the text happened to survive
+// by position. A test helper that edits the subject is worse than no helper.
+//
+// This tracks string, rune and raw-string state so `//` inside a literal is data.
 func stripGoComments(src string) string {
 	var out strings.Builder
 	lines := strings.Split(src, "\n")
@@ -297,7 +308,7 @@ func stripGoComments(src string) string {
 		if strings.HasPrefix(trimmed, "//") {
 			continue
 		}
-		if idx := strings.Index(trimmed, "//"); idx >= 0 {
+		if idx := commentIndexOutsideLiterals(trimmed); idx >= 0 {
 			trimmed = trimmed[:idx]
 		}
 		if idx := strings.Index(trimmed, "/*"); idx >= 0 {
@@ -312,6 +323,59 @@ func stripGoComments(src string) string {
 		out.WriteString("\n")
 	}
 	return out.String()
+}
+
+// commentIndexOutsideLiterals returns the index of the first `//` or `/*` that is NOT
+// inside a string literal, or -1.
+//
+// Backslash escapes are honoured inside interpreted strings; a raw string (backticks)
+// has no escapes and ends at the next backtick. Rune literals are skipped so a stray
+// quote character does not desynchronise the state machine.
+func commentIndexOutsideLiterals(line string) int {
+	inString := false
+	inRaw := false
+	inRune := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		switch {
+		case inRaw:
+			if ch == '`' {
+				inRaw = false
+			}
+			continue
+		case inString:
+			if ch == '\\' {
+				i++ // skip the escaped character
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		case inRune:
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == '\'' {
+				inRune = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '`':
+			inRaw = true
+		case '\'':
+			inRune = true
+		case '/':
+			if i+1 < len(line) && (line[i+1] == '/' || line[i+1] == '*') {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // isBusyRefusal reports whether err is the "engine is busy" refusal, as opposed

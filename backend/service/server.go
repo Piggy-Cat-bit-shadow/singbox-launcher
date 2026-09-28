@@ -104,7 +104,16 @@ func (s *Server) Stopped() bool {
 }
 
 // write sends one protocol value as a single line.
+//
+// EVERY WRITE IS TRACKED BY THE IN-FLIGHT COUNT, including ones made outside a request
+// handler. Events are written by subscriber goroutines that no request owns, so a
+// `drain()` that counted only handlers still let the stream be written after `Serve`
+// returned — a caller that then read it raced a live writer, which is what the race
+// detector caught. The count makes "Serve has returned" mean "nothing is writing any
+// more", which is the property callers actually need.
 func (s *Server) write(v any) {
+	s.inflight.Add(1)
+	defer s.inflight.Done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// json.Encoder.Encode appends the newline that delimits the frame.
@@ -131,6 +140,11 @@ func (s *Server) SendEvent(ev protocol.Event) { s.write(ev) }
 // while the user's VPN is running.
 func (s *Server) Serve(in io.Reader) {
 	unsubscribe := s.backend.Subscribe(s.SendEvent)
+	// Unsubscribe BEFORE draining, not after. `defer` runs last, which left a window
+	// where the loop had already decided to finish but was still subscribed: a backend
+	// event emitted in that window started a write to a stream the caller was about to
+	// consider closed. Detaching first means the drain below waits for writes that were
+	// already running, and no new ones can begin.
 	defer unsubscribe()
 
 	sc := bufio.NewScanner(in)
@@ -162,12 +176,14 @@ func (s *Server) Serve(in io.Reader) {
 			// The client is unreachable. Stop reading: nothing we parse can be
 			// answered, and finishing here lets the caller's teardown run.
 			debuglog.WarnLog("backend ipc: stopping the read loop after a write failure")
+			unsubscribe()
 			s.drain()
 			return
 		case <-s.stopCh:
 			if err := sc.Err(); err != nil {
 				debuglog.WarnLog("backend ipc: read failed: %v", err)
 			}
+			unsubscribe()
 			s.drain()
 			return
 		case next, ok := <-lines:
@@ -175,6 +191,7 @@ func (s *Server) Serve(in io.Reader) {
 				if err := sc.Err(); err != nil {
 					debuglog.WarnLog("backend ipc: read failed: %v", err)
 				}
+				unsubscribe()
 				s.drain()
 				return
 			}
@@ -237,6 +254,17 @@ func (s *Server) Serve(in io.Reader) {
 // Requests that have NOT yet been read are simply never dispatched: the loop stops
 // reading the moment it is asked to finish, so a client cannot have a reply
 // outstanding for a line the server never took.
+// drain waits for in-flight handlers, with a hard cap.
+//
+// The WAIT IS BOUNDED ON EVERY EXIT PATH, including the write-failure and stop
+// branches: a wedged handler holding a network sweep must not be able to park the read
+// loop past its deadline, or the client's own shutdown timer fires while a helper is
+// still running and the next launch finds two of them.
+//
+// The watcher goroutine is not leaked when the cap fires. `WaitGroup.Wait` cannot be
+// cancelled, so it stays blocked until the handler finishes — which may be never. It is
+// therefore detached deliberately and documented rather than left as an invisible leak:
+// it exits as soon as the wedged handler does, and it holds only a channel.
 func (s *Server) drain() {
 	done := make(chan struct{})
 	go func() {
@@ -248,7 +276,8 @@ func (s *Server) drain() {
 	case <-time.After(ipcDrainTimeout):
 		// A handler is wedged. Losing the reply is better than hanging the exit,
 		// which is the whole reason the loop is allowed to finish early.
-		debuglog.WarnLog("backend ipc: giving up on in-flight replies after %s", ipcDrainTimeout)
+		debuglog.WarnLog("backend ipc: giving up on in-flight replies after %s; a handler "+
+			"is still running and its reply will be lost", ipcDrainTimeout)
 	}
 }
 

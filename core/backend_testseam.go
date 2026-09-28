@@ -65,3 +65,20 @@ func (ac *AppController) LegacyBackendForTest() (*LegacyBackend, bool) {
 	b, ok := ac.Backend().(*LegacyBackend)
 	return b, ok
 }
+
+// switchModeSeamForTest lets a test decide the outcome of a backend-mode switch.
+//
+// The real switch validates against the daemon's configuration, so on a fixture with
+// no paired daemon it is always REFUSED. That makes the SUCCESS path untestable from
+// the IPC layer: a test can only observe the refusal, and "the cancellation did not
+// happen" is then indistinguishable from "the cancellation is broken". A seam that
+// answers the validation question directly is what lets a test drive success and
+// refusal as two separate, deterministic cases instead of skipping one of them.
+var switchModeSeamForTest func(mode BackendMode) (handled bool, err error)
+
+// SetSwitchModeSeamForTest installs the seam, returning a restore function.
+func SetSwitchModeSeamForTest(fn func(mode BackendMode) (bool, error)) func() {
+	prev := switchModeSeamForTest
+	switchModeSeamForTest = fn
+	return func() { switchModeSeamForTest = prev }
+}

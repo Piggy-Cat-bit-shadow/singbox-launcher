@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"crypto/sha256"
 	"encoding/hex"
@@ -812,22 +813,51 @@ func ReadBuildRevisionForService(configPath string) (string, bool) {
 //
 // The hook is a package variable set once at wiring time; it is read on the build
 // path, which is serialised by buildMu, and never nil-checked on the hot path.
-var configPromotionHook func(configPath string, promoted []byte)
+var (
+	configPromotionHookMu  sync.Mutex
+	configPromotionHooks   = map[uint64]func(configPath string, promoted []byte){}
+	configPromotionHookSeq uint64
+)
 
 // SetConfigPromotionHook installs the callback invoked after every config promotion.
 //
 // Called once at startup by the layer that owns provenance. A nil hook means no
 // recording, which is the correct behaviour for a Go-only build with no IPC layer.
 func SetConfigPromotionHook(fn func(configPath string, promoted []byte)) {
-	configPromotionHook = fn
-}
-
-// noteConfigPromoted tells the hook about a promotion, if one is installed.
-func noteConfigPromoted(configPath string, promoted []byte) {
-	if configPromotionHook == nil {
+	configPromotionHookMu.Lock()
+	defer configPromotionHookMu.Unlock()
+	if fn == nil {
+		delete(configPromotionHooks, configPromotionHookSeq)
 		return
 	}
-	configPromotionHook(configPath, promoted)
+	// A MAP OF HOOKS, NOT A SLOT. A single package-level slot means the last install
+	// wins: a second backend in the same process silently steals the hook, and the
+	// first one's promotions are then either recorded against the wrong config path or
+	// dropped by the path guard. Production has one backend today, which is exactly
+	// why this is worth fixing now — the failure is invisible until the day it is not,
+	// and every hook is handed the config path so it can decide for itself whether the
+	// promotion is its business.
+	//
+	// Returns nothing, so callers cannot unregister selectively; a hook lives for the
+	// process. That matches how it is installed (once, from New).
+	configPromotionHookSeq++
+	configPromotionHooks[configPromotionHookSeq] = fn
+}
+
+// noteConfigPromoted tells every hook about a promotion.
+func noteConfigPromoted(configPath string, promoted []byte) {
+	configPromotionHookMu.Lock()
+	hooks := make([]func(string, []byte), 0, len(configPromotionHooks))
+	for _, fn := range configPromotionHooks {
+		hooks = append(hooks, fn)
+	}
+	configPromotionHookMu.Unlock()
+	// Called OUTSIDE the lock: a hook reads the config and writes a marker, and
+	// holding the registry while it does would serialise every promotion behind the
+	// slowest hook for no reason.
+	for _, fn := range hooks {
+		fn(configPath, promoted)
+	}
 }
 
 // NoteConfigPromotedForTest exercises the promotion announcement directly, so an

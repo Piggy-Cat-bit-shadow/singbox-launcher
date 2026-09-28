@@ -230,17 +230,42 @@ func (b *Backend) configIsRebuildable() bool {
 // but not fatal: the rebuild itself already succeeded, and the consequence is
 // only that the next reload will refuse — which is the safe direction.
 func (b *Backend) markConfigManaged() error {
+	return b.markConfigManagedBytes(nil)
+}
+
+// markConfigManagedBytes records ownership, describing `promoted` when the caller knows
+// the exact bytes it installed.
+//
+// WHY THE BYTES ARE PASSED IN RATHER THAN RE-READ. This used to hash the file, with a
+// comment saying that made the marker describe "the winner's bytes" if another writer
+// raced. That reasoning is backwards for the one caller that has the authoritative
+// answer: the promotion hook is HANDED the bytes it promoted, and re-reading the file
+// afterwards deliberately discards that knowledge. Between the rename and the read,
+// anything else on the machine can replace the file — an editor, a sync tool, the
+// daemon — and the marker then claims `managed: true` for content the launcher never
+// produced, which is precisely the "hand-edited config treated as ours" defect this
+// marker exists to prevent, reopened through a window the caller did not need to open.
+//
+// `promoted == nil` still hashes the file. That is the honest answer for callers that
+// did not perform the promotion themselves (adoption, explicit re-marking): they know
+// only what is there NOW. Unknown provenance must degrade to a fresh read, not to an
+// assumption.
+func (b *Backend) markConfigManagedBytes(promoted []byte) error {
 	path := b.provenancePath()
 	if path == "" {
 		return nil
 	}
-	// Hash what is ACTUALLY on disk, not what the caller believed it wrote. If some
-	// other writer raced this one, the marker describes the winner's bytes and the
-	// next ownership check will correctly find them matching.
-	hash, err := b.configContentHash()
-	if err != nil {
-		debuglog.WarnLog("config provenance: cannot hash the config to mark it: %v", err)
-		return err
+	hash := ""
+	if promoted != nil {
+		sum := sha256.Sum256(promoted)
+		hash = hex.EncodeToString(sum[:])
+	} else {
+		var err error
+		hash, err = b.configContentHash()
+		if err != nil {
+			debuglog.WarnLog("config provenance: cannot hash the config to mark it: %v", err)
+			return err
+		}
 	}
 	managed := true
 	p := configProvenance{
@@ -501,7 +526,9 @@ func installConfigPromotionProvenance(b *Backend) {
 		if configPath != b.ac.FileService.ConfigPath {
 			return
 		}
-		if err := b.markConfigManaged(); err != nil {
+		// The promoted bytes, not a fresh read: this callback is the one place that
+		// knows exactly what was installed.
+		if err := b.markConfigManagedBytes(promoted); err != nil {
 			// Best-effort, exactly as the build-revision marker is: the build
 			// already succeeded, and failing it now would discard a valid config
 			// over a bookkeeping write. A missing marker degrades ownership to

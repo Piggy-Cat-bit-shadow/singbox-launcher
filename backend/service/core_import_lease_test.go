@@ -151,3 +151,47 @@ func TestTwoConcurrentImportsAreSerialized(t *testing.T) {
 		t.Fatalf("the lease was not released: %v", err)
 	}
 }
+
+// TestStartIsRefusedWhileACoreReplacementHoldsTheLease — the race the lease exists for.
+//
+// The lease must not merely be taken; it must be UNSUPERSEDABLE. If a start can
+// supersede it, then an import that is mid-transaction (staging a copy of the core and
+// running two probes on it) has its lease cancelled underneath it and proceeds to
+// rename the binary — while the start it just cancelled was about to exec that same
+// path.
+func TestStartIsRefusedWhileACoreReplacementHoldsTheLease(t *testing.T) {
+	b := backendWithConfig(t)
+
+	release, err := b.acquireCoreReplacementLease()
+	if err != nil {
+		t.Fatalf("the lease was refused while the core is idle: %v", err)
+	}
+
+	// A start arriving now must be REFUSED, not allowed to supersede the lease.
+	if _, started := b.ops.beginOp("start"); started {
+		t.Fatal("a start superseded a held core-replacement lease; the replacement " +
+			"continues to rename the core file while the start it just cancelled was " +
+			"about to exec it")
+	}
+
+	// The lease is still the current record: it was not replaced.
+	if !b.ops.busyForMaintenance() {
+		// busyForMaintenance excludes maintenance by design, so check the record.
+	}
+	if op := b.ops.snapshotOp(); op == nil || op.kind != "maintenance" {
+		t.Fatalf("the lease was displaced by the refused start: %+v", b.ops.snapshotOp())
+	}
+
+	release()
+}
+
+// TestMaintenanceLeaseAndStartAreMutuallyExclusive — both directions, sequentially.
+func TestMaintenanceLeaseAndStartAreMutuallyExclusive(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// A start holds the slot: the lease must be refused.
+	b.ops.beginOp("start")
+	if _, err := b.acquireCoreReplacementLease(); err == nil {
+		t.Fatal("the replacement lease was granted while a start was in flight")
+	}
+}

@@ -543,10 +543,34 @@ final class AppModel {
             // The panel closed mid-start. The helper is still ours and the next
             // start() will finish the job, so leave the state resumable rather
             // than pinning the UI on "connecting" forever.
+            disarmBaselineBarrier()
             connection = .idle
         } catch {
+            // THE BARRIER MUST BE DISARMED ON EVERY FAILURE PATH.
+            //
+            // `awaitingBaseline` is armed before the stream opens and disarmed by
+            // `applyBaseline`. If the handshake, the stream or the snapshot throws, the
+            // barrier stays armed with `appliedSession == nil` — and in that state
+            // `apply(event:)` DROPS every event: not applied, not buffered, and
+            // `appliedSeq` never advances. The connection then reports `.failed` and
+            // the app looks dead rather than merely disconnected, because the live
+            // event stream is being thrown away.
+            //
+            // A failure here means there will be no baseline for this attempt, so the
+            // barrier's premise is gone and it must not outlive it.
+            disarmBaselineBarrier()
             connection = .failed(error.localizedDescription)
         }
+    }
+
+    /// Disarms the bootstrap barrier, discarding anything buffered against it.
+    ///
+    /// Called on every exit from `performStart` that does not end in a baseline: the
+    /// barrier is a promise that a snapshot is coming, and a failed bootstrap has
+    /// broken that promise. Leaving it armed turns the event stream into a no-op.
+    private func disarmBaselineBarrier() {
+        awaitingBaseline = false
+        pendingEvents.removeAll()
     }
 
     /// Shut everything down, letting the backend decide the core's fate.
@@ -607,9 +631,21 @@ final class AppModel {
     }
 
     /// Restart the backend after a crash.
+    ///
+    /// `stop()` can legitimately FAIL — the previous helper refused to die, and
+    /// starting a replacement over a live one would leave two processes owning the
+    /// same state, config and core. When that happens `start()` must not run, and the
+    /// caller must be able to tell: silently returning would look like a restart that
+    /// did nothing, which is exactly what it is.
     func restart() async {
         await stop()
-        await start()
+        // A failed stop leaves the connection `.failed` and the helper alive. Starting
+        // now would be the two-helpers case the stop refused to create, so the restart
+        // reports the stop's failure rather than papering over it.
+        guard case .failed = connection else {
+            await start()
+            return
+        }
     }
 
     // MARK: - Commands

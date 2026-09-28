@@ -157,6 +157,16 @@ func (s *coreOpState) beginOp(kind string) (*coreOperation, bool) {
 		debuglog.InfoLog("core op: %s already in flight (id=%d) — ignoring duplicate request", kind, s.op.id)
 		return s.op, false
 	}
+	// A MAINTENANCE LEASE IS NOT SUPERSEDABLE. Everything else supersedes a different
+	// kind — that is how a stop cancels a start — but a core replacement in progress
+	// is mid-transaction on the binary the lifecycle is about to use. Cancelling it
+	// would abandon the replacement half-applied rather than preventing a conflict, so
+	// the arriving lifecycle command is refused instead. The import is bounded work
+	// (staging, two probes, one rename), so refusing is a short wait, not a stall.
+	if s.op != nil && s.op.kind == "maintenance" {
+		debuglog.InfoLog("core op: %s refused — a core replacement is in flight (id=%d)", kind, s.op.id)
+		return s.op, false
+	}
 
 	prev := s.op
 	s.nextID++
@@ -214,17 +224,32 @@ func (s *coreOpState) beginMaintenance() (func(), bool) {
 	// Maintenance is not a command that competes for control of the lifecycle; it is a
 	// request that requires the lifecycle to be IDLE. So it waits for nothing and
 	// cancels nothing: if anything is in flight, it is refused.
+	// ONE CRITICAL SECTION, because a check and a take in two of them is a TOCTOU —
+	// and here the loser is the USER'S START, not the import. Between an Unlock and a
+	// second Lock a start can claim the slot, and beginOp would then SUPERSEDE it: the
+	// user's start is silently cancelled and the import proceeds to rename the core
+	// binary that start was about to exec. That is the race this function exists to
+	// prevent, reachable exactly because an import holds the lease across staging a
+	// copy of the core and two subprocess probes — seconds during which any
+	// start_core is cancelled instead of refused.
+	//
+	// Taking the record directly, under one lock, makes "idle or refused" atomic.
 	s.mu.Lock()
-	busy := s.op != nil
+	if s.op != nil {
+		// Something is in flight. Refuse; never supersede. Reported under the lock so
+		// the decision and the observation cannot disagree.
+		s.mu.Unlock()
+		return nil, false
+	}
+	s.nextID++
+	op := &coreOperation{
+		id:         s.nextID,
+		kind:       "maintenance",
+		startedAt:  time.Now(),
+		superseded: make(chan struct{}),
+	}
+	s.op = op
 	s.mu.Unlock()
-	if busy {
-		return nil, false
-	}
-
-	op, ok := s.beginOp("maintenance")
-	if !ok {
-		return nil, false
-	}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {

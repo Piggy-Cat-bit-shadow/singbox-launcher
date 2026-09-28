@@ -115,6 +115,21 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 		return
 	}
 	statePath := platform.GetWizardStatePath(dataDir)
+
+	// THE MERGE IS THE WRITE, SO THE MERGE TAKES THE LOCK.
+	//
+	// Fetching must not hold SubscriptionMu — that would block every subscription edit
+	// for as long as the slowest provider takes. But the READ-MODIFY-WRITE at the end
+	// is exactly the transaction the lock exists for: without it this is a second,
+	// unsynchronised whole-file writer beside the CRUD paths, which is worse than a
+	// lost update because each save is a truncate-and-write the other can walk into
+	// and leave state.json unparseable.
+	//
+	// The lock covers the LOAD as well as the save. Locking only the save still lets
+	// this write back a snapshot it read before a concurrent edit.
+	ac.SubscriptionMu.Lock()
+	defer ac.SubscriptionMu.Unlock()
+
 	latest, err := state.Load(statePath)
 	if err != nil {
 		debuglog.WarnLog("refreshSubscriptionsMetaAndCache: cannot reload state to merge "+
@@ -143,10 +158,20 @@ func refreshSubscriptionsMetaAndCache(s *state.State, dataDir paths.DataDir) {
 				"during the sweep; its result is discarded", fetched.ID)
 			continue
 		}
-		disk.Nodes = fetched.Nodes
+		// DEEP COPY, not assignment. `results` holds values taken from a state
+		// snapshot read before the lock, so assigning them would alias the live
+		// state's slices and pointer: two owners of one backing array, with the
+		// pre-lock snapshot deciding the capacity. A shallow copy here is a data race
+		// waiting for the first append.
+		disk.Nodes = append([]state.Node(nil), fetched.Nodes...)
+		if fetched.Meta != nil {
+			meta := *fetched.Meta
+			disk.Meta = &meta
+		} else {
+			disk.Meta = nil
+		}
 		disk.UpdateStatus = fetched.UpdateStatus
-		disk.Meta = fetched.Meta
-		disk.PendingDisabled = fetched.PendingDisabled
+		disk.PendingDisabled = append([]string(nil), fetched.PendingDisabled...)
 		merged = true
 	}
 	if !merged {

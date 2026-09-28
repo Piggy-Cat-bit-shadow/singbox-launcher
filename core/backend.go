@@ -221,6 +221,13 @@ func (ac *AppController) SwitchBackendMode(mode BackendMode) error {
 	if ac.BackendMode() == mode {
 		return nil
 	}
+	// Test seam: lets a caller decide the validation outcome directly, so the SUCCESS
+	// and REFUSAL paths of a mode switch can both be exercised deterministically.
+	if switchModeSeamForTest != nil {
+		if handled, err := switchModeSeamForTest(mode); handled {
+			return err
+		}
+	}
 	if !ac.ClassicSettled() {
 		return fmt.Errorf("a start or stop is still in progress; wait for it to finish before switching the core engine")
 	}

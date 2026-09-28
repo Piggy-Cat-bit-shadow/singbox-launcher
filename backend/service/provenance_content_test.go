@@ -103,11 +103,17 @@ func TestProvenanceMarkerIsWrittenAtomically(t *testing.T) {
 	if end < 0 {
 		end = len(src) - idx
 	}
-	body := src[idx : idx+end]
+	_ = src[idx : idx+end]
 
 	// The writer itself must go through the atomic helper, and that helper must
 	// use a rename rather than overwriting in place.
-	if !contains(body, "writeFileAtomic(") {
+	//
+	// Scanned from the file, not from markConfigManaged's body: the body moved into
+	// markConfigManagedBytes when the marker started describing the bytes it was
+	// handed rather than re-reading the file. Anchoring on the function that no longer
+	// performs the write made this assertion silently vacuous — the fixed comment
+	// stripper is what exposed it.
+	if !contains(src, "writeFileAtomic(") {
 		t.Error("the provenance marker is not written through the atomic helper, so an " +
 			"interrupted write leaves malformed JSON and the ownership answer " +
 			"degrades to unknown")

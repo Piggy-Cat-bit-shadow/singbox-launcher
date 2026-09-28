@@ -46,6 +46,10 @@ type Backend struct {
 	opTimeoutOverride time.Duration
 
 	mu sync.Mutex
+	// settingsMu serialises settings.json read-modify-write. Separate from mu, which
+	// guards the EVENT SEQUENCE: a settings save must not block event delivery, and an
+	// emit under the sequence lock must not wait on a disk write.
+	settingsMu sync.Mutex
 	// seq is the monotonic event sequence. It lets the frontend discard an
 	// event that predates the snapshot it already applied.
 	//
@@ -142,9 +146,17 @@ func New(layout paths.Layout) (*Backend, error) {
 		return nil, err
 	}
 	b := &Backend{ac: ac, sessionID: newSessionID()}
-	b.installOwnershipPolicy()
-	// Every config promotion must describe itself; see provenance.go.
+	// THE HOOK GOES FIRST, and the order is the whole point.
+	//
+	// installOwnershipPolicy ADOPTS OR REBUILDS a config at construction time, which
+	// promotes one. Installing the hook after it meant the very first promotion of
+	// every launch happened with no hook, so the marker that is supposed to make
+	// "no config reaches disk undescribed" true was absent exactly for the file the
+	// process had just written. Nothing about that is visible in either function; it
+	// is a property of their order, which is why the comment is here rather than
+	// there.
 	installConfigPromotionProvenance(b)
+	b.installOwnershipPolicy()
 	b.watchCoreState()
 	// Let the runtime settle any operation still in flight as the app exits. The
 	// record lives here and the exit path lives in core, so core calls back
@@ -859,12 +871,15 @@ func (b *Backend) SetCoreMode(mode string) error {
 		}
 	}
 
-	// A latency test is measuring through the engine that is about to be
-	// replaced. Cancel it BEFORE the switch so its workers stop probing a
-	// transport that is being torn down; left running, they would report
-	// latencies for an engine that no longer exists.
-	b.groupTests.CancelActive()
-
+	// A latency test is measuring through the engine that is about to be replaced, so
+	// it must be cancelled — but ONLY IF THE SWITCH ACTUALLY HAPPENS.
+	//
+	// This cancelled before the switch, and the switch can legitimately be REFUSED
+	// ("stop the VPN before switching"). A refused mode change therefore killed a
+	// running latency test for nothing: the user clicked a control that did nothing,
+	// and lost up to a full group-test network budget in the process. Cancelling after
+	// success keeps the reason intact — the test is stopped because its engine is
+	// going away, which is only true once the engine really is going away.
 	if err := b.ac.SwitchBackendMode(core.BackendMode(mode)); err != nil {
 		// The switch was refused (busy engine, unreachable daemon, …). Roll the
 		// persisted choice back: the mirror image of the old divergence would be a
@@ -891,6 +906,9 @@ func (b *Backend) SetCoreMode(mode string) error {
 		}
 	}
 
+	// The engine really is going away, so a test measuring through it must stop.
+	b.groupTests.CancelActive()
+
 	debuglog.InfoLog("backend: core mode set to %q", mode)
 	b.emit(protocol.EventSettingsChanged, b.settingsState())
 	b.EmitCoreState()
@@ -915,10 +933,23 @@ func (b *Backend) SetAutoUpdateSubscriptions(enabled bool) error {
 //
 // Settings live on disk (the backend owns them); the frontend only ever sees
 // the result, so a toggle cannot drift from what was actually saved.
+// updateSettings serialises one settings.json read-modify-write.
+//
+// settings.json is a whole-file format, so two concurrent mutations is not a lost
+// update but a corrupted file: each save is a truncate-and-write the other can walk
+// into. Requests are dispatched CONCURRENTLY, so this is reachable the moment two
+// setters are in flight together — which is why the lock belongs here, at the one place
+// that performs the write, rather than at each handler that happens to call it.
+//
+// The lock covers the LOAD as well as the save. Locking only the save lets this write
+// back a snapshot it read before another toggle landed, so one of two changes silently
+// disappears while both report success.
 func (b *Backend) updateSettings(mutate func(*locale.Settings)) error {
 	if b.ac == nil {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
+	b.settingsMu.Lock()
+	defer b.settingsMu.Unlock()
 	binDir := b.ac.FileService.Layout.Data.Bin()
 	st := locale.LoadSettings(binDir)
 	mutate(&st)

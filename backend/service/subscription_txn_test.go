@@ -124,10 +124,15 @@ func TestUpdateAllMergesUnderAFreshLock(t *testing.T) {
 			"writes one source's nodes into another after a concurrent edit")
 	}
 	// Only fetch-owned fields may be copied. Name/URL/enabled belong to the user.
-	for _, owned := range []string{"disk.Nodes = fetched.Nodes", "disk.Meta = fetched.Meta",
-		"disk.UpdateStatus = fetched.UpdateStatus"} {
-		if !contains(src, owned) {
-			t.Errorf("the merge does not copy %q from the fetch result", owned)
+	//
+	// Matched on the FIELD, not on a literal assignment form. The slices are copied
+	// through a deep-copy expression rather than a bare `=`, because the fetch result
+	// was read from a pre-lock snapshot and assigning its slice headers directly would
+	// alias the live state — two owners of one backing array. Requiring the `= fetched.X`
+	// spelling rejected the correct fix and accepted the racy one.
+	for _, owned := range []string{"disk.Nodes", "disk.Meta", "disk.UpdateStatus"} {
+		if !contains(src, owned+" =") {
+			t.Errorf("the merge does not copy %s from the fetch result", owned)
 		}
 	}
 	if contains(src, "disk.Name = ") || contains(src, "disk.Enabled = ") ||
@@ -153,48 +158,36 @@ func TestUpdateAllMergesUnderAFreshLock(t *testing.T) {
 func TestSubscriptionNetworkFetchHappensOutsideTheLock(t *testing.T) {
 	src := stripGoComments(readServiceSource(t, "core/config_service.go"))
 
-	// Whatever the lock spans must not contain a fetch.
-	lock := indexOf(src, "ac.SubscriptionMu.Lock()")
-	unlock := indexOf(src, "ac.SubscriptionMu.Unlock()")
-	if lock < 0 || unlock < 0 {
-		t.Fatal("expected the SubscriptionMu critical section")
+	// THE SWEEP MUST ACTUALLY RUN. A previous revision computed the set of sources to
+	// refresh, discarded it into `_ =`, and never called the sweep at all — so every
+	// subscription silently stopped updating while `UpdateSubscriptions` still reported
+	// refresh success. Asserting "a fetch is not inside the lock" is trivially true of
+	// code that fetches nothing, which is how that regression passed its own test.
+	call := indexOf(src, "refreshSubscriptionsMetaAndCache(stateRef")
+	if call < 0 {
+		t.Fatal("the subscription sweep is never called, so no source is ever refreshed " +
+			"and the refresh phase reports success for zero fetches")
 	}
-	if unlock < lock {
-		t.Fatal("unlock appears before lock; the test is reading the wrong site")
-	}
-	between := src[lock:unlock]
-	if contains(between, "refreshSubscriptionsMetaAndCache(") {
+
+	// And when it IS called, no SubscriptionMu may be held across the call: the
+	// fan-out is network I/O, and holding the lock there would block every
+	// add/edit/remove behind the slowest provider.
+	before := src[:call]
+	lock := lastIndexOf(before, "ac.SubscriptionMu.Lock()")
+	unlock := lastIndexOf(before, "ac.SubscriptionMu.Unlock()")
+	if lock > unlock {
 		t.Error("the network fan-out runs inside the SubscriptionMu critical section, " +
 			"so a slow subscription blocks every subscription edit behind a network call")
 	}
-	if contains(between, "Fetch") {
-		t.Error("a fetch runs while SubscriptionMu is held")
-	}
 
-	// And the SWEEP FUNCTION itself must take no lock: it is the one that fetches.
-	// Other functions in the file legitimately lock for their own short critical
-	// sections, so the check is scoped to the sweep's own body.
+	// The merge inside the sweep must take the lock itself, since the caller no longer
+	// holds it. Without that this is a second unsynchronised whole-file writer beside
+	// the CRUD paths.
 	sweep := stripGoComments(readServiceSource(t, "core/config_service_subscriptions.go"))
-	idx := indexOf(sweep, "func refreshSubscriptionsMetaAndCache(")
-	if idx < 0 {
-		t.Fatal("refreshSubscriptionsMetaAndCache not found")
-	}
-	end := indexOf(sweep[idx:], "\nfunc ")
-	if end < 0 {
-		end = len(sweep) - idx
-	}
-	body := sweep[idx : idx+end]
-	if contains(body, "SubscriptionMu") {
-		t.Error("the sweep acquires SubscriptionMu, so the lock is held across every " +
-			"network fetch and every subscription edit queues behind the slowest provider")
-	}
-	if !contains(body, "results = append(results, copied)") {
-		t.Error("the sweep does not collect results for a deferred merge, so it must " +
-			"be writing state during the network phase")
-	}
-	if !contains(body, "state.Load(statePath)") {
-		t.Error("the sweep does not re-read the state before merging, so a concurrent " +
-			"edit is overwritten by the pre-fetch snapshot")
+	if !contains(sweep, "ac.SubscriptionMu.Lock()") {
+		t.Error("the sweep merges fetch results into state.json without taking " +
+			"SubscriptionMu, so it races every subscription edit and can leave the " +
+			"file unparseable")
 	}
 }
 
@@ -300,5 +293,20 @@ func TestUpdateSubscriptionRejectsDuplicateURL(t *testing.T) {
 	}
 	if src := after.FindSource("s2"); src == nil || src.URL != "https://example.invalid/b" {
 		t.Error("the refused edit still modified the source")
+	}
+}
+
+// lastIndexOf returns the index of the last occurrence of sub in s, or -1.
+//
+// Needed because a file may contain several critical sections and only the one
+// immediately preceding a call determines whether the call is inside it.
+func lastIndexOf(s, sub string) int {
+	idx := -1
+	for {
+		next := indexOf(s[idx+1:], sub)
+		if next < 0 {
+			return idx
+		}
+		idx += next + 1
 	}
 }

@@ -230,13 +230,17 @@ func (svc *ConfigService) updateConfigFromSubscriptions(triggerRebuild bool) (*c
 		return nil, err
 	}
 
-	ac.SubscriptionMu.Lock()
-	// Hold the lock only to snapshot WHICH sources this pass will refresh: IDs are
-	// stable and survive concurrent edits, unlike slice positions.
-	sweepIDs := refreshableSourceIDs(stateRef)
-	ac.SubscriptionMu.Unlock()
-
-	_ = sweepIDs
+	// THE SWEEP STILL RUNS. Restructuring the merge (below) is not a reason to stop
+	// fetching: the previous revision of this function held SubscriptionMu around the
+	// call, and dropping the lock must not drop the CALL. It did, for one commit, and
+	// the effect was that subscriptions stopped updating entirely while every layer
+	// above still reported success — the exact failure mode this file's result type
+	// exists to make impossible.
+	//
+	// The function takes no lock of its own by design: it is handed the state to read
+	// source identities from and re-reads the live state under a brief lock at merge
+	// time, so a caller must NOT wrap it in SubscriptionMu.
+	refreshSubscriptionsMetaAndCache(stateRef, layout.Data)
 
 	subst := config.BuildVarSubstituterFromDisk(layout)
 	config.SubstituteParserConfigPlaceholders(parserConfig, subst)

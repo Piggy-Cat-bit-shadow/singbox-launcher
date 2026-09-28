@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -53,14 +54,45 @@ func TestEventSequenceResetsAcrossBackendSessions(t *testing.T) {
 			"indistinguishable from a replay of the old one's")
 	}
 
-	// The event must carry the session, or a client cannot tell "this event is
-	// from the process I am talking to" from "this event predates the restart".
-	if !contains(src, "Session string `json:\"session\"`") {
-		t.Error("Event carries no session field, so a late event from a previous " +
-			"backend process cannot be told apart from a current one")
+	// BEHAVIOURAL, not textual. Both the event and the snapshot must carry the
+	// session on the wire, and the value must be the SAME one — a client can only
+	// scope its high-water mark to a session if the two agree about which session it is.
+	//
+	// The previous form checked the same literal twice and called the second one
+	// "AppSnapshot carries no session field": a copy-paste that never tested the
+	// snapshot at all, and the first check could not see the struct it named because
+	// the comment stripper had already deleted the fields after it.
+	b := backendWithConfig(t)
+
+	// The snapshot's session, as it goes on the wire.
+	snap := b.Snapshot()
+	if snap.Session == "" {
+		t.Fatal("the snapshot carries no session, so a client cannot tell which " +
+			"backend process its sequence numbers belong to")
 	}
-	if !contains(src, "Session string `json:\"session\"`") {
-		t.Error("AppSnapshot carries no session field")
+
+	// An event must be stamped with the SAME session the snapshot reports. A client
+	// scopes its high-water mark to a session, so two components disagreeing about
+	// which session this is makes the mark unusable.
+	got := make(chan protocol.Event, 8)
+	unsub := b.Subscribe(func(ev protocol.Event) { got <- ev })
+	defer unsub()
+
+	b.emit(protocol.EventCoreStateChanged, map[string]any{"phase": "idle"})
+
+	select {
+	case ev := <-got:
+		if ev.Session == "" {
+			t.Fatal("the event carries no session, so a late event from a previous " +
+				"backend process cannot be told apart from a current one")
+		}
+		if ev.Session != snap.Session {
+			t.Fatalf("the event reports session %q but the snapshot reports %q; a "+
+				"client cannot scope its sequence mark to a session that disagrees "+
+				"with itself", ev.Session, snap.Session)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event was delivered")
 	}
 }
 
@@ -391,10 +423,28 @@ func TestModeSwitchCancelsActiveGroupTest(t *testing.T) {
 	cancelled := make(chan struct{})
 	b.groupTests.setHookForTest(func() { close(cancelled) })
 
-	// Any outcome is fine; the switch may be refused because the engine is busy.
-	// The CANCELLATION must happen regardless, since the decision to switch was
-	// already made and the old transport is about to be torn down.
-	_ = b.SetCoreMode(string(core.BackendDaemon))
+	// A SUCCESSFUL switch must cancel the test. On this fixture the switch may be
+	// refused, and refusal must NOT cancel: the test measures through the engine the
+	// user still has, and killing it for a mode change that did not happen costs a full
+	// group-test network budget for nothing.
+	//
+	// The test therefore drives the success path explicitly rather than accepting
+	// either outcome. "Any outcome is fine" was the earlier shape, and it encoded the
+	// bug: a refused switch cancelled the test, and the assertion was satisfied by the
+	// cancellation it should have rejected.
+	err := b.SetCoreMode(string(core.BackendDaemon))
+	if err != nil {
+		// Refused: nothing may have been cancelled.
+		select {
+		case <-cancelled:
+			t.Fatal("a REFUSED engine switch cancelled the active group test, so the " +
+				"user lost a running latency measurement for a change that never happened")
+		case <-time.After(200 * time.Millisecond):
+		}
+		t.Skipf("the switch was refused on this fixture (%v); the refusal path is "+
+			"asserted above and the success path is covered by "+
+			"TestSuccessfulModeSwitchCancelsTheGroupTest", err)
+	}
 
 	select {
 	case <-cancelled:
@@ -600,5 +650,58 @@ func TestSwiftStopSurfacesTerminationFailure(t *testing.T) {
 	}
 	if !contains(app, "catch") {
 		t.Error("the shutdown failure is not caught")
+	}
+}
+
+// TestSuccessfulModeSwitchCancelsTheGroupTest — the SUCCESS path, driven directly.
+//
+// The cancellation's reason is "the engine this test is measuring through is going
+// away". That reason is only true once the switch has actually happened, so this must
+// cancel — and the sibling test asserts that a REFUSED switch must not. Driving both
+// outcomes through the seam is what makes the pair meaningful; asserting only one would
+// pass for an implementation that cancels unconditionally, which is the bug.
+func TestSuccessfulModeSwitchCancelsTheGroupTest(t *testing.T) {
+	b := backendWithConfig(t)
+
+	restore := core.SetSwitchModeSeamForTest(func(mode core.BackendMode) (bool, error) {
+		return true, nil // pretend the switch is permitted and succeeds
+	})
+	defer restore()
+
+	cancelled := make(chan struct{})
+	b.groupTests.setHookForTest(func() { close(cancelled) })
+
+	if err := b.SetCoreMode(string(core.BackendDaemon)); err != nil {
+		t.Fatalf("the switch was reported as accepted but SetCoreMode failed: %v", err)
+	}
+
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a successful engine switch did not cancel the active group test, so " +
+			"its workers keep probing a transport that is being torn down")
+	}
+}
+
+// TestRefusedModeSwitchDoesNotCancelTheGroupTest — the REFUSAL path, driven directly.
+func TestRefusedModeSwitchDoesNotCancelTheGroupTest(t *testing.T) {
+	b := backendWithConfig(t)
+
+	restore := core.SetSwitchModeSeamForTest(func(mode core.BackendMode) (bool, error) {
+		return true, errors.New("the VPN is running")
+	})
+	defer restore()
+
+	cancelled := make(chan struct{})
+	var once sync.Once
+	b.groupTests.setHookForTest(func() { once.Do(func() { close(cancelled) }) })
+
+	_ = b.SetCoreMode(string(core.BackendDaemon))
+
+	select {
+	case <-cancelled:
+		t.Fatal("a REFUSED engine switch cancelled the active group test, so the user " +
+			"lost a running latency measurement for a change that never happened")
+	case <-time.After(300 * time.Millisecond):
 	}
 }

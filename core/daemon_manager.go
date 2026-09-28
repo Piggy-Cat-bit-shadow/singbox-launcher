@@ -785,8 +785,26 @@ func (ac *AppController) UnpairDaemon() error {
 
 	binDir := ac.FileService.Layout.Data.Bin()
 
-	// (1) Forget the pairing on disk. If this fails nothing has changed yet, so the
-	// state is still "paired" and consistent.
+	// (1) LEAVE THE DAEMON ENGINE FIRST, WHILE THE PAIRING STILL EXISTS.
+	//
+	// This is the step that must come before anything is deleted, and getting it in the
+	// wrong order is what makes the state torn. Switching off the daemon engine can be
+	// REFUSED — the daemon VPN may still be running — and a refusal after the settings
+	// and identity were already wiped leaves the process on an engine whose credentials
+	// no longer exist: the UI says "not paired" while the live mTLS channel, built from
+	// the deleted identity, still controls the daemon. That is the exact divergence this
+	// operation is supposed to end, so the switch is attempted FIRST, where failing it
+	// changes nothing and the state stays coherently paired.
+	//
+	// It is NOT swallowed. Swallowing it (as an earlier revision did) is what produced
+	// the torn state, because the code then continued to delete the credentials it had
+	// just failed to stop using.
+	if err := ac.leaveDaemonEngineForUnpair(); err != nil {
+		return err
+	}
+
+	// (2) Forget the pairing on disk. If this fails nothing has changed yet: the engine
+	// is already off the daemon, so the state is still coherent.
 	st := locale.LoadSettings(binDir)
 	st.DaemonAddress = ""
 	st.DaemonServerFingerprint = ""
@@ -794,15 +812,6 @@ func (ac *AppController) UnpairDaemon() error {
 	if err := locale.SaveSettings(binDir, st); err != nil {
 		return fmt.Errorf("the daemon pairing was NOT removed, because saving the "+
 			"settings failed: %w", err)
-	}
-
-	// (2) Tear down the live transport. Done before the credentials are removed so the
-	// connection is closed by its owner rather than left holding a deleted identity.
-	// Best-effort: a failure here must not resurrect the pairing we just forgot, and
-	// the credentials removal below still runs.
-	if err := ac.reloadDaemonBackendAfterUnpair(); err != nil {
-		debuglog.WarnLog("UnpairDaemon: the active daemon transport could not be "+
-			"reset: %v", err)
 	}
 
 	// (3) Remove the credentials. Past this point the state is unambiguously
@@ -824,25 +833,30 @@ func (ac *AppController) UnpairDaemon() error {
 	return nil
 }
 
-// reloadDaemonBackendAfterUnpair closes an active daemon backend, since there is no
-// pairing left for it to connect with.
+// leaveDaemonEngineForUnpair returns the app to the classic engine before its daemon
+// credentials are deleted, closing the transport that was built from them.
 //
-// Distinct from reloadDaemonBackendIfActive, which REBUILDS a connection using the
-// current settings: after an unpair there are no settings to rebuild from, and
-// rebuilding would attempt a connection with empty credentials.
-func (ac *AppController) reloadDaemonBackendAfterUnpair() error {
+// MUST RUN BEFORE THE CREDENTIALS ARE REMOVED, and must not have its failure ignored.
+// Switching engines can be refused while the daemon VPN is running; deleting the
+// pairing anyway would leave the app on an engine whose identity no longer exists,
+// which is a state nothing else in the app can describe or repair.
+//
+// A no-op when the app is not on the daemon engine: there is then no live transport to
+// close, and nothing to be torn.
+func (ac *AppController) leaveDaemonEngineForUnpair() error {
 	if ac == nil {
 		return nil
 	}
 	if ac.BackendMode() != BackendDaemon {
 		return nil
 	}
-	// Leaving the daemon engine without a pairing would strand the app on an engine it
-	// cannot reach, so the switch back to classic happens first and carries its own
-	// refusal (a running core) as an error the caller can report.
 	if err := ac.SwitchBackendMode(BackendClassic); err != nil {
-		return err
+		return fmt.Errorf("the daemon was NOT unpaired, because the app could not leave "+
+			"the daemon engine: %w. Stop the VPN and try again.", err)
 	}
+	// Close the daemon transport itself. SwitchBackendMode selects the engine;
+	// this releases the connection, admin client and mTLS material that were built
+	// from the identity the caller is about to delete.
 	ac.reloadDaemonBackendIfActive()
 	return nil
 }
