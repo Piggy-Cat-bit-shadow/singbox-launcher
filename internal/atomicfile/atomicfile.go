@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // MaxAttempts bounds the retry loop for generating a unique temporary name. Reaching it
@@ -134,9 +135,24 @@ func SyncDir(dir string) {
 
 // SweepStale removes leftover staging files for target.
 //
-// A process killed between create and rename leaves a dot-file behind. Nothing depends
-// on them, but a directory that accumulates them is a directory whose owner has stopped
-// noticing what is in it — so the writer that owns the target tidies up first.
+// A process killed between create and rename leaves a dot-file behind. Nothing depends on
+// them, but a directory that accumulates them is a directory whose owner has stopped
+// noticing what is in it — so the writer that owns the target tidies up first. Called by
+// `WriteWith` before staging, which is what makes that sentence true.
+//
+// ONLY FILES OLDER THAN staleStagingAge ARE REMOVED, and that bound is what makes it safe to
+// call next to live writers.
+//
+// A unique staging name stops two writers from SHARING a file; it says nothing about which
+// files are still being written. An earlier version of this function removed every match and
+// documented itself as safe to call "first" because the names were unique — that reasoning is
+// wrong, and wiring it into `WriteWith` made `TestConcurrentWriteDoesNotShareTempFile` fail
+// immediately with "no such file or directory" on the rename: one writer deleted another's
+// staging file out from under it.
+//
+// Age is the property that actually distinguishes a leftover from a live write. A staging
+// file is written, fsynced and renamed within one operation, so one that has not been touched
+// for hours belongs to a process that is gone.
 func SweepStale(target string) {
 	dir := filepath.Dir(target)
 	base := filepath.Base(target)
@@ -144,7 +160,19 @@ func SweepStale(target string) {
 	if err != nil {
 		return
 	}
+	cutoff := time.Now().Add(-staleStagingAge)
 	for _, m := range matches {
+		info, err := os.Stat(m)
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
 		_ = os.Remove(m)
 	}
 }
+
+// staleStagingAge is how old a staging file must be to count as abandoned.
+//
+// Generous on purpose: the cost of leaving a leftover for another day is a dot-file nobody
+// looks at, while the cost of removing a live one is a failed write — and a failed write is
+// what the whole atomic-write path exists to prevent.
+const staleStagingAge = time.Hour

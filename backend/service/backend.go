@@ -46,10 +46,11 @@ type Backend struct {
 	opTimeoutOverride time.Duration
 
 	mu sync.Mutex
-	// settingsMu serialises settings.json read-modify-write. Separate from mu, which
-	// guards the EVENT SEQUENCE: a settings save must not block event delivery, and an
-	// emit under the sequence lock must not wait on a disk write.
-	settingsMu sync.Mutex
+	// NO settingsMu. It serialised settings.json read-modify-write for THIS package only,
+	// while the rest of the application reaches the same file through
+	// `locale.UpdateSettings`. Two locks over one file is the same lost update as no lock:
+	// another package's load-mutate-save interleaves and the last writer wins. The single
+	// lock lives with the file, and every writer goes through it.
 	// seq is the monotonic event sequence. It lets the frontend discard an
 	// event that predates the snapshot it already applied.
 	//
@@ -1090,7 +1091,13 @@ func (b *Backend) SetCoreMode(mode string) error {
 	// is on disk are the same engine.
 	if st.CoreBackendMode != mode {
 		st.CoreBackendMode = mode
-		if err := locale.SaveSettings(binDir, st); err != nil {
+		// Through `locale.UpdateSettings`, so the read and the write are one critical
+		// section against EVERY other settings writer in the process — not just the ones
+		// that happen to live in this package.
+		if err := locale.UpdateSettings(binDir, func(latest *locale.Settings) error {
+			latest.CoreBackendMode = mode
+			return nil
+		}); err != nil {
 			debuglog.WarnLog("backend: cannot persist the core mode: %v", err)
 			return &protocol.Error{
 				Code: "persist_failed",
@@ -1116,7 +1123,10 @@ func (b *Backend) SetCoreMode(mode string) error {
 		// settings file naming an engine the launcher is not running.
 		if st.CoreBackendMode != previousStored {
 			st.CoreBackendMode = previousStored
-			if saveErr := locale.SaveSettings(binDir, st); saveErr != nil {
+			if saveErr := locale.UpdateSettings(binDir, func(latest *locale.Settings) error {
+				latest.CoreBackendMode = previousStored
+				return nil
+			}); saveErr != nil {
 				debuglog.ErrorLog("backend: mode switch refused AND the rollback failed: %v", saveErr)
 				b.emit(protocol.EventSettingsChanged, b.settingsState())
 				return &protocol.Error{
@@ -1178,12 +1188,25 @@ func (b *Backend) updateSettings(mutate func(*locale.Settings)) error {
 	if b.ac == nil {
 		return &protocol.Error{Code: "not_ready", Message: "backend not initialised", Recoverable: true}
 	}
-	b.settingsMu.Lock()
-	defer b.settingsMu.Unlock()
 	binDir := b.ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	mutate(&st)
-	if err := locale.SaveSettings(binDir, st); err != nil {
+
+	// THE LOCK IS `locale`'s, NOT A BACKEND-LOCAL ONE.
+	//
+	// A backend-local mutex serialises THIS backend's writers and nothing else, while the
+	// rest of the application reaches the same file through `locale.UpdateSettings`. Two
+	// locks over one file is the same lost update as no lock at all: another package's
+	// load-mutate-save can interleave with this one's and whichever saves last wins,
+	// silently discarding the other's change. There is exactly one lock, and it lives with
+	// the file.
+	//
+	// `UpdateSettings` also fails closed on an unparseable file, which `LoadSettings` cannot
+	// do — it returns defaults, which for a WRITER means wiping the user's daemon pairing,
+	// engine mode and identity to satisfy one changed preference.
+	var mutateErr error
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		mutate(st)
+		return mutateErr
+	}); err != nil {
 		return &protocol.Error{
 			Code:        "persist_failed",
 			Message:     "could not save settings: " + err.Error(),

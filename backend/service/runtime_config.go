@@ -135,11 +135,17 @@ func (b *Backend) RuntimeConfigDiverged() bool {
 	return running && !matches
 }
 
-// hashConfigBytes is the single content hash used for config identity comparisons.
+// hashConfigBytes is the content hash used for config identity comparisons.
 //
-// One function so the identity recorded at start and the identity checked later cannot
-// drift apart: two implementations of "hash this config" would eventually disagree about
-// whitespace or key order, and the comparison would report divergence that is not there.
+// IT IS THE SAME FUNCTION THE PROVENANCE MARKER USES. An earlier version of this file declared
+// itself "the single content hash ... so the identity recorded at start and the identity
+// checked later cannot drift apart", while having no caller at all: `recordRunningConfig`
+// went through `configContentHash` instead. So there were two implementations, which is
+// exactly the drift the comment promised to prevent — and a comment describing a guarantee
+// the code does not have is the failure mode this whole round is about.
+//
+// `configContentHash` now delegates here, so the recorded identity and the checked identity
+// are the same bytes through the same function.
 func hashConfigBytes(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

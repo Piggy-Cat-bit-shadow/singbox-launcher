@@ -37,20 +37,26 @@ func (ac *AppController) CheckVersionMarks() {
 	}
 	binDir := ac.FileService.Layout.Data.Bin()
 	settings := locale.LoadSettings(binDir)
-	changed := false
 
-	if mark, ok := checkLauncherMark(settings.LastLauncherVersion); ok {
-		settings.LastLauncherVersion = mark
-		changed = true
-	}
-	if mark, ok := ac.checkCoreMark(settings.LastCoreVersion); ok {
-		settings.LastCoreVersion = mark
-		changed = true
-	}
-	if !changed {
+	// The marks are computed from the CURRENT binaries, so they are decided here and only
+	// the RESULT is merged. Writing the whole snapshot back would carry every other field
+	// from this read along with it, discarding anything written since — which for a
+	// function that runs at startup is a wide window over settings the user may have just
+	// changed.
+	launcherMark, launcherChanged := checkLauncherMark(settings.LastLauncherVersion)
+	coreMark, coreChanged := ac.checkCoreMark(settings.LastCoreVersion)
+	if !launcherChanged && !coreChanged {
 		return
 	}
-	if err := locale.SaveSettings(binDir, settings); err != nil {
+	if err := locale.UpdateSettings(binDir, func(latest *locale.Settings) error {
+		if launcherChanged {
+			latest.LastLauncherVersion = launcherMark
+		}
+		if coreChanged {
+			latest.LastCoreVersion = coreMark
+		}
+		return nil
+	}); err != nil {
 		// Отметка не записалась — событие поднимется снова на следующем
 		// старте. Работы обязаны это переживать (они идемпотентны).
 		debuglog.WarnLog("version marks: settings.json not saved: %v", err)

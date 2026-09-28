@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestConcurrentWriteDoesNotShareTempFile is statement 6 (§34 name).
@@ -178,8 +179,38 @@ func TestSweepStaleRemovesLeftovers(t *testing.T) {
 	if err := os.WriteFile(leftover, []byte("junk"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	// Age it: the sweep keyed on modification time, because a name that is merely unique
+	// cannot distinguish an abandoned file from one a live writer is filling right now.
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(leftover, old, old); err != nil {
+		t.Fatalf("age the leftover: %v", err)
+	}
+
 	SweepStale(target)
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 		t.Error("a stale staging file survived the sweep")
+	}
+}
+
+// TestSweepStaleKeepsALiveWritersStagingFile — the property that makes the sweep safe.
+//
+// Removing every match by name is what an earlier version did, and it made a concurrent
+// write fail with "no such file or directory" on the rename: the sweeper deleted a staging
+// file another writer was still filling. Age is what actually separates the two cases.
+func TestSweepStaleKeepsALiveWritersStagingFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.json")
+
+	// A staging file being written RIGHT NOW: fresh mtime.
+	live := filepath.Join(dir, ".config.json.tmp-999999")
+	if err := os.WriteFile(live, []byte("in progress"), 0o644); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+
+	SweepStale(target)
+
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("the sweep removed a staging file written moments ago (%v). A live "+
+			"writer would then fail its rename with \"no such file or directory\"", err)
 	}
 }

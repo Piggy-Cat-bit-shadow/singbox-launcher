@@ -150,9 +150,10 @@ func (ac *AppController) switchToDaemonEngine() error {
 		return err
 	}
 	binDir := ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.CoreBackendMode = string(BackendDaemon)
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.CoreBackendMode = string(BackendDaemon)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("daemon mode is on, but saving the choice failed: %w", err)
 	}
 	return nil

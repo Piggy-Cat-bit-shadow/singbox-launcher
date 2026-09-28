@@ -376,26 +376,39 @@ func (b *Backend) TestProxy(group, name string) (protocol.ProxyList, error) {
 	// `testContext()` is the shared run context: it is cancelled when teardown BEGINS, so
 	// this measurement stops with everything else rather than outliving the transport it
 	// is talking to.
+	// The generation is taken BEFORE the measurement, so it identifies THIS request rather
+	// than whatever is current when the reply happens to arrive.
+	generation := b.groupTests.NextSingleTestGeneration()
+
 	outcome := measureProxy(b.testContext(), transport, proxyNode{Group: group, Name: name})
 
-	// STORE the result. The previous version measured, discarded the number and
-	// re-read the list hoping the core would echo it back — which Classic
-	// sometimes did and daemon did not, since a URLTestOutbound reply is not a
-	// promise about the next group snapshot.
-	b.ac.APIService.SetMeasurement(name, coreservices.ProxyMeasurementState{
+	// STORE THE RESULT ONLY IF IT IS STILL THE NEWEST TEST FOR THIS NODE.
+	//
+	// The generation is not decoration: it is what makes a late reply lose. Clicking a row
+	// twice starts two measurements, and they can finish in either order — the first,
+	// slower one landing last and overwriting the newer number with a stale one. The UI
+	// would then show a latency the user did not just measure, from a request they had
+	// already superseded, with nothing to indicate it.
+	//
+	// A measurement must therefore carry an identity that can be COMPARED, which is what the
+	// field is for. Before this, the value was written and never read by anything: the
+	// supersession it was supposed to provide did not exist, so the race above was live.
+	if !b.ac.APIService.RecordMeasurementIfNewer(name, coreservices.ProxyMeasurementState{
 		Delay:      outcome.Delay,
 		Status:     outcome.Status,
 		Error:      outcome.Error,
 		MeasuredAt: outcome.MeasuredAt,
-		// Its OWN generation, not the active group run's.
+		// Its OWN generation space, not the active group run's.
 		//
-		// `ActiveRunID()` returned either 0 or a group test's id, so a node the user
-		// tested by hand was stored as a result of that group run — and the
-		// superseded-run logic then treated the user's deliberate test as a late result
-		// of a run they had replaced. The single test gets an identity from its own
-		// space, and asking for one does not disturb a group test in progress.
-		Generation: b.groupTests.NextSingleTestGeneration(),
-	})
+		// `ActiveRunID()` returned either 0 or a group test's id, so a node the user tested
+		// by hand was stored as a result of that group run — and a group run's results and a
+		// hand test's are not comparable. Asking for a single-test generation does not
+		// disturb a group test in progress.
+		Generation: generation,
+	}) {
+		debuglog.DebugLog("backend: discarding superseded latency result for %q "+
+			"(generation %d)", name, generation)
+	}
 	if outcome.Status != coreservices.MeasurementSuccess {
 		debuglog.DebugLog("backend: latency test for %q: %s (%s)",
 			name, outcome.Status, outcome.Error)

@@ -410,7 +410,38 @@ func (apiSvc *APIService) SetLastPingError(proxyName, errMsg string) {
 func (apiSvc *APIService) SetMeasurement(proxyName string, m ProxyMeasurementState) {
 	apiSvc.StateMutex.Lock()
 	defer apiSvc.StateMutex.Unlock()
-	state := apiSvc.mutableStateLocked()
+	apiSvc.setMeasurementLocked(apiSvc.mutableStateLocked(), proxyName, m)
+}
+
+// RecordMeasurementIfNewer stores a measurement unless a NEWER one already holds the slot.
+//
+// The check and the write are one critical section, because a compare in the caller followed
+// by a write here would be a TOCTOU: two replies arriving together would both see "no newer
+// result" and both write, and the loser of the race would land last and win anyway.
+//
+// Ordering is by `Generation`, which is the identity of the REQUEST rather than of its
+// arrival. Within one generation a later write wins, so a retry of the same request still
+// refreshes the value.
+//
+// Returns false when the result was discarded as superseded, so the caller can say so.
+func (apiSvc *APIService) RecordMeasurementIfNewer(proxyName string, m ProxyMeasurementState) bool {
+	apiSvc.StateMutex.Lock()
+	defer apiSvc.StateMutex.Unlock()
+
+	st := apiSvc.mutableStateLocked()
+	if prev, seen := st.Measurements[proxyName]; seen && prev.Generation > m.Generation {
+		return false
+	}
+	apiSvc.setMeasurementLocked(st, proxyName, m)
+	return true
+}
+
+// setMeasurementLocked applies a measurement to an already-locked state.
+//
+// Extracted so the guarded and unguarded entry points cannot drift apart: the carry-forward
+// and error-map rules below are the substance of a measurement, and two copies of them would
+// eventually disagree.
+func (apiSvc *APIService) setMeasurementLocked(state *proxyScopeState, proxyName string, m ProxyMeasurementState) {
 	if state.Measurements == nil {
 		state.Measurements = make(map[string]ProxyMeasurementState)
 	}

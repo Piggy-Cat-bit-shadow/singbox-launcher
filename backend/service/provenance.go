@@ -292,6 +292,12 @@ func (b *Backend) markConfigManagedBytes(promoted []byte) error {
 }
 
 // configContentHash is the SHA-256 of the config currently on disk.
+//
+// The digest itself comes from `hashConfigBytes`, which is also what records the identity of
+// the config a RUNNING core loaded. Two implementations of "hash this config" would
+// eventually disagree, and the comparison between "what is on disk" and "what the core
+// loaded" would then report divergence that does not exist — or miss the divergence that
+// does.
 func (b *Backend) configContentHash() (string, error) {
 	if b.ac == nil || b.ac.FileService == nil || b.ac.FileService.ConfigPath == "" {
 		return "", fmt.Errorf("no config path")
@@ -300,8 +306,7 @@ func (b *Backend) configContentHash() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:]), nil
+	return hashConfigBytes(raw), nil
 }
 
 // buildRevisionForProvenance reports the generator revision recorded alongside the

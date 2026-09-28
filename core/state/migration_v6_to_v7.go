@@ -867,19 +867,20 @@ func purgeLegacyAfterMigration(s *State, lc LoadContext) {
 
 	// defaults → bin/settings.json, не перетирая явно выставленные.
 	if lc.BinDir != "" && s.Defaults != (Defaults{}) {
-		settings := locale.LoadSettings(lc.BinDir)
-		changed := false
-		if settings.DefaultSubscriptionReload == "" && s.Defaults.Reload != "" {
-			settings.DefaultSubscriptionReload = s.Defaults.Reload
-			changed = true
-		}
-		if settings.DefaultSubscriptionMaxNodes == 0 && s.Defaults.MaxNodes > 0 {
-			settings.DefaultSubscriptionMaxNodes = s.Defaults.MaxNodes
-			changed = true
-		}
-		if changed {
-			_ = locale.SaveSettings(lc.BinDir, settings)
-		}
+		// The rule is "fill in what is MISSING, never overwrite what is set", which is
+		// exactly a merge — so it runs inside the settings lock against the file as it is
+		// NOW, and the checks are re-made there. Reading outside the lock and saving the
+		// whole snapshot back would undo any write that landed between the two, which for a
+		// migration that runs during startup is a real window.
+		_ = locale.UpdateSettings(lc.BinDir, func(settings *locale.Settings) error {
+			if settings.DefaultSubscriptionReload == "" && s.Defaults.Reload != "" {
+				settings.DefaultSubscriptionReload = s.Defaults.Reload
+			}
+			if settings.DefaultSubscriptionMaxNodes == 0 && s.Defaults.MaxNodes > 0 {
+				settings.DefaultSubscriptionMaxNodes = s.Defaults.MaxNodes
+			}
+			return nil
+		})
 	}
 	s.Defaults = Defaults{}
 

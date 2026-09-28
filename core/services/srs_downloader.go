@@ -127,13 +127,20 @@ func DownloadSRS(ctx context.Context, url string, destPath string) error {
 	// had to check for explicitly.
 	var written int64
 	err = atomicfile.WriteWith(destPath, platform.DefaultFileMode, func(w io.Writer) error {
-		// The context is checked before the copy rather than during it, matching the
-		// previous behaviour: the HTTP request itself carries the timeout, so a stalled
-		// body is already bounded by the client.
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		n, cerr := io.Copy(w, resp.Body)
+		// THE CONTEXT IS HONOURED DURING THE COPY, NOT ONLY BEFORE IT.
+		//
+		// A one-shot check before `io.Copy` cannot react to a cancellation that arrives
+		// while the body is streaming, which is the only case that matters for a large
+		// download: the user switches profiles or quits, and the rule-set keeps being
+		// written to disk until the whole body has arrived. The comment on this function
+		// claimed the streaming form removed the staging file "on every failure path —
+		// including a cancelled context", while the check sat before the work it was meant
+		// to interrupt, so the cancellation it named was not actually handled here.
+		//
+		// `backgroundReader` polls between reads, so a cancelled context stops the transfer
+		// promptly and the error propagates out through `WriteWith`, which then removes the
+		// staging file.
+		n, cerr := io.Copy(w, newContextReader(ctx, resp.Body))
 		written = n
 		return cerr
 	})
@@ -332,4 +339,26 @@ func DeleteOrphanRuleSetsFor(dataDir paths.DataDir, target, machineID string, kn
 		}
 	}
 	return deleted, nil
+}
+
+// contextReader fails reads once the context is done.
+//
+// `io.Copy` hands the reader whatever buffer it likes, so a single up-front check cannot
+// interrupt a body that is already flowing. Checking between reads bounds the reaction to one
+// buffer's worth of transfer — small enough that a cancelled download stops promptly, without
+// needing a goroutine or a deadline on the socket.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func newContextReader(ctx context.Context, r io.Reader) *contextReader {
+	return &contextReader{ctx: ctx, r: r}
+}
+
+func (c *contextReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }

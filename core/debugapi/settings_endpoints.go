@@ -81,21 +81,27 @@ func (s *Server) handleSettingsUserAgent(w http.ResponseWriter, r *http.Request)
 			})
 			return
 		}
-		s.settingsMu.Lock()
-		defer s.settingsMu.Unlock()
-		cur := locale.LoadSettings(binDir)
-		cur.SubscriptionUserAgent = strings.TrimSpace(*req.UserAgent)
-		if err := locale.SaveSettings(binDir, cur); err != nil {
+		trimmed := strings.TrimSpace(*req.UserAgent)
+		// Read and write in ONE critical section against every other settings writer — the
+		// one `locale` owns, not a local mutex that only this handler respects.
+		if err := locale.UpdateSettings(binDir, func(cur *locale.Settings) error {
+			cur.SubscriptionUserAgent = trimmed
+			return nil
+		}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		// Re-read for the response rather than trusting a value captured before the
+		// mutation: the stored value is what the endpoint reports, and it is the only thing
+		// that is actually true afterwards.
+		stored := locale.LoadSettings(binDir).SubscriptionUserAgent
 		defaultUA := configtypes.BuildSubscriptionUserAgent()
-		effective := cur.SubscriptionUserAgent
+		effective := stored
 		if effective == "" {
 			effective = defaultUA
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"user_agent": cur.SubscriptionUserAgent,
+			"user_agent": stored,
 			"default":    defaultUA,
 			"effective":  effective,
 		})

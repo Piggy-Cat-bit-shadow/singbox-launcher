@@ -58,7 +58,10 @@ func (ac *AppController) setDaemonSystemProxy(server string) {
 		return
 	}
 	st.DaemonSystemProxy = server
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	if err := locale.UpdateSettings(binDir, func(latest *locale.Settings) error {
+		latest.DaemonSystemProxy = server
+		return nil
+	}); err != nil {
 		debuglog.WarnLog("daemon: save daemon_system_proxy: %v", err)
 	}
 	debuglog.InfoLog("daemon: user system proxy set to %s", server)
@@ -88,7 +91,10 @@ func (ac *AppController) clearDaemonSystemProxy(reason string) {
 		debuglog.InfoLog("daemon: the user system proxy is no longer %s (%s): leaving it as is", label, reason)
 	}
 	st.DaemonSystemProxy = ""
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	if err := locale.UpdateSettings(binDir, func(latest *locale.Settings) error {
+		latest.DaemonSystemProxy = ""
+		return nil
+	}); err != nil {
 		debuglog.WarnLog("daemon: save daemon_system_proxy: %v", err)
 	}
 }

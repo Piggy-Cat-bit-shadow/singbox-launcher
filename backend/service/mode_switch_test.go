@@ -523,7 +523,13 @@ func TestModeSwitchPersistFailureDoesNotDiverge(t *testing.T) {
 	}
 	body := src[idx : idx+end]
 
-	saveIdx := indexOf(body, "locale.SaveSettings")
+	// The persistence call is `locale.UpdateSettings` now: the settings lock lives with the
+	// file, and a backend-local mutex over the same file was the lost update this test's
+	// neighbour exists to prevent. The ORDER is what this test is about, and it is unchanged.
+	saveIdx := indexOf(body, "locale.UpdateSettings")
+	if saveIdx < 0 {
+		saveIdx = indexOf(body, "locale.SaveSettings")
+	}
 	switchIdx := indexOf(body, "SwitchBackendMode")
 	if saveIdx < 0 || switchIdx < 0 {
 		t.Fatal("SetCoreMode no longer both saves and switches")

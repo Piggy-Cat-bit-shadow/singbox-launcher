@@ -54,9 +54,18 @@ func NewConfigService(ac *AppController) *ConfigService {
 		// nothing depends on stability across restarts until the user opts in.
 		if s.HWID == "" {
 			s.EnsureHWID()
-			if err := locale.SaveSettings(binDir, s); err != nil {
+			// Via UpdateSettings so the fresh HWID is merged into whatever else has been
+			// written since this read, instead of being saved over it with a stale snapshot.
+			if err := locale.UpdateSettings(binDir, func(latest *locale.Settings) error {
+				if latest.HWID == "" {
+					latest.HWID = s.HWID
+				}
+				return nil
+			}); err != nil {
 				debuglog.WarnLog("ConfigService: persist generated HWID: %v", err)
 			}
+			// Report what was actually stored: another writer may have set it first.
+			s.HWID = locale.LoadSettings(binDir).HWID
 		}
 		return subscription.SubscriptionRequestSettings{
 			HWID:              s.HWID,

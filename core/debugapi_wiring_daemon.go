@@ -94,9 +94,10 @@ func (f *debugAPIDaemonWiring) SwitchEngine(mode string) error {
 		return err
 	}
 	binDir := f.ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.CoreBackendMode = string(m)
-	if err := locale.SaveSettings(binDir, st); err != nil {
+	if err := locale.UpdateSettings(binDir, func(st *locale.Settings) error {
+		st.CoreBackendMode = string(m)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("engine switched, but persisting the choice failed: %w", err)
 	}
 	return nil

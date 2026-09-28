@@ -103,8 +103,10 @@ type Server struct {
 	// stateMu serializes load-modify-save cycles of the PATCH /state/*
 	// handlers; without it two concurrent PATCHes lose one side's edit.
 	stateMu sync.Mutex
-	// settingsMu — то же для PATCH /settings/* (bin/settings.json).
-	settingsMu sync.Mutex
+	// settingsMu УБРАН: он сериализовал bin/settings.json только внутри debugapi, тогда как
+	// остальное приложение пишет тот же файл через locale.UpdateSettings. Два замка на один
+	// файл — это тот же lost update, что и отсутствие замка. Единственный замок живёт рядом
+	// с файлом, и все писатели идут через него.
 
 	// remote — remote-machines API group (SPEC 100). nil = group off (the
 	// endpoints are not registered and don't show up in / or /help).
