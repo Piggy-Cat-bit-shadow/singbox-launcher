@@ -256,7 +256,10 @@ func (ac *AppController) EndDaemonStop(owner CoreBackend, confirmed bool) {
 		// The core may still be up. Re-assert the running truth so a stale
 		// "stopped" cannot leak to the UI, and let the recorded error carry the
 		// explanation.
-		ac.RunningState.Set(true)
+		//
+		// SetReasserted, NOT Set: nothing started here, and saying otherwise would let the
+		// backend record the current config.json as "what the core loaded".
+		ac.RunningState.SetReasserted()
 	}
 	ac.publishLifecycleChange()
 }

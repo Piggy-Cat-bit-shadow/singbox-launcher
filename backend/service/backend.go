@@ -11,6 +11,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"crypto/rand"
@@ -52,11 +53,13 @@ type Backend struct {
 	// another package's load-mutate-save interleaves and the last writer wins. The single
 	// lock lives with the file, and every writer goes through it.
 	// seq is the monotonic event sequence. It lets the frontend discard an
-	// event that predates the snapshot it already applied.
+	// event that predates the snapshot it already applied. ATOMIC rather than `mu`-guarded,
+	// because the counter is stepped inside the queue lock that makes numbering and sending
+	// atomic, while readers such as `Snapshot` must never take that lock.
 	//
 	// It restarts at 1 for every backend process, which is why it is only ever
 	// interpreted together with sessionID.
-	seq int64
+	seq atomic.Int64
 	// runCtx is the parent of every background operation's context, cancelled
 	// once when the backend shuts down. See runContext.
 	runCtxOnce sync.Once
@@ -117,9 +120,17 @@ type Backend struct {
 	// eventQueueOnce starts the dispatcher on the first emit, so a Backend that never
 	// emits never starts a goroutine.
 	eventQueueOnce sync.Once
-	// flushSignal is set only by FlushEventsForTest, under eventQueueMu; the dispatcher
-	// calls it when the sentinel reaches the head of the queue.
-	flushSignal func()
+	// flushSignals maps the sequence a flush is waiting for to the closure that releases it,
+	// under eventQueueMu. A MAP RATHER THAN A SINGLE SLOT: with one slot two concurrent
+	// flushes overwrote each other, the earlier one's sentinel fired the later one's closure,
+	// and the earlier one waited forever.
+	flushSignals map[uint64]func()
+	// flushToken identifies ONE CALL to FlushEventsForTest. The key cannot be the sequence
+	// being awaited: two concurrent flushes observe the same sequence and would collide.
+	flushToken uint64
+	// dispatcherGID identifies the delivery goroutine, so an emitter can tell whether it IS
+	// that goroutine. A shared boolean cannot answer this — see `onDispatcherGoroutine`.
+	dispatcherGID atomic.Uint64
 
 	// runtimeCfg records which config content the RUNNING core loaded, so a
 	// config/state divergence is detectable instead of silent.
@@ -307,8 +318,11 @@ func (b *Backend) handleCoreStateEvent(ev events.Event) {
 				// lifecycle refresh fires → B is recorded as live → the proxy surfaces stop
 				// reporting that a restart is needed, and the user is never told.
 				//
-				// `StartedHere` is set by `RunningState.Set` and nowhere else, so it means
-				// exactly "a core came up".
+				// `StartedHere` is STATED by the publisher, and only the publishers that
+				// observed a core load a config state it. `Set` and the adoption path do;
+				// `SetReasserted` — used when a daemon stop cannot be confirmed and the
+				// running flag is restated from a belief — deliberately does not, because
+				// nothing started and recording here would clear the divergence.
 				if startedHere {
 					b.recordRunningConfig()
 				}
@@ -407,7 +421,7 @@ func (b *Backend) Snapshot() protocol.AppSnapshot {
 	// The fields are cheap reads, so holding the lock across them costs nothing
 	// measurable and removes the window entirely.
 	b.mu.Lock()
-	seq := b.seq
+	seq := b.seq.Load()
 	handshake := b.Handshake()
 	core := b.coreState()
 	settings := b.settingsState()
@@ -804,30 +818,112 @@ func (b *Backend) emit(name string, payload any) {
 	// transition it carried. A single consumer guarantees that delivery order equals SEND
 	// order; it cannot repair send order disagreeing with numbering order.
 	//
-	// Holding `mu` across the send is safe because the send is non-blocking for a draining
-	// subscriber: `eventQueueCh` has room by construction (see `enqueueEvent`), so this is
-	// not a lock held across I/O.
-	b.mu.Lock()
-	b.seq++
+	// NUMBER AND SEND UNDER `eventQueueMu`, AND NEVER UNDER `mu`.
+	//
+	// TWO PROPERTIES HAVE TO HOLD AT ONCE, AND EACH FIX FOR ONE BROKE THE OTHER.
+	//
+	//   * Numbering and sending must be ATOMIC with respect to each other. Number under one
+	//     lock and send after releasing it, and two emitters can be numbered 2 and 30 in that
+	//     order and then SEND them in the other. The channel is FIFO, so it delivers 30 before
+	//     2 — a genuine inversion, and the client discards the lower number as stale, losing
+	//     the transition it carried. Measured: "delivery order violates sequence order at
+	//     index 16: observed ...78, 31...".
+	//
+	//   * The lock held across the send must NOT be the state lock. `mu` guards the sequence
+	//     AND the subscriber list that `Snapshot`, `Subscribe` and `EmitCoreState` read. With
+	//     the queue full behind a wedged client, holding `mu` across the send froze the whole
+	//     BACKEND, not just the emitter — and `Shutdown` announces itself through this path,
+	//     so teardown could not begin. The original justification, that the queue "has room by
+	//     construction", is circular: room exists only while the consumer keeps up, and a
+	//     wedged consumer is the only case the bound exists for.
+	//
+	// `eventQueueMu` satisfies both: it serialises the number-and-send pair against other
+	// emitters, and it is a lock nobody reads state through. `b.seq` moves into it, so `mu`
+	// no longer guards the counter and a full queue blocks emitters only.
+	b.eventQueueMu.Lock()
+	// The counter is ATOMIC, not `mu`-guarded, because `mu` no longer covers the send and
+	// readers such as `Snapshot` must not take the queue lock. Atomicity of the
+	// number-and-send PAIR still comes from `eventQueueMu`, which is what ordering needs; the
+	// atomic only keeps a concurrent reader from tripping the race detector.
+	seq := b.seq.Add(1)
 	// The session is stamped here, under the same lock that hands out the
 	// sequence, so the pair (session, seq) is always consistent: no event can
 	// carry one process's sequence under another process's identity.
 	if b.sessionID == "" {
 		b.sessionID = newSessionID()
 	}
-	ev := protocol.Event{Event: name, Seq: b.seq, Session: b.sessionID, Payload: payload}
-	b.enqueueEvent(ev)
-	b.mu.Unlock()
+	ev := protocol.Event{Event: name, Seq: seq, Session: b.sessionID, Payload: payload}
+
+	// A SUBSCRIBER RUNS ON THE DISPATCHER GOROUTINE, which is the only consumer of the queue.
+	// Sending from there would wait for a drain that cannot happen until the subscriber
+	// returns — a permanent self-deadlock once the buffer fills, and reachable by any
+	// subscriber that reacts to an event with a burst. Delivering inline is safe for ORDER
+	// because this runs to completion before the dispatcher reads its next event.
+	//
+	// The check is goroutine-scoped. A shared "delivery in progress" flag is also true on
+	// every OTHER goroutine during a slow delivery, which would make concurrent emitters jump
+	// the queue.
+	if b.onDispatcherGoroutine() {
+		b.eventQueueMu.Unlock()
+		b.deliver(ev)
+		return
+	}
+
+	b.enqueueEventLocked(ev)
+	b.eventQueueMu.Unlock()
 }
 
 // enqueueEvent hands a numbered event to the single delivery goroutine.
 //
-// Non-blocking for the emitter, which is the property that keeps `Shutdown` able to announce
-// itself. See `emit` for why ordering is provided by a single consumer rather than by a lock
-// held across delivery.
+// `eventQueueMu` is held across the send, which is what keeps SEND order equal to NUMBERING
+// order — the property the single consumer then turns into delivery order. It is a separate
+// lock from `mu` so that a full queue blocks emitters only, and never readers.
+//
+// A SUBSCRIBER RUNS ON THE DISPATCHER GOROUTINE, so a subscriber that emits must not be able
+// to fill the queue: the only consumer is the goroutine it is running on, and a blocking send
+// would wait for a drain that cannot happen until it returns. That is a permanent deadlock,
+// not a slow path. `emit` therefore detects re-entrancy and delivers directly.
 func (b *Backend) enqueueEvent(ev protocol.Event) {
+	b.eventQueueMu.Lock()
+	defer b.eventQueueMu.Unlock()
+	b.enqueueEventLocked(ev)
+}
+
+// enqueueEventLocked is `enqueueEvent` for callers already holding `eventQueueMu`.
+//
+// It exists so a caller that must make "register the waiter" and "send the wake-up" one
+// atomic step can do so. Taking the lock twice would be the obvious alternative and would
+// reopen exactly the window it is being taken to close.
+func (b *Backend) enqueueEventLocked(ev protocol.Event) {
 	b.eventQueueOnce.Do(b.startEventDispatcher)
+
 	b.eventQueueCh <- ev
+}
+
+// onDispatcherGoroutine reports whether THIS goroutine is the delivery goroutine.
+//
+// IT CANNOT BE A SHARED BOOLEAN, and this is the trap that cost two rewrites. A plain flag
+// saying "a delivery is in progress" is true on the dispatcher — and equally true, at the same
+// moment, on EVERY other goroutine. An emitter running concurrently with a slow subscriber
+// therefore saw `true`, took the inline path, and delivered its event IMMEDIATELY, ahead of
+// everything already queued. That is an ordering inversion by construction, and it showed up
+// exactly as the client experiences it: "delivery order violates sequence order at index 21:
+// observed ...29, 21...".
+//
+// Goroutine-local state is what the question actually requires, so this reads the goroutine's
+// own identity. `runtime.Stack` is far too expensive for an emit path, and Go does not expose
+// the id directly, so the dispatcher's id is captured once at start and compared against a
+// cheap prefix parse of the runtime's own header line. The value is only ever compared for
+// equality, never interpreted.
+func (b *Backend) onDispatcherGoroutine() bool {
+	want := b.dispatcherGID.Load()
+	if want == 0 {
+		// The dispatcher has not recorded its identity yet, so no goroutine can be it. A
+		// subscriber cannot run before then, because subscribers run FROM that goroutine
+		// after the store.
+		return false
+	}
+	return goroutineID() == want
 }
 
 // startEventDispatcher launches the single ordered delivery goroutine.
@@ -840,31 +936,36 @@ func (b *Backend) enqueueEvent(ev protocol.Event) {
 func (b *Backend) startEventDispatcher() {
 	b.eventQueueCh = make(chan protocol.Event, eventQueueSize)
 	go func() {
+		b.dispatcherGID.Store(goroutineID())
 		for ev := range b.eventQueueCh {
 			if ev.Event == eventFlushSentinel {
-				b.eventQueueMu.Lock()
-				fn := b.flushSignal
-				b.eventQueueMu.Unlock()
-				if fn != nil {
-					fn()
+				if token, ok := ev.Payload.(uint64); ok {
+					b.signalFlush(token)
 				}
 				continue
 			}
-
-			b.mu.Lock()
-			subs := make([]func(protocol.Event), 0, len(b.subscribers))
-			for _, fn := range b.subscribers {
-				if fn != nil {
-					subs = append(subs, fn)
-				}
-			}
-			b.mu.Unlock()
-
-			for _, fn := range subs {
-				fn(ev)
-			}
+			b.deliver(ev)
 		}
 	}()
+}
+
+// deliver runs the subscribers for one event.
+//
+// Split out so the re-entrant path in `enqueueEvent` reaches the SAME delivery code rather
+// than a copy of it — a second implementation is how the ordering guarantee would drift.
+func (b *Backend) deliver(ev protocol.Event) {
+	b.mu.Lock()
+	subs := make([]func(protocol.Event), 0, len(b.subscribers))
+	for _, fn := range b.subscribers {
+		if fn != nil {
+			subs = append(subs, fn)
+		}
+	}
+	b.mu.Unlock()
+
+	for _, fn := range subs {
+		fn(ev)
+	}
 }
 
 // FlushEventsForTest blocks until every event emitted so far has been delivered.
@@ -873,29 +974,90 @@ func (b *Backend) startEventDispatcher() {
 // emitted must first wait for the dispatcher to catch up. Exposed rather than hidden behind
 // a sleep: a sleep is either slower than needed or flaky, and this is exact.
 func (b *Backend) FlushEventsForTest() {
-	b.mu.Lock()
-	want := b.seq
-	b.mu.Unlock()
+	want := b.seq.Load()
 	if want == 0 {
 		return
 	}
 
+	// EVERY SENTINEL RELEASES EVERY WAITING FLUSH, AND EACH CALLER GETS ITS OWN CHANNEL.
+	//
+	// Two bugs lived here, and only the first was obvious:
+	//
+	//   1. A SINGLE SLOT. Flush A installed its closure, flush B replaced it, A's sentinel
+	//      then fired B's closure, and A waited forever.
+	//
+	//   2. KEYING BY SEQUENCE. The fix for (1) keyed the closures by the `want` each caller
+	//      read — but two concurrent flushes read the SAME `want`, because nothing was
+	//      emitted between their reads. They collided on one key, one closure was
+	//      overwritten, and the loser waited forever again. The key has to identify the
+	//      CALL, and nothing about the backend's state distinguishes two calls that observe
+	//      the same sequence.
+	//
+	// A sentinel needs no key at all. The dispatcher processes the queue in order, so when a
+	// sentinel is reached, EVERY event numbered at or below that point has been delivered —
+	// which satisfies every flush that was already waiting. Each caller owns a channel that
+	// only its own `defer` removes, so overlapping flushes release each other instead of
+	// clobbering each other.
 	done := make(chan struct{})
 	var once sync.Once
-	b.eventQueueMu.Lock()
-	b.flushSignal = func() { once.Do(func() { close(done) }) }
-	b.eventQueueMu.Unlock()
-	defer func() {
-		b.eventQueueMu.Lock()
-		b.flushSignal = nil
-		b.eventQueueMu.Unlock()
-	}()
+	release := func() { once.Do(func() { close(done) }) }
 
+	// REGISTRATION AND ENQUEUE ARE ONE STEP, UNDER `eventQueueMu`.
+	//
+	// Registering first and enqueueing afterwards leaves a window in which the dispatcher
+	// can already be draining: it reaches the sentinel, finds no waiting signal, and moves
+	// on — and the caller then waits forever for a release that already happened. The
+	// symptom is a flush that never returns on a queue that is visibly EMPTY, which points
+	// nowhere near the cause.
+	//
+	// `enqueueEvent` takes the same lock, so holding it across both makes the sentinel and
+	// its registration atomic with respect to the dispatcher's read.
+	b.eventQueueMu.Lock()
+	if b.flushSignals == nil {
+		b.flushSignals = map[uint64]func(){}
+	}
+	b.flushToken++
+	token := b.flushToken
+	b.flushSignals[token] = release
 	// NOT through `emit`: the sentinel must not consume a sequence number, or it would move
 	// the counter a test is inspecting and the synchronisation would corrupt what it
 	// synchronises.
-	b.enqueueEvent(protocol.Event{Event: eventFlushSentinel, Seq: want})
+	//
+	// THE SENTINEL CARRIES THE TOKEN, and the dispatcher releases only that waiter. The
+	// earlier version released every registered waiter, which is correct for the flush whose
+	// sentinel arrived but WRONG for one that registered later: two concurrent flushes share
+	// a `want`, so the first sentinel is processed before the second call has registered at
+	// all — the second waiter is then released by nothing, because the sentinel that would
+	// have released it is still queued behind work that has already been declared done.
+	b.enqueueEventLocked(protocol.Event{Event: eventFlushSentinel, Seq: want, Payload: token})
+	b.eventQueueMu.Unlock()
+
+	defer func() {
+		b.eventQueueMu.Lock()
+		delete(b.flushSignals, token)
+		b.eventQueueMu.Unlock()
+	}()
+
 	<-done
+}
+
+// signalFlush releases the ONE flush that enqueued this sentinel.
+//
+// Reaching a sentinel means everything numbered below it has been delivered — but "the
+// events I was waiting for are done" is per-call, not global. Two concurrent flushes observe
+// the SAME sequence, so releasing both on the first sentinel means the second is released
+// before it registered, and its own sentinel then finds nobody waiting: the call hangs on an
+// empty queue. The token makes the release belong to the call that asked for it.
+func (b *Backend) signalFlush(token uint64) {
+	b.eventQueueMu.Lock()
+	fn := b.flushSignals[token]
+	b.eventQueueMu.Unlock()
+
+	// Called outside the lock: the closure only closes a channel, but a signal that runs
+	// user code while holding a lock is a habit worth not forming.
+	if fn != nil {
+		fn()
+	}
 }
 
 // eventFlushSentinel is never delivered to a subscriber: it is filtered at the single

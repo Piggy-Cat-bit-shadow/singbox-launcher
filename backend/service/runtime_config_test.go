@@ -280,3 +280,112 @@ func TestALifecycleRefreshDoesNotClearTheDivergence(t *testing.T) {
 			"follow a legitimate restart")
 	}
 }
+
+// TestAReassertedRunningStateDoesNotClearTheDivergence — the same bug through a SECOND door.
+//
+// The fix above keyed `recordRunningConfig` on `StartedHere`, and `StartedHere` was derived
+// from the running VALUE: the reasoning was that `set` dedups no-op writes, so reaching the
+// publish with `true` means the flag just changed, and therefore a core came up. The dedup
+// does guarantee the CHANGE; it does not guarantee the CAUSE.
+//
+// `core/lifecycle_error.go` calls `RunningState.Set(true)` when a daemon STOP cannot be
+// confirmed — the core may still be up, so the running flag is restated to stop a stale
+// "stopped" from reaching the UI. That is a genuine false→true transition produced by a
+// statement about a belief, so it sailed past the dedup and published `StartedHere: true`.
+// Everything the first fix prevented therefore remained reachable through the failure path of
+// a stop: the backend re-read the CURRENT config.json and recorded it as what the core had
+// loaded, clearing the divergence.
+//
+// The lesson is in the shape of the fix, not the trigger: `StartedHere` is now STATED by the
+// publisher. `SetReasserted` is the entry point for "I believe it is still running", and it is
+// the one the unconfirmed-stop path uses.
+func TestAReassertedRunningStateDoesNotClearTheDivergence(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configA := []byte(`{"outbounds":[{"type":"direct","tag":"A"}]}`)
+	configB := []byte(`{"outbounds":[{"type":"direct","tag":"B"}]}`)
+	if err := os.WriteFile(configPath, configA, 0o644); err != nil {
+		t.Fatalf("write config A: %v", err)
+	}
+
+	b := newTestBackendWithConfig(t, string(configA))
+	b.ac.FileService.ConfigPath = configPath
+
+	// The core starts on A.
+	b.handleCoreStateEvent(events.Event{
+		Kind: events.VpnStateChanged,
+		Payload: events.VpnStateChangedPayload{
+			Running: true, StartedHere: true,
+		},
+	})
+	if b.RuntimeConfigDiverged() {
+		t.Fatal("the fixture diverged immediately; the test would prove nothing")
+	}
+
+	// A rebuild promotes B while the core keeps serving A. The core is still recorded as
+	// running here, which is the state the unconfirmed-stop path has to deal with: it does
+	// not know the core is gone, so it restates the running truth rather than clearing it.
+	if err := os.WriteFile(configPath, configB, 0o644); err != nil {
+		t.Fatalf("write config B: %v", err)
+	}
+	if !b.RuntimeConfigDiverged() {
+		t.Fatal("the fixture is wrong: the promoted config was not seen as diverged " +
+			"before the re-assertion, so the test could not observe the bug regardless")
+	}
+
+	// Now the LOAD-BEARING part: the daemon stop could not be confirmed, so the running
+	// state is RE-ASSERTED. This publishes `Running: true` without `StartedHere`, which is
+	// exactly what `SetReasserted` exists to express — and what a raw `Set(true)` got wrong.
+	b.handleCoreStateEvent(events.Event{
+		Kind: events.VpnStateChanged,
+		Payload: events.VpnStateChangedPayload{
+			Running: true, StartedHere: false,
+		},
+	})
+
+	if !b.RuntimeConfigDiverged() {
+		t.Error("a re-asserted running state cleared the divergence. Nothing started and " +
+			"no config was loaded, so the record of what the live core is serving must " +
+			"not have been rewritten from the file — that is the entire condition the " +
+			"record exists to report, and the user is now never told a restart is needed")
+	}
+}
+
+// TestOnlyARealStartClaimsStartedHere pins the publisher side, which is where the bug lived.
+//
+// The backend test above drives the EVENT; this one checks that the CONTROLLER produces the
+// right event, because a hand-built payload can only prove what the consumer does with it.
+// Deriving the flag from the value is the mistake, and only a source-level check of the call
+// sites catches a future `Set(true)` that means "I believe it is running".
+func TestOnlyARealStartClaimsStartedHere(t *testing.T) {
+	src := readServiceSource(t, "core/controller.go")
+	body := functionBodyForTest(t, src, "func (r *RunningState) set(")
+
+	if !contains(body, "startedHere") {
+		t.Fatal("`set` no longer receives a `startedHere` argument, so the published flag " +
+			"must be derived from the value again — which is what let an unconfirmed " +
+			"daemon stop be reported as a start")
+	}
+	if contains(body, "StartedHere: value") {
+		t.Error("`set` derives `StartedHere` from the running value. The dedup guarantees " +
+			"the flag CHANGED, not that a core STARTED, and the unconfirmed-stop path " +
+			"produces the same false→true transition")
+	}
+
+	// `SetReasserted` must exist and must not claim a start.
+	reassert := functionBodyForTest(t, src, "func (r *RunningState) SetReasserted()")
+	if !contains(reassert, "false") {
+		t.Error("`SetReasserted` does not pass a false `startedHere`, so it still claims a " +
+			"core started")
+	}
+
+	// And the unconfirmed-stop path must USE it, or the entry point is decoration.
+	lifecycle := readServiceSource(t, "core/lifecycle_error.go")
+	if !contains(lifecycle, "SetReasserted()") {
+		t.Error("the unconfirmed daemon stop does not use `SetReasserted`, so it still " +
+			"publishes `StartedHere: true` for a core that did not start")
+	}
+	if contains(lifecycle, "RunningState.Set(true)") {
+		t.Error("the unconfirmed daemon stop still calls `Set(true)`, which claims a start")
+	}
+}

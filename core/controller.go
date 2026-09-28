@@ -664,17 +664,35 @@ func CheckLinuxCapabilities() {
 // stop — settling a stop operation that never happened. Passing the reason makes
 // the note and the flip ONE operation, which removes the entire class.
 func (r *RunningState) Set(value bool) {
-	r.set(value, events.TeardownNone)
+	r.set(value, events.TeardownNone, value)
 }
 
 // SetStopped records that the core went down for a stated reason.
 func (r *RunningState) SetStopped(reason events.TeardownReason) {
-	r.set(false, reason)
+	r.set(false, reason, false)
+}
+
+// SetReasserted restates a running state the caller BELIEVES is already true, without
+// claiming that a core started.
+//
+// WHY THIS EXISTS AS A SEPARATE ENTRY POINT. `Set(true)` was taken to mean "a core came up",
+// and that is almost always what it means — but not here: when a daemon stop cannot be
+// CONFIRMED, the core may still be up, so the running flag is re-asserted to stop a stale
+// "stopped" from leaking to the UI. That is a statement about a belief, not an observation of
+// a start, and it is a genuine false→true transition, so the dedup in `set` does not suppress
+// it.
+//
+// Left on `Set`, it published `StartedHere: true` and the backend then recorded the CURRENT
+// `config.json` as "what the core loaded" — clearing the divergence between the two, which is
+// the exact condition that record exists to report. The bug survived the first fix precisely
+// because `StartedHere` was derived from the VALUE instead of being stated by the caller.
+func (r *RunningState) SetReasserted() {
+	r.set(true, events.TeardownNone, false)
 }
 
 // set is the single implementation: the value and its reason are applied and
 // published together, so no reader can observe one without the other.
-func (r *RunningState) set(value bool, reason events.TeardownReason) {
+func (r *RunningState) set(value bool, reason events.TeardownReason, startedHere bool) {
 	r.Lock()
 	if r.running == value {
 		r.Unlock()
@@ -741,14 +759,19 @@ func (r *RunningState) set(value bool, reason events.TeardownReason) {
 		if !value {
 			publishReason = reason
 		}
-		// StartedHere is `value`, and this is the ONLY place it can be true: `Set` dedups
-		// no-op calls above, so reaching here with value=true means the running state just
-		// CHANGED — a core has come up and loaded a config. Every other publisher of this
-		// event is a refresh of an unchanged picture.
+		// StartedHere is STATED BY THE CALLER, not derived from `value`.
+		//
+		// It used to be `value`, on the reasoning that the dedup above makes a reaching
+		// true→ true value impossible, so a `true` here means the flag just changed and
+		// therefore a core came up. The dedup does guarantee the CHANGE; it does not
+		// guarantee the CAUSE. `SetReasserted` produces exactly the same false→true
+		// transition for a state the caller merely believes is already true, and deriving
+		// the flag from the value handed that case the meaning "a core started" — which is
+		// what let a failed daemon stop clear the runtime-config divergence.
 		ac.EventBus.Publish(events.Event{
 			Kind: events.VpnStateChanged,
 			Payload: events.VpnStateChangedPayload{
-				Running: value, Teardown: publishReason, StartedHere: value,
+				Running: value, Teardown: publishReason, StartedHere: startedHere,
 			},
 		})
 	}

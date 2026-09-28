@@ -2,6 +2,7 @@ package service
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -270,20 +271,33 @@ func TestABlockedSubscriberCannotWedgeTheEmitter(t *testing.T) {
 // re-enter the backend. With a non-reentrant mutex held across delivery, a subscriber that
 // calls `emit` deadlocks permanently — and the test that shipped alongside claimed to cover
 // reentrancy while only exercising read-only accessors.
+//
+// THE SINGLE-CHILD VERSION WAS NOT ENOUGH, and the reason is the whole point. A subscriber
+// runs ON the dispatcher goroutine, which is the queue's only consumer. Emitting one child
+// finds room in the buffer and returns; emitting MORE THAN `eventQueueSize` children fills it,
+// and the send then waits for a drain that cannot happen until the subscriber returns — a
+// permanent deadlock, reachable by any subscriber that reacts to an event by emitting a burst
+// (a state change that fans out per-source, say). The fix is that the emitter recognises
+// re-entrancy and delivers inline rather than queueing.
 func TestASubscriberMayEmitWithoutDeadlocking(t *testing.T) {
 	b := &Backend{}
 
+	const children = eventQueueSize + 10
+	var delivered atomic.Int64
+
 	inner := make(chan struct{})
+	var innerOnce sync.Once
 	unsub := b.Subscribe(func(ev protocol.Event) {
 		if ev.Event == protocol.EventCoreStateChanged {
-			// Re-entering the emitter from inside a subscriber must not deadlock.
-			b.emit(protocol.EventSettingsChanged, map[string]any{"lang": "en"})
-			select {
-			case <-inner:
-			default:
-				close(inner)
+			// Re-entering the emitter from inside a subscriber must not deadlock — and must
+			// keep working past the buffer size, which is where a naive queue send wedges.
+			for i := 0; i < children; i++ {
+				b.emit(protocol.EventSettingsChanged, map[string]any{"i": i})
 			}
+			innerOnce.Do(func() { close(inner) })
+			return
 		}
+		delivered.Add(1)
 	})
 	defer unsub()
 
@@ -295,16 +309,123 @@ func TestASubscriberMayEmitWithoutDeadlocking(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a subscriber that emits deadlocked the backend. A non-reentrant lock " +
-			"held across delivery makes re-entering the emitter impossible, and the " +
-			"design documents re-entrant subscribers as expected")
+	case <-time.After(20 * time.Second):
+		t.Fatalf("a subscriber that emitted %d events deadlocked the backend. It runs on "+
+			"the dispatcher goroutine, which is the queue's ONLY consumer, so once the "+
+			"buffer fills the send waits for a drain that cannot happen until the "+
+			"subscriber returns", children)
 	}
 
-	// The re-entrant event must actually be delivered, not silently dropped.
 	select {
 	case <-inner:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the re-entrant emit was never delivered")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the re-entrant emits were never delivered")
+	}
+
+	// Every child must actually arrive: delivering inline must not become "drop on
+	// re-entrancy", which would make the deadlock disappear by losing events instead.
+	b.FlushEventsForTest()
+	if got := delivered.Load(); got != children {
+		t.Errorf("delivered %d of %d re-entrant events; a subscriber's own emits must not "+
+			"be dropped", got, children)
+	}
+}
+
+// TestAFullQueueDoesNotFreezeTheBackend — the blast radius of the queue bound.
+//
+// Holding `mu` across the send made the bound a whole-backend wedge: with the queue full
+// behind a stuck subscriber, every OTHER emitter blocked on `mu`, and so did `Snapshot`,
+// `Subscribe` and `FlushEventsForTest`. The queue exists to cap a wedged client, so that is
+// exactly the situation it must not make worse — and `Shutdown` announces itself through
+// `emit`, so teardown could not even begin.
+//
+// The send has its own lock now, and `mu` is released before it, so a full queue blocks
+// emitters only.
+func TestAFullQueueDoesNotFreezeTheBackend(t *testing.T) {
+	b := &Backend{}
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	unsub := b.Subscribe(func(ev protocol.Event) {
+		if ev.Event == protocol.EventCoreStateChanged {
+			enteredOnce.Do(func() { close(entered) })
+			// Block the ONLY consumer, so the queue fills behind this.
+			<-release
+		}
+	})
+	defer unsub()
+	defer close(release)
+
+	// Fill the queue from a goroutine that will legitimately block.
+	emitted := make(chan struct{})
+	go func() {
+		defer close(emitted)
+		for i := 0; i < eventQueueSize+64; i++ {
+			b.emit(protocol.EventCoreStateChanged, map[string]any{"i": i})
+		}
+	}()
+
+	<-entered // the consumer is now stuck and the backlog is growing
+
+	// READERS MUST STILL WORK. This is the assertion the fix is about: with `mu` held across
+	// the send, this call never returns.
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_ = b.Snapshot()
+		b.mu.Lock()
+		_ = len(b.subscribers)
+		b.mu.Unlock()
+	}()
+
+	select {
+	case <-readDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a full event queue froze the backend's readers. The send must not hold " +
+			"the state lock: the queue's bound exists to cap a wedged client, and holding " +
+			"`mu` across it turns that bound into a deadlock for Snapshot, Subscribe and " +
+			"FlushEventsForTest — the shutdown announcement goes through the same path, so " +
+			"teardown itself could not begin")
+	}
+}
+
+// TestConcurrentFlushesEachWakeTheirOwnCaller — the single-slot clobbering.
+//
+// `flushSignal` was one slot, so two concurrent flushes overwrote each other: A installed its
+// closure, B replaced it, A's own sentinel then fired B's closure, and A blocked on `<-done`
+// forever. Keyed by the sequence each caller waits for, every flush is released by its own
+// boundary.
+func TestConcurrentFlushesEachWakeTheirOwnCaller(t *testing.T) {
+	b := &Backend{}
+
+	// A slow subscriber, so the two flushes genuinely overlap and the sentinels queue up
+	// behind real work rather than being consumed instantly.
+	unsub := b.Subscribe(func(ev protocol.Event) {
+		time.Sleep(200 * time.Microsecond)
+	})
+	defer unsub()
+
+	for i := 0; i < 4; i++ {
+		b.emit(protocol.EventCoreStateChanged, map[string]any{"i": i})
+	}
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.FlushEventsForTest()
+		}()
+	}
+
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("two concurrent flushes did not both return; with a single signal slot one " +
+			"call's closure is clobbered by the other and its caller waits forever")
 	}
 }
