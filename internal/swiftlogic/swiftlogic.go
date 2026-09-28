@@ -44,6 +44,7 @@ var Sources = []string{
 	"macos/Sources/JiejieBox/Models/SubscriptionURLInput.swift",
 	"macos/Sources/JiejieBox/Models/DaemonCommandLifetime.swift",
 	"macos/Sources/JiejieBox/Models/NavigationStackModel.swift",
+	"macos/Sources/JiejieBox/Models/RequestGeneration.swift",
 	"macos/Sources/JiejieBox/App/DraftStore.swift",
 }
 

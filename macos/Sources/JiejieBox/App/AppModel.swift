@@ -217,57 +217,7 @@ final class AppModel {
     /// counter and each finished node updates immediately, so the UI needs
     /// total/completed plus which nodes are currently in flight. Cramming that
     /// into the shared pending enum is what made the old state unmaintainable.
-    enum ProxyGroupTestState: Equatable {
-        case idle
-        /// The run has been REQUESTED but the backend has not reported it yet.
-        ///
-        /// This case is the fix for a real window: the button was guarded by
-        /// `isRunning`, which only becomes true when the backend's `started`
-        /// progress frame arrives. Between the click and that frame the button
-        /// still looked idle, so a quick second click started a second run.
-        /// Waiting for the backend to tell us what we just asked for is the wrong
-        /// direction — the click itself is the evidence the run is under way.
-        ///
-        /// `runID` is unknown until the backend names the run, which is why the
-        /// launching state carries the GROUP rather than the id: the group is
-        /// known at click time and is what the UI needs to keep showing.
-        case launching(runID: UInt64?, group: String)
-        case running(GroupTestProgress)
 
-        var progress: GroupTestProgress? {
-            if case .running(let p) = self { return p }
-            return nil
-        }
-
-        /// True from the click, not from the first backend frame.
-        var isRunning: Bool {
-            switch self {
-            case .idle: return false
-            case .launching, .running: return true
-            }
-        }
-
-        /// The group this run belongs to, in either state.
-        var group: String? {
-            switch self {
-            case .idle: return nil
-            case .launching(_, let g): return g
-            case .running(let p): return p.group
-            }
-        }
-    }
-
-    /// Progress of one running group test.
-    struct GroupTestProgress: Equatable {
-        let id: UInt64
-        let group: String
-        let total: Int
-        var completed: Int
-        var succeeded: Int
-        var failed: Int
-        /// Nodes whose measurement is in flight, so only those show a spinner.
-        var inFlight: Set<String>
-    }
 
     enum ProxyListState: Equatable {
         /// Nothing requested yet.
@@ -1073,7 +1023,7 @@ final class AppModel {
         // Claimed BEFORE the request, and never released on the way out: the
         // "launching" state is what locks the button between the click and the
         // backend's first progress frame.
-        groupTest = .launching(runID: nil, group: group)
+        groupTest = .launching(group: group)
         let generation = beginProxyListRequest()
         do {
             let result = try await client.testProxyGroup(group)
@@ -1116,15 +1066,13 @@ final class AppModel {
             // display: another surface (or a previous session) may have begun a
             // run, and adopting it would resurrect a test the user is not
             // running. A launching state means WE asked, so its group matches.
-            if case .launching(_, let launchedGroup) = groupTest {
-                guard p.group == launchedGroup else { return }
-            } else if case .running(let running) = groupTest {
-                // Already tracking this run; a duplicate frame must not reset
-                // the counters the user is watching.
-                if running.id == p.run_id { return }
-            } else {
-                // Idle: no run of ours is outstanding, so a `started` frame can
-                // only describe someone else's run.
+            // Ownership is decided by the extracted rule so it can be tested:
+            // a frame for a run we did not launch is not ours to display, and a
+            // duplicate for one we ARE tracking must not reset the counters the
+            // user is watching.
+            guard acceptsGroupTestStart(groupTest,
+                                        startedGroup: p.group,
+                                        startedRunID: p.run_id) else {
                 return
             }
             groupTest = .running(GroupTestProgress(
@@ -1199,35 +1147,42 @@ final class AppModel {
     /// Now the reply states which request it answers, and only the current one may
     /// change what the user sees.
     private func apply(_ list: ProxyList, forGroup: String, generation: UInt64) {
-        guard generation == proxyListGeneration else {
-            // A superseded reply. Dropped silently and without touching the
-            // screen: the request that replaced it will commit its own result,
-            // and applying this one first would flash the wrong list.
+        let replyGroup = list.group ?? forGroup
+        // The decision is a pure function of the two stamps and the two group
+        // names, so it can be tested directly rather than inferred from what the
+        // screen ends up showing.
+        switch proxyListCommitDecision(replyGeneration: generation,
+                                       currentGeneration: proxyListGeneration,
+                                       replyGroup: replyGroup,
+                                       displayGroup: forGroup) {
+        case .superseded:
+            // A newer request is outstanding and will paint the screen. Applying
+            // this one first would flash the list the user already left.
             return
+        case .otherGroup:
+            // The LIST belongs to a group the user is not looking at, so it is
+            // dropped. The metadata below still applies: capabilities and the
+            // group list are not group-specific, and refusing them would strip
+            // the screen of information the reply legitimately carries.
+            break
+        case .commit:
+            // A group-only reply must not wipe the visible nodes.
+            if list.available || !list.proxies.isEmpty || !(list.group ?? "").isEmpty {
+                proxies = list.proxies
+            }
+            if let g = list.group, !g.isEmpty {
+                // The list and the group name move TOGETHER. This is what makes
+                // `selectGroup` safe to write optimistically: the selection is
+                // committed here, next to the rows it describes.
+                selectedGroup = g
+                pendingSelectedGroup = nil
+            }
         }
+
         if let caps = list.capabilities {
             proxyActions = caps
         }
         if !list.groups.isEmpty { groups = list.groups }
-        // A group-only reply must not wipe the visible nodes.
-        if list.available || !list.proxies.isEmpty || !(list.group ?? "").isEmpty {
-            // COMMIT ONLY FOR THE GROUP THE USER IS LOOKING AT.
-            //
-            // The group this reply describes must match the request that asked
-            // for it; anything else is a reply for a group the user has left,
-            // and adopting it would move the selection back in time.
-            let replyGroup = list.group ?? forGroup
-            if replyGroup == forGroup {
-                proxies = list.proxies
-            }
-        }
-        if let g = list.group, !g.isEmpty, g == forGroup {
-            // The list and the group name move TOGETHER. This is what makes
-            // `selectGroup` safe to write optimistically: the selection is
-            // committed here, next to the rows it describes.
-            selectedGroup = g
-            pendingSelectedGroup = nil
-        }
         proxiesAvailable = list.available
         // The node read carries the same capability answer as the group read,
         // so a `get_proxies` reply must not leave a stale "supported" behind.
@@ -1235,27 +1190,32 @@ final class AppModel {
         proxiesUnsupportedReason = list.unsupported_reason
     }
 
-    /// Monotonic id for proxy-list requests. Only the newest may commit.
-    private var proxyListGeneration: UInt64 = 0
+    /// Which proxy-list reply may take over the screen.
+    ///
+    /// The rule lives in RequestGeneration so the Go suite executes it. See that
+    /// file for the out-of-order replies this exists to reject.
+    private var proxyListRequests = RequestGeneration()
 
-    /// Begin a proxy-list request and return its generation.
+    /// Begin a proxy-list request and return its stamp.
     ///
     /// Every entry point that reads nodes goes through this, so "the newest
     /// request wins" is a property of the screen rather than of one code path.
     private func beginProxyListRequest() -> UInt64 {
-        proxyListGeneration &+= 1
-        return proxyListGeneration
+        proxyListRequests.begin()
     }
 
     /// Abandon in-flight proxy reads, e.g. when the engine changes underneath.
     ///
-    /// Bumping the generation is enough: replies already in flight stop being
-    /// current and are dropped on arrival. Called when the core generation or the
-    /// config changes, because a list read from the previous engine describes a
+    /// Invalidating is enough: replies already in flight stop being current and
+    /// are dropped on arrival. Called when the core generation or the config
+    /// changes, because a list read from the previous engine describes a
     /// different world.
     func invalidateProxyListRequests() {
-        proxyListGeneration &+= 1
+        proxyListRequests.invalidate()
     }
+
+    /// The current stamp, for comparisons.
+    private var proxyListGeneration: UInt64 { proxyListRequests.value }
 
     // MARK: - Subscriptions
 
@@ -2350,7 +2310,7 @@ final class AppModel {
     /// Live "Test All" state. Distinct from `pending`, which covers one-shot
     /// actions: a group test streams progress and must survive its own request
     /// being outstanding.
-    private(set) var groupTest: ProxyGroupTestState = .idle
+    private(set) var groupTest: GroupTestState = .idle
 
     /// Per-action engine capabilities, refreshed with every proxy list.
     private(set) var proxyActions: ProxyActionCapabilities = .all
