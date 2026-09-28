@@ -34,6 +34,36 @@ import (
 // The service state comes from the existing classifier (DaemonUIStatus.Service)
 // rather than a re-derived guess, so the menu bar and the backend log never
 // disagree about whether the installed service is safe, stale or running.
+// daemonBusyForUnpair refuses unpairing while anything depends on the pairing.
+//
+// Returns nil only when the daemon engine is idle AND no core is running. Both matter:
+// on the daemon engine the running core IS the daemon, and on classic the running
+// config was still built for the identity that would be deleted.
+func (b *Backend) daemonBusyForUnpair() error {
+	if b.ac == nil {
+		return nil
+	}
+	if b.ac.RunningState != nil && b.ac.RunningState.IsRunning() {
+		return &protocol.Error{
+			Code: "daemon_busy",
+			Message: "the VPN is running. Stop it before unpairing the daemon, so the " +
+				"live control channel is not left holding credentials that no longer exist.",
+			Recoverable: true,
+		}
+	}
+	// An operation in flight is a decision already made but not yet applied; unpairing
+	// underneath it would invalidate the identity it is using.
+	if op := b.ops.snapshotOp(); op != nil {
+		return &protocol.Error{
+			Code: "daemon_busy",
+			Message: "another operation (" + op.kind + ") is in progress. Wait for it to " +
+				"finish before unpairing the daemon.",
+			Recoverable: true,
+		}
+	}
+	return nil
+}
+
 func (b *Backend) DaemonStatus() (protocol.DaemonStatusDTO, error) {
 	if b.ac == nil {
 		return protocol.DaemonStatusDTO{
@@ -350,6 +380,20 @@ func (b *Backend) UnpairDaemonForget() (protocol.DaemonStatusDTO, error) {
 		return protocol.DaemonStatusDTO{}, &protocol.Error{
 			Code: "not_ready", Message: "backend not initialised", Recoverable: true,
 		}
+	}
+
+	// AUTHORITATIVE GUARD. The UI disables this control while the daemon is in use,
+	// but a UI is not a safety boundary: a stale frontend, a direct IPC call, or a
+	// race all reach the backend with the constraint unenforced. Unpairing deletes the
+	// client identity, fingerprint and address that a LIVE control channel is built
+	// from — the running VPN keeps using credentials that no longer exist, and the
+	// launcher can no longer manage what it is still responsible for.
+	//
+	// Refusing is the only safe answer. A "safe handover" would mean stopping the VPN
+	// and tearing down the engine as a side effect of an operation the user described
+	// as forgetting a pairing, which is a different and much larger promise.
+	if err := b.daemonBusyForUnpair(); err != nil {
+		return protocol.DaemonStatusDTO{}, err
 	}
 
 	if err := b.ac.UnpairDaemon(); err != nil {

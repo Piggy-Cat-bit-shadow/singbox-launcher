@@ -759,10 +759,58 @@ func (ac *AppController) PairDaemonWithInvite(inviteRaw, secret string) error {
 // UnpairDaemon стирает локальное сопряжение: клиентскую пару, пин, секрет и
 // адрес. Регистрация на стороне демона (если он жив) остаётся — её снимает
 // `sing-box lxd client remove` или полное удаление службы.
+// UnpairDaemon forgets the daemon pairing, and tears down anything still using it.
+//
+// ORDER IS THE TRANSACTION. The previous form deleted the identity FIRST and wrote
+// settings LAST, so a failure in the final step left the client certificate gone while
+// settings still named an address, a fingerprint and a secret. The next launch then
+// looked paired and had no credentials — a state that is very hard to diagnose,
+// because both halves of the evidence point in opposite directions.
+//
+// The settings write now comes first. Failing it leaves everything intact and still
+// paired, which is a state the app can describe and the user can retry. Only once the
+// pairing is forgotten on disk are the credentials removed — and a failure there is
+// reported, but it leaves a state that is unambiguously UNPAIRED rather than torn.
+//
+// The live transport is torn down as well. If the daemon backend is active it holds an
+// established gRPC connection, an admin client and an mTLS transport built from the
+// very identity being deleted. Deleting a certificate from disk does not invalidate an
+// open socket, so the UI would report Pair=false while the old backend could still
+// control the daemon — pairing truth and runtime truth diverging.
 func (ac *AppController) UnpairDaemon() error {
+	if ac == nil || ac.FileService == nil {
+		return fmt.Errorf("no app controller")
+	}
 	ac.clearDaemonSystemProxy("unpaired")
+
+	binDir := ac.FileService.Layout.Data.Bin()
+
+	// (1) Forget the pairing on disk. If this fails nothing has changed yet, so the
+	// state is still "paired" and consistent.
+	st := locale.LoadSettings(binDir)
+	st.DaemonAddress = ""
+	st.DaemonServerFingerprint = ""
+	st.DaemonSecret = ""
+	if err := locale.SaveSettings(binDir, st); err != nil {
+		return fmt.Errorf("the daemon pairing was NOT removed, because saving the "+
+			"settings failed: %w", err)
+	}
+
+	// (2) Tear down the live transport. Done before the credentials are removed so the
+	// connection is closed by its owner rather than left holding a deleted identity.
+	// Best-effort: a failure here must not resurrect the pairing we just forgot, and
+	// the credentials removal below still runs.
+	if err := ac.reloadDaemonBackendAfterUnpair(); err != nil {
+		debuglog.WarnLog("UnpairDaemon: the active daemon transport could not be "+
+			"reset: %v", err)
+	}
+
+	// (3) Remove the credentials. Past this point the state is unambiguously
+	// unpaired: no settings reference the daemon, so a stale certificate is inert
+	// rather than half of a torn pairing.
 	if err := lxdclient.RemoveIdentity(DaemonIdentityDir(ac.FileService.Layout.Data)); err != nil {
-		return err
+		return fmt.Errorf("the daemon pairing was removed, but its client identity "+
+			"could not be deleted: %w", err)
 	}
 	// Файл секрета старой модели (до ревизии владения): больше не создаётся,
 	// но у ранних установок мог остаться — подчищаем.
@@ -770,12 +818,33 @@ func (ac *AppController) UnpairDaemon() error {
 	if err := os.Remove(legacySecretPath); err != nil && !os.IsNotExist(err) {
 		debuglog.WarnLog("UnpairDaemon: remove legacy secret file: %v", err)
 	}
-	binDir := ac.FileService.Layout.Data.Bin()
-	st := locale.LoadSettings(binDir)
-	st.DaemonAddress = ""
-	st.DaemonServerFingerprint = ""
-	st.DaemonSecret = ""
-	return locale.SaveSettings(binDir, st)
+
+	// Tell the rest of the app that the engine is no longer the one it was.
+	ac.publishLifecycleChange()
+	return nil
+}
+
+// reloadDaemonBackendAfterUnpair closes an active daemon backend, since there is no
+// pairing left for it to connect with.
+//
+// Distinct from reloadDaemonBackendIfActive, which REBUILDS a connection using the
+// current settings: after an unpair there are no settings to rebuild from, and
+// rebuilding would attempt a connection with empty credentials.
+func (ac *AppController) reloadDaemonBackendAfterUnpair() error {
+	if ac == nil {
+		return nil
+	}
+	if ac.BackendMode() != BackendDaemon {
+		return nil
+	}
+	// Leaving the daemon engine without a pairing would strand the app on an engine it
+	// cannot reach, so the switch back to classic happens first and carries its own
+	// refusal (a running core) as an error the caller can report.
+	if err := ac.SwitchBackendMode(BackendClassic); err != nil {
+		return err
+	}
+	ac.reloadDaemonBackendIfActive()
+	return nil
 }
 
 // SetDaemonAddress сохраняет откорректированный адрес управляющего канала и
