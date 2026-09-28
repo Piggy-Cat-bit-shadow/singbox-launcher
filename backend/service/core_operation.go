@@ -39,6 +39,15 @@ type coreOperation struct {
 	startedAt time.Time
 }
 
+// adoptOnceState makes the legacy-adoption attempt run at most once per backend.
+//
+// See adoptLegacyConfig: a repeated failed attempt would cost a config build on
+// every snapshot.
+type adoptOnceState struct {
+	once      sync.Once
+	succeeded bool
+}
+
 // coreOpState guards the operation record and the last failure.
 //
 // A dedicated mutex rather than the backend's main one: these fields are written

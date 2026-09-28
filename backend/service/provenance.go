@@ -275,12 +275,25 @@ func (b *Backend) configMatchesState(candidate []byte) bool {
 // A build that fails, or any input it cannot read, means "cannot prove", which
 // means UNKNOWN — never adoption.
 //
+// Attempted at most ONCE per backend instance. A failed attempt usually means
+// the config genuinely is not ours — a hand-written one, or one with no state to
+// reproduce it — and that verdict will not change while the process runs, so
+// retrying on every snapshot would spend a full config build (measured: ~8 ms)
+// per snapshot, on the UI's critical path, forever. The cost is paid once, and a
+// config that later becomes adoptable is picked up on the next launch.
+//
 // Returns true only if the marker was written, so a caller can report the new
 // ownership immediately.
 func (b *Backend) adoptLegacyConfig() bool {
 	if b.ac == nil || b.ac.FileService == nil {
 		return false
 	}
+	b.adoptOnce.once.Do(func() { b.adoptOnce.succeeded = b.tryAdoptLegacyConfig() })
+	return b.adoptOnce.succeeded
+}
+
+// tryAdoptLegacyConfig performs the single adoption attempt.
+func (b *Backend) tryAdoptLegacyConfig() bool {
 	// Only ever for a config that exists and has no verdict yet. An explicit
 	// `managed: false` is evidence of another owner and must not be reconsidered.
 	if b.configOwnership() != OwnershipUnknown || !b.configExists() {

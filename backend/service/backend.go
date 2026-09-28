@@ -31,6 +31,8 @@ type Backend struct {
 	// the UI presents one progress state, and a new run supersedes the old.
 	groupTests groupTestManager
 	ac         *core.AppController
+	// adoptOnce runs the legacy-adoption attempt at most once per instance.
+	adoptOnce adoptOnceState
 	// ops tracks the in-flight start/stop request and the last start failure.
 	// Kept apart from `mu` because a start can block for tens of seconds on a
 	// daemon apply, and holding the snapshot mutex for that long would stall

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"singbox-launcher/core/build"
@@ -546,6 +547,9 @@ func (ac *AppController) mayRebuildConfig() bool {
 // materialized nodes) returns an error, which the caller treats as "cannot
 // prove authorship" rather than as a failure to report.
 func (ac *AppController) BuildConfigReadOnly() ([]byte, error) {
+	if p := configBuildProbe.Load(); p != nil {
+		(*p)()
+	}
 	if ac == nil || ac.StateService == nil {
 		return nil, fmt.Errorf("not initialized")
 	}
@@ -602,4 +606,22 @@ func (ac *AppController) MayRebuildConfig() bool {
 // exactly the check being verified.
 func (ac *AppController) RebuildConfigBeforeStart(forced bool) error {
 	return ac.rebuildConfigBeforeStart(forced)
+}
+
+// configBuildProbe is an optional test hook invoked by BuildConfigReadOnly
+// before it builds.
+//
+// Exists so a test can observe how many times the read-only build actually runs.
+// Asserting on return values cannot do it: a guard that rejects early and a
+// guard that never runs look identical from the outside, which would make the
+// once-per-instance test vacuous.
+var configBuildProbe atomic.Pointer[func()]
+
+// SetConfigBuildProbe installs (or clears, with nil) the build probe.
+func (ac *AppController) SetConfigBuildProbe(probe func()) {
+	if probe == nil {
+		configBuildProbe.Store(nil)
+		return
+	}
+	configBuildProbe.Store(&probe)
 }

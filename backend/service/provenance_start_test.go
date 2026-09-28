@@ -658,3 +658,66 @@ func (b *Backend) opsHasOp(kind string) bool {
 	k, _ := b.ops.snapshot()
 	return k == kind
 }
+
+// TestAdoptionIsAttemptedAtMostOnce — the snapshot path must not pay for a
+// config build on every call.
+//
+// A failed adoption is the COMMON case for a genuinely foreign config, and its
+// verdict cannot change while the process runs. Retrying per snapshot cost a
+// full build (~8 ms measured) on the UI's critical path, forever.
+//
+// The test counts BUILDS, not return values: a second attempt against a config
+// that is now managed would also return false via the ownership guard, so a
+// boolean assertion cannot tell the once-only mechanism apart from that guard.
+// Counting proves the expensive work is not repeated.
+func TestAdoptionIsAttemptedAtMostOnce(t *testing.T) {
+	b := backendWithConfig(t)
+
+	// A config that cannot be reproduced (no state), so adoption must fail.
+	if b.adoptLegacyConfig() {
+		t.Fatal("precondition: this config must not be adoptable")
+	}
+
+	// Replace the candidate build with a counter, so every real attempt is
+	// visible regardless of which guard rejects it.
+	builds := 0
+	b.ac.SetConfigBuildProbe(func() { builds++ })
+	defer b.ac.SetConfigBuildProbe(nil)
+
+	for i := 0; i < 5; i++ {
+		b.adoptLegacyConfig()
+		_ = b.Snapshot()
+	}
+
+	if builds != 0 {
+		t.Errorf("the candidate build ran %d more times after the first attempt; "+
+			"adoption must be attempted once per instance or every snapshot pays "+
+			"for a config build", builds)
+	}
+}
+
+// TestSnapshotDoesNotRewriteConfigOnEveryCall — the read-only guarantee, at the
+// level the app actually exercises.
+func TestSnapshotDoesNotRewriteConfigOnEveryCall(t *testing.T) {
+	b := backendWithConfig(t)
+	b.installOwnershipPolicy()
+
+	before, err := os.ReadFile(b.ac.FileService.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		_ = b.Snapshot()
+	}
+	after, err := os.ReadFile(b.ac.FileService.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("repeated snapshots modified config.json; the provenance path " +
+			"must never write")
+	}
+	if _, err := os.Stat(b.provenancePath()); err == nil {
+		t.Error("a snapshot claimed ownership of a config it could not reproduce")
+	}
+}
