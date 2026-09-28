@@ -776,12 +776,23 @@ final class AppModel {
     /// The flag is set BEFORE the first await, so the window between the click
     /// and any state change is closed: it is not derived from `connection`,
     /// which by definition cannot know about a restart until it is under way.
+    /// Single-flight guard for a backend restart.
+    ///
+    /// The rule lives in SingleFlight so it is executed under test: a double-click
+    /// on Restart used to issue two restarts, and a guard written inline as
+    /// `if !flag` is one hurried edit away from being dropped.
+    private var backendRestart = SingleFlight()
     private(set) var backendRestartInFlight = false
 
     func restart() async {
-        guard !backendRestartInFlight else { return }
+        // Claimed at the click: without this, a second click lands while the first
+        // restart is still running and issues a second stop/start pair.
+        guard backendRestart.begin() else { return }
         backendRestartInFlight = true
-        defer { backendRestartInFlight = false }
+        defer {
+            backendRestart.end()
+            backendRestartInFlight = false
+        }
         await stop()
         // A failed stop leaves the connection `.failed` and the helper alive. Starting
         // now would be the two-helpers case the stop refused to create, so the restart
