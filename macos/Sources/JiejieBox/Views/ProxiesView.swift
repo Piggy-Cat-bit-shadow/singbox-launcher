@@ -477,32 +477,28 @@ struct ProxiesView: View {
         let switching = model.pending == .switchingProxy(node.name)
         let testing = model.pending == .testingProxy(node.name)
 
-        // Availability is decided HERE, not left to the model's withPending
-        // guard. A busy row disables BOTH of its actions — half a row staying
-        // live mid-operation is inconsistent and invites a click that can only
-        // be rejected with "another operation is running".
+        // AVAILABILITY COMES FROM ONE RULE, SHARED WITH THE MODEL'S GUARD.
         //
-        // Across rows the rules differ by operation: switches are serialised
-        // (two would race for the same selection), while measurements are
-        // independent and stay usable unless the whole group is being tested.
+        // `withPending` admits ONE operation at a time, so a second single-node
+        // test is refused by the model — but the row's own disable rule did not
+        // mention that state, leaving every OTHER node's Test control looking
+        // live. Clicking one produced "another operation is running", an error
+        // this screen deliberately does not display, so the user saw a control
+        // that did nothing at all.
         //
-        // `withPending` remains the second line of defence for a rapid click
-        // that slips through; it is no longer the only thing preventing one.
-        let rowBusy = switching || testing
-        let selectDisabled = rowBusy || model.proxyGroupTestInFlight || model.proxySwitchInFlight
-        // MEASUREMENT IS SERIALISED, SO EVERY TEST CONTROL SAYS SO.
-        //
-        // This omitted the "another node is being measured" case, so while node A
-        // was being tested every other row still offered a live Test button —
-        // and the model, which admits one operation at a time, refused the click
-        // with an error this screen deliberately does not show. The user saw a
-        // control that did nothing.
-        //
-        // The rule now comes from the model (`proxySingleTestInFlight`), so the
-        // disable state and the guard cannot describe different products: if
-        // measurement ever becomes concurrent, that one property changes and
-        // every control follows.
-        let testDisabled = rowBusy || model.proxyGroupTestInFlight || model.proxySingleTestInFlight
+        // `proxyRowPolicy` states the product rule once — measurements are
+        // SERIALISED because they share the core's delay endpoint and measurement
+        // table — and both the guard and every control read it. Putting it in
+        // ActionPolicy also means the Go suite EXECUTES it, including the
+        // invariant that no row offers what the model would refuse.
+        let rowPolicy = proxyRowPolicy(
+            rowID: node.id,
+            singleTestInFlightFor: model.singleTestInFlightNodeID,
+            switchInFlightFor: model.switchInFlightNodeID,
+            groupTestRunning: model.proxyGroupTestInFlight,
+            listLoading: model.proxiesLoading)
+        let testDisabled = !rowPolicy.canTest
+        let selectDisabled = !rowPolicy.canSelect
 
         return ActionRow(actions: [
             RowAction(

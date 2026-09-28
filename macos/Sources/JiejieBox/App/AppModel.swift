@@ -275,7 +275,12 @@ final class AppModel {
     /// Keeping the cached list on screen is right — it is the best information
     /// available until a reload — but presenting it as current is not. The list
     /// may remain; it must be LABELLED.
-    var proxyListIsStale: Bool { core?.config_stale == true }
+    var proxyListIsStale: Bool {
+        // Delegates to ActionPolicy so the Go suite executes it: staleness must be
+        // a property of the CONFIG alone, and a rule that consulted the node cache
+        // would report a superseded list as current.
+        isProxyListStale(configStale: core?.config_stale == true)
+    }
 
     /// True when the node list can be trusted as a description of the running
     /// config.
@@ -2243,6 +2248,22 @@ final class AppModel {
         guard let pending else { return false }
         if case .testingProxy = pending { return true }
         return false
+    }
+
+    /// The node a single measurement is running for, if any.
+    ///
+    /// Exposed as the NODE rather than as a bool because the row policy needs to
+    /// know WHICH row is busy: the busy row shows a spinner while every other row
+    /// is merely disabled.
+    var singleTestInFlightNodeID: String? {
+        guard let pending, case .testingProxy(let name) = pending else { return nil }
+        return name
+    }
+
+    /// The node a selection switch is running for, if any.
+    var switchInFlightNodeID: String? {
+        guard let pending, case .switchingProxy(let name) = pending else { return nil }
+        return name
     }
 
     /// Live "Test All" state. Distinct from `pending`, which covers one-shot

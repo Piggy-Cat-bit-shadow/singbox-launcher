@@ -190,3 +190,137 @@ func decideDaemonDestructiveActions(status: DaemonStatus?,
     }
     return DaemonDestructivePolicy(allowed: true, reason: nil)
 }
+
+// MARK: - The Home screen's primary action
+
+/// What the Home screen's primary button does and says.
+enum HomePrimaryAction: Equatable {
+    case start
+    case stop
+    /// Shown while a start or stop is in flight, including the window before the
+    /// backend reports the transition.
+    case starting
+    case stopping
+    /// Retry a failure the backend considers retryable.
+    case retry
+    /// A DETERMINISTIC failure: send the user to the details instead of offering a
+    /// retry that cannot succeed.
+    case reviewDetails
+
+    /// Whether the button issues a lifecycle command, as opposed to reporting.
+    var isCommand: Bool {
+        switch self {
+        case .start, .stop, .retry: return true
+        case .starting, .stopping, .reviewDetails: return false
+        }
+    }
+}
+
+/// Decide the Home button's action.
+///
+/// THE DEFECT THIS MODELS. `CoreStatus.recoverable` exists to say "retrying this
+/// will not help" — an occupied port, a missing binary, a bad bind address — and
+/// the protocol documents it as exactly that. The button ignored it and always read
+/// "Retry", so a user clicked Start in a loop against a failure that could never
+/// succeed, with no path to the information that explained it.
+///
+/// Two details that must stay right:
+///
+///   * `recoverable == nil` means an older backend that cannot answer, and is
+///     treated as RETRYABLE. Guessing "unrecoverable" would remove the only way
+///     forward from a core that might well start on the next attempt.
+///
+///   * A pending command outranks the reported state. `start_core` returns before
+///     the core reaches `starting`, so relying on state alone left a window where
+///     the button still read "Start" after being clicked, inviting a second click.
+func homePrimaryAction(state: CoreState?,
+                       pendingStart: Bool,
+                       pendingStop: Bool,
+                       recoverable: Bool?) -> HomePrimaryAction {
+    // Pending first: the user's own click is the freshest evidence about what is
+    // happening, and the backend has not necessarily caught up.
+    if pendingStart { return .starting }
+    if pendingStop { return .stopping }
+    guard let state else { return .start }
+    switch state {
+    case .running: return .stop
+    case .starting: return .starting
+    case .stopping: return .stopping
+    case .stopped: return .start
+    case .error:
+        // Only an explicit `false` blocks the retry. Unknown stays retryable.
+        return recoverable == false ? .reviewDetails : .retry
+    }
+}
+
+/// Whether a core error should offer a generic retry.
+///
+/// Split out because the same question is asked by more than one control, and a
+/// second implementation of it is how the two drift apart.
+func coreErrorOffersRetry(recoverable: Bool?) -> Bool {
+    recoverable != false
+}
+
+// MARK: - Proxy screen action policy
+
+/// What one proxy row may offer, given what the screen is already doing.
+struct ProxyRowPolicy: Equatable {
+    /// Whether the row's Test control is offered at all.
+    let canTest: Bool
+    /// Whether the row's selection control is offered.
+    let canSelect: Bool
+    /// Whether the row is the node a switch is currently in flight for.
+    let isSwitching: Bool
+    /// Whether the row is being measured right now.
+    let isTesting: Bool
+}
+
+/// Decide what a node row may do.
+///
+/// THE DEFECT THAT MADE THIS NECESSARY. `withPending` admits ONE operation at a
+/// time, so a second single-node test is refused by the model — but the row's own
+/// disable rule did not mention that state at all, leaving every OTHER node's Test
+/// control looking live. Clicking one produced "another operation is running", an
+/// error the proxy screen does not even display. The control promised something
+/// the model would refuse, which is the general failure this whole file exists to
+/// prevent.
+///
+/// The product rule is SERIALIZATION: measurements share the core's delay endpoint
+/// and the same measurement table. Naming it here means the guard and every control
+/// read one answer, and making measurement concurrent later changes this function
+/// rather than every row.
+///
+/// - Parameters:
+///   - rowID: the node this row represents.
+///   - singleTestInFlightFor: the node whose single test is running, if any.
+///   - switchInFlightFor: the node a switch is running for, if any.
+///   - groupTestRunning: whether a Test All run is streaming.
+///   - listLoading: whether the node list is being (re)read.
+func proxyRowPolicy(rowID: String,
+                    singleTestInFlightFor: String?,
+                    switchInFlightFor: String?,
+                    groupTestRunning: Bool,
+                    listLoading: Bool) -> ProxyRowPolicy {
+    // ANY node's in-flight operation disables EVERY row's test, because the model
+    // admits one at a time. A row that looked live here would produce a refusal
+    // the user cannot see the reason for.
+    let busyElsewhere = singleTestInFlightFor != nil || switchInFlightFor != nil
+    let canTest = !busyElsewhere && !groupTestRunning && !listLoading
+
+    // Selection is serialised for the same reason: two concurrent switches race
+    // for the same selection.
+    let canSelect = switchInFlightFor == nil && !listLoading
+    return ProxyRowPolicy(canTest: canTest,
+                          canSelect: canSelect,
+                          isSwitching: switchInFlightFor == rowID,
+                          isTesting: singleTestInFlightFor == rowID)
+}
+
+/// Whether the shown node list still describes the running config.
+///
+/// Staleness is a property of the CONFIG, not of the list: the nodes on screen may
+/// have been read successfully from a config that has since been superseded. The
+/// screen must say so, because the user is choosing between nodes that the core may
+/// no longer be running — and a list that looks authoritative while being out of
+/// date is worse than one that admits it.
+func isProxyListStale(configStale: Bool) -> Bool { configStale }

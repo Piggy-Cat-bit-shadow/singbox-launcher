@@ -233,10 +233,19 @@ struct HomeView: View {
             // A non-recoverable failure is not retried: the label says "Review
             // details", and pressing it must do that rather than firing the
             // start that the backend just said cannot work.
-            if model.core?.state == .error, model.core?.recoverable == false {
+            // The TAP and the LABEL read the same decision. Deciding them
+            // separately is how a button ends up reading "Review Details" while
+            // still issuing a retry — the two would drift the moment either rule
+            // changed.
+            switch primaryAction {
+            case .reviewDetails:
                 model.path.append(.coreDetails)
-            } else {
+            case .start, .stop, .retry:
                 Task { await model.toggleCore() }
+            case .starting, .stopping:
+                // Nothing to do: the command is already in flight, and the
+                // disabled state above is what prevents a second one.
+                break
             }
         } label: {
             if primaryIsBusy {
@@ -263,31 +272,25 @@ struct HomeView: View {
     /// flight. The pending case matters because `start_core` returns before the
     /// core reaches `starting`, so relying on the state alone left a window
     /// where the button still read L.start.tr(language) after being clicked.
+    private var primaryAction: HomePrimaryAction {
+        // The decision lives in ActionPolicy so the Go suite EXECUTES it. It is
+        // the rule that decides whether a user is offered a retry that cannot
+        // succeed, and whether a click is acknowledged before the backend catches
+        // up — neither of which a source-text check can establish.
+        homePrimaryAction(state: model.core?.state,
+                          pendingStart: model.pending == .startingCore,
+                          pendingStop: model.pending == .stoppingCore,
+                          recoverable: model.core?.recoverable)
+    }
+
     private var primaryTitle: String {
-        if model.pending == .startingCore { return L.starting.tr(language) }
-        if model.pending == .stoppingCore { return L.stopping.tr(language) }
-        guard let state = model.core?.state else { return L.start.tr(language) }
-        switch state {
-        case .running: return L.stop.tr(language)
+        switch primaryAction {
+        case .start: return L.start.tr(language)
+        case .stop: return L.stop.tr(language)
         case .starting: return L.starting.tr(language)
         case .stopping: return L.stopping.tr(language)
-        case .error:
-            // A DETERMINISTIC failure must not offer a generic retry.
-            //
-            // `CoreStatus.recoverable` exists precisely to say "retrying this
-            // will not help", and the protocol documents it as such — but the
-            // button ignored it and always read "Retry", which is what makes a
-            // user click Start in a loop against a failure that cannot succeed
-            // (an occupied port, a missing copy). When the backend says the
-            // failure is not retryable, the primary action says what to do
-            // instead, and `recoverable == nil` (an older backend that cannot
-            // say) is treated as retryable because guessing "unrecoverable"
-            // would remove the only way forward.
-            if model.core?.recoverable == false {
-                return L.reviewDetails.tr(language)
-            }
-            return L.retry.tr(language)
-        case .stopped: return L.start.tr(language)
+        case .retry: return L.retry.tr(language)
+        case .reviewDetails: return L.reviewDetails.tr(language)
         }
     }
 
