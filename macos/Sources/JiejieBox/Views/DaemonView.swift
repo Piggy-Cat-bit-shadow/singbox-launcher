@@ -553,11 +553,15 @@ func openInTerminal(_ command: String, model: AppModel) {
     // The wait is moved off the main thread and the result is reported from the
     // real exit status.
     process.terminationHandler = { proc in
-        let code = proc.terminationStatus
+        // The decision is a named rule so it is EXECUTED by the Go suite: saying
+        // "opened" when the handoff failed leaves the user waiting for a command
+        // that was never typed.
+        let outcome = terminalHandoffOutcome(exitStatus: proc.terminationStatus)
         Task { @MainActor in
-            if code == 0 {
+            switch outcome {
+            case .opened:
                 model.setTransientStatus(L.terminalOpened.tr(model.resolvedLanguage))
-            } else {
+            case .failed:
                 model.setTransientStatus(L.terminalOpenFailed.tr(model.resolvedLanguage))
             }
         }

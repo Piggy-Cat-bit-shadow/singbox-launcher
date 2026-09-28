@@ -324,3 +324,29 @@ func proxyRowPolicy(rowID: String,
 /// no longer be running — and a list that looks authoritative while being out of
 /// date is worse than one that admits it.
 func isProxyListStale(configStale: Bool) -> Bool { configStale }
+
+// MARK: - Launching Terminal
+
+/// What to report after handing a command to Terminal.
+///
+/// THE DEFECT THIS MODELS. `NSWorkspace.open` (and `osascript`) returning means
+/// the request was ACCEPTED, not that Terminal opened. Reporting success at that
+/// point told the user the command was running when nothing had happened — the
+/// worst outcome for a step they are about to sit and wait on, because they wait
+/// for a command that was never even typed.
+///
+/// The honest signal is the helper process's exit status, which is why the report
+/// waits for it. A non-zero status means the handoff failed and the user must be
+/// told so rather than left waiting.
+enum TerminalHandoffOutcome: Equatable {
+    /// The command was handed over; Terminal is opening it.
+    case opened
+    /// The handoff failed. The user must be told, because they are about to wait
+    /// for something that is not happening.
+    case failed
+}
+
+/// Decide what to report from the helper's exit status.
+func terminalHandoffOutcome(exitStatus: Int32) -> TerminalHandoffOutcome {
+    exitStatus == 0 ? .opened : .failed
+}
