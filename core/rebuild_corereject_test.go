@@ -514,3 +514,42 @@ func TestSavedStateDisablerAddressesNodes(t *testing.T) {
 		t.Error("повторное выключение той же причиной объявлено изменением")
 	}
 }
+
+// TestRejectedCandidateNeverReplacesTheGoodConfig — §3 preflight invariant.
+//
+// The pipeline must be: build candidate → validate → promote. Never: overwrite
+// config.json → start → discover it is broken. The reason is not tidiness: the
+// running core reads config.json, and a rejected candidate written to disk would
+// both break the next start AND destroy the last configuration that worked.
+//
+// This pins the negative case directly — the check REJECTS the candidate and the
+// candidate names no node to disable (so the loop gives up immediately), leaving
+// the existing file byte-identical.
+func TestRejectedCandidateNeverReplacesTheGoodConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	good := []byte(`{"good":true}`)
+	if err := os.WriteFile(configPath, good, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A verdict the loop cannot act on: no node tag to disable.
+	chk := &fakeCheck{verdicts: []string{"FATAL decode config: bad json"}}
+	loop := &coreRejectLoop{check: chk.fn, configPath: configPath, disabler: &memDisabler{}}
+
+	out, err := loop.run(buildRound{ConfigJSON: []byte(`{"broken":true}`)}, nil)
+	if err != nil {
+		t.Fatalf("loop returned an error: %v", err)
+	}
+	if out.Promoted {
+		t.Fatal("a config the core REJECTED must never be promoted to config.json")
+	}
+	body, _ := os.ReadFile(configPath)
+	if string(body) != string(good) {
+		t.Fatalf("the rejected candidate overwrote the last working config: got %q, want %q",
+			body, good)
+	}
+	// The candidate must not be left lying next to the real config either.
+	if _, err := os.Stat(candidatePath(configPath)); err == nil {
+		t.Error("the rejected candidate file must be cleaned up, not left on disk")
+	}
+}
